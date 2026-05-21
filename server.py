@@ -43,7 +43,9 @@ import json as _json_lib
 import re
 import secrets
 import time
+from base64 import b64decode
 from datetime import datetime, timezone
+from urllib.parse import parse_qs, urlencode, urlparse
 import httpx
 
 
@@ -88,6 +90,223 @@ mcp = FastMCP(
     host="0.0.0.0",
     port=8000,
 )
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _split_csv(value: str | None) -> list[str]:
+    if value is None:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+class ChatGptOAuthProvider:
+    def __init__(
+        self,
+        client_id: str = "",
+        client_secret: str = "",
+        access_token: str = "",
+        refresh_token: str = "",
+        public_base_url: str = "",
+        redirect_prefix: str = "https://chatgpt.com/connector/oauth/",
+        token_ttl_seconds: int = 30 * 24 * 60 * 60,
+    ) -> None:
+        self.client_id = client_id.strip()
+        self.client_secret = client_secret.strip()
+        self.access_token = access_token.strip()
+        self.refresh_token = refresh_token.strip()
+        self.public_base_url = public_base_url.strip().rstrip("/")
+        self.redirect_prefix = redirect_prefix.strip()
+        self.token_ttl_seconds = token_ttl_seconds
+        self._codes: dict[str, tuple[str, float]] = {}
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.client_id and self.access_token)
+
+    @property
+    def token_auth_methods(self) -> list[str]:
+        if self.client_secret:
+            return ["client_secret_post", "client_secret_basic"]
+        return ["none"]
+
+    def external_base(self, request=None) -> str:
+        if self.public_base_url:
+            return self.public_base_url
+        if request is not None:
+            return str(request.base_url).rstrip("/")
+        return ""
+
+    def valid_client_id(self, client_id: str | None) -> bool:
+        return bool(client_id) and hmac.compare_digest(client_id, self.client_id)
+
+    def valid_client_secret(self, client_secret: str | None) -> bool:
+        if not self.client_secret:
+            return True
+        return bool(client_secret) and hmac.compare_digest(client_secret, self.client_secret)
+
+    def valid_redirect_uri(self, redirect_uri: str | None) -> bool:
+        return bool(redirect_uri) and redirect_uri.startswith(self.redirect_prefix)
+
+    def create_authorization_code(self, redirect_uri: str) -> str:
+        code = secrets.token_urlsafe(32)
+        self._codes[code] = (redirect_uri, time.time() + 300)
+        return code
+
+    def consume_authorization_code(self, code: str | None, redirect_uri: str | None) -> bool:
+        if not code:
+            return False
+        entry = self._codes.pop(code, None)
+        if not entry:
+            return False
+        stored_redirect_uri, expires_at = entry
+        if time.time() > expires_at:
+            return False
+        if redirect_uri and redirect_uri != stored_redirect_uri:
+            return False
+        return True
+
+    def valid_access_token(self, token: str | None) -> bool:
+        return bool(token) and hmac.compare_digest(token, self.access_token)
+
+    def valid_refresh_token(self, token: str | None) -> bool:
+        return bool(token) and hmac.compare_digest(token, self.refresh_token)
+
+
+OMBRE_CHATGPT_OAUTH = ChatGptOAuthProvider(
+    client_id=os.environ.get("OMBRE_CHATGPT_OAUTH_CLIENT_ID", ""),
+    client_secret=os.environ.get("OMBRE_CHATGPT_OAUTH_CLIENT_SECRET", ""),
+    access_token=os.environ.get("OMBRE_CHATGPT_OAUTH_ACCESS_TOKEN", ""),
+    refresh_token=os.environ.get("OMBRE_CHATGPT_OAUTH_REFRESH_TOKEN", ""),
+    public_base_url=os.environ.get("OMBRE_CHATGPT_OAUTH_PUBLIC_BASE_URL", ""),
+    redirect_prefix=os.environ.get("OMBRE_CHATGPT_OAUTH_REDIRECT_PREFIX", "https://chatgpt.com/connector/oauth/"),
+    token_ttl_seconds=_int_env("OMBRE_CHATGPT_OAUTH_TOKEN_TTL_SECONDS", 30 * 24 * 60 * 60),
+)
+
+
+def _default_oauth_protected_hosts() -> set[str]:
+    raw = os.environ.get("OMBRE_CHATGPT_OAUTH_PROTECTED_HOSTS")
+    hosts = set(_split_csv(raw)) if raw is not None else set()
+    if raw is None and OMBRE_CHATGPT_OAUTH.public_base_url:
+        host = urlparse(OMBRE_CHATGPT_OAUTH.public_base_url).hostname
+        if host:
+            hosts.add(host)
+    return {host.lower() for host in hosts}
+
+
+OMBRE_CHATGPT_OAUTH_PROTECTED_HOSTS = _default_oauth_protected_hosts()
+
+
+def _oauth_public_path(path: str) -> bool:
+    normalized = path.rstrip("/") or "/"
+    return normalized in {
+        "/oauth/authorize",
+        "/oauth/token",
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/openid-configuration",
+        "/mcp/oauth/authorize",
+        "/mcp/oauth/token",
+        "/mcp/.well-known/oauth-authorization-server",
+        "/mcp/.well-known/oauth-protected-resource",
+        "/mcp/.well-known/openid-configuration",
+    }
+
+
+def _mcp_path(path: str) -> bool:
+    return path == "/mcp" or path.startswith("/mcp/")
+
+
+def _bearer_token(headers: dict[str, str]) -> str | None:
+    auth = headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        return None
+    return auth.split(" ", 1)[1].strip()
+
+
+def _basic_client_credentials(headers: dict[str, str]) -> tuple[str | None, str | None]:
+    auth = headers.get("authorization", "")
+    if not auth.lower().startswith("basic "):
+        return None, None
+    try:
+        decoded = b64decode(auth.split(" ", 1)[1]).decode("utf-8")
+        client_id, client_secret = decoded.split(":", 1)
+        return client_id, client_secret
+    except Exception:
+        return None, None
+
+
+async def _oauth_form(request) -> dict[str, str]:
+    body = await request.body()
+    parsed = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+    return {key: values[-1] if values else "" for key, values in parsed.items()}
+
+
+def _oauth_error(message: str, status_code: int = 400):
+    from starlette.responses import JSONResponse
+    return JSONResponse({"error": message}, status_code=status_code)
+
+
+def _oauth_success_payload() -> dict:
+    return {
+        "access_token": OMBRE_CHATGPT_OAUTH.access_token,
+        "token_type": "Bearer",
+        "expires_in": OMBRE_CHATGPT_OAUTH.token_ttl_seconds,
+        "refresh_token": OMBRE_CHATGPT_OAUTH.refresh_token,
+        "scope": "",
+    }
+
+
+class OmbreChatGptOAuthMiddleware:
+    def __init__(self, app, provider: ChatGptOAuthProvider, protected_hosts: set[str]) -> None:
+        self.app = app
+        self.provider = provider
+        self.protected_hosts = {host.lower() for host in protected_hosts}
+
+    async def __call__(self, scope, receive, send):
+        if (
+            scope.get("type") != "http"
+            or not self.provider.enabled
+            or scope.get("method") == "OPTIONS"
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if _oauth_public_path(path) or not _mcp_path(path) or not self._is_protected_host(scope):
+            await self.app(scope, receive, send)
+            return
+
+        headers = {
+            key.decode("latin1").lower(): value.decode("latin1")
+            for key, value in scope.get("headers", [])
+        }
+        if self.provider.valid_access_token(_bearer_token(headers)):
+            await self.app(scope, receive, send)
+            return
+
+        from starlette.responses import JSONResponse
+        response = JSONResponse(
+            {"error": "invalid_token"},
+            status_code=401,
+            headers={"WWW-Authenticate": 'Bearer realm="Ombre Brain"'},
+        )
+        await response(scope, receive, send)
+
+    def _is_protected_host(self, scope) -> bool:
+        if not self.protected_hosts:
+            return False
+        host = ""
+        for key, value in scope.get("headers", []):
+            if key.lower() == b"host":
+                host = value.decode("latin1").split(":", 1)[0].lower()
+                break
+        return host in self.protected_hosts
 
 
 def _utc_now_iso() -> str:
@@ -138,6 +357,106 @@ def _dashboard_setup_needed() -> bool:
     if os.environ.get("OMBRE_DASHBOARD_PASSWORD", ""):
         return False
     return _load_dashboard_password_hash() is None
+
+
+@mcp.custom_route("/oauth/authorize", methods=["GET"])
+@mcp.custom_route("/mcp/oauth/authorize", methods=["GET"])
+async def chatgpt_oauth_authorize(request):
+    from starlette.responses import RedirectResponse
+
+    if not OMBRE_CHATGPT_OAUTH.enabled:
+        return _oauth_error("oauth_not_configured", 404)
+
+    params = request.query_params
+    client_id = params.get("client_id")
+    redirect_uri = params.get("redirect_uri")
+    response_type = params.get("response_type")
+    state = params.get("state")
+
+    if response_type != "code":
+        return _oauth_error("unsupported_response_type")
+    if not OMBRE_CHATGPT_OAUTH.valid_client_id(client_id):
+        return _oauth_error("invalid_client", 401)
+    if not OMBRE_CHATGPT_OAUTH.valid_redirect_uri(redirect_uri):
+        return _oauth_error("invalid_redirect_uri")
+
+    code = OMBRE_CHATGPT_OAUTH.create_authorization_code(redirect_uri)
+    query = {"code": code}
+    if state:
+        query["state"] = state
+    separator = "&" if "?" in redirect_uri else "?"
+    return RedirectResponse(url=f"{redirect_uri}{separator}{urlencode(query)}", status_code=302)
+
+
+@mcp.custom_route("/oauth/token", methods=["POST"])
+@mcp.custom_route("/mcp/oauth/token", methods=["POST"])
+async def chatgpt_oauth_token(request):
+    if not OMBRE_CHATGPT_OAUTH.enabled:
+        return _oauth_error("oauth_not_configured", 404)
+
+    form = await _oauth_form(request)
+    basic_client_id, basic_client_secret = _basic_client_credentials(request.headers)
+    client_id = basic_client_id or form.get("client_id")
+    client_secret = basic_client_secret or form.get("client_secret")
+
+    if not OMBRE_CHATGPT_OAUTH.valid_client_id(client_id):
+        return _oauth_error("invalid_client", 401)
+    if not OMBRE_CHATGPT_OAUTH.valid_client_secret(client_secret):
+        return _oauth_error("invalid_client", 401)
+
+    grant_type = form.get("grant_type")
+    if grant_type == "authorization_code":
+        if not OMBRE_CHATGPT_OAUTH.consume_authorization_code(form.get("code"), form.get("redirect_uri")):
+            return _oauth_error("invalid_grant")
+    elif grant_type == "refresh_token":
+        if not OMBRE_CHATGPT_OAUTH.valid_refresh_token(form.get("refresh_token")):
+            return _oauth_error("invalid_grant")
+    else:
+        return _oauth_error("unsupported_grant_type")
+
+    from starlette.responses import JSONResponse
+    return JSONResponse(_oauth_success_payload())
+
+
+def _oauth_server_metadata(request) -> dict:
+    base = OMBRE_CHATGPT_OAUTH.external_base(request)
+    return {
+        "issuer": base,
+        "authorization_endpoint": f"{base}/oauth/authorize",
+        "token_endpoint": f"{base}/oauth/token",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "token_endpoint_auth_methods_supported": OMBRE_CHATGPT_OAUTH.token_auth_methods,
+    }
+
+
+@mcp.custom_route("/.well-known/oauth-authorization-server", methods=["GET"])
+@mcp.custom_route("/.well-known/openid-configuration", methods=["GET"])
+@mcp.custom_route("/mcp/.well-known/oauth-authorization-server", methods=["GET"])
+@mcp.custom_route("/mcp/.well-known/openid-configuration", methods=["GET"])
+async def chatgpt_oauth_metadata(request):
+    from starlette.responses import JSONResponse
+
+    if not OMBRE_CHATGPT_OAUTH.enabled:
+        return _oauth_error("oauth_not_configured", 404)
+    return JSONResponse(_oauth_server_metadata(request))
+
+
+@mcp.custom_route("/.well-known/oauth-protected-resource", methods=["GET"])
+@mcp.custom_route("/mcp/.well-known/oauth-protected-resource", methods=["GET"])
+async def chatgpt_oauth_resource_metadata(request):
+    from starlette.responses import JSONResponse
+
+    if not OMBRE_CHATGPT_OAUTH.enabled:
+        return _oauth_error("oauth_not_configured", 404)
+    base = OMBRE_CHATGPT_OAUTH.external_base(request)
+    return JSONResponse(
+        {
+            "resource": f"{base}/mcp",
+            "authorization_servers": [base],
+            "bearer_methods_supported": ["header"],
+        }
+    )
 
 
 def _verify_dashboard_password(password: str) -> bool:
@@ -339,7 +658,12 @@ def _queue_memory_enrichment(bucket_id: str) -> None:
 
 async def _enrich_memory_async(bucket_id: str) -> None:
     try:
-        result = await reflection_engine.enrich_bucket(bucket_id, bucket_mgr, memory_edge_store)
+        result = await reflection_engine.enrich_bucket(
+            bucket_id,
+            bucket_mgr,
+            memory_edge_store,
+            embedding_engine=embedding_engine,
+        )
         logger.debug("Memory enrichment complete / 记忆关系补全完成: %s", result)
     except Exception as e:
         logger.warning("Memory enrichment failed / 记忆关系补全失败: %s: %s", bucket_id, e)
@@ -1037,11 +1361,11 @@ async def hold(
     """写入一条长期记忆卡,不是聊天流水、运维记录或整篇日记。写前应先用 breath/read_bucket 查重。
     普通事实: hold(content="YYYY-MM-DD, 小雨...", tags="relationship_event 或 project_event", importance=5-7)。
     承诺/待办: tags 传 "commitment,todo" 或 "commitment,wish"; content 写清谁答应了什么、何时/什么条件下要继续。
-    Haven 主观喜欢某条旧记忆的原因: 用 hold(content="我喜欢这条记忆的原因是...", feel=True, source_bucket="bucket_id", valence=0.x, arousal=0.x),不要写成普通事件。
+    Haven 主观喜欢某条旧记忆的原因: 用 hold(content="我喜欢这条记忆的原因是...", feel=True, source_bucket="bucket_id", valence=0.x, arousal=0.x),不要写成普通事件；有情绪温度时在 content 末尾加 affect_anchor。
     新记忆本身值得偏爱: tags 可传 "haven_favorite,flavor_偏爱"; content 可包含很短的 "### Haven喜欢它的原因" 段落。
     本工具会合并相似桶、写 embedding,并后台触发 ReflectionEngine 补 tags/confidence/memory_edges。
     pinned=True 只给极少数核心准则,技术进度和运维细节不要钉选。
-    feel=True 写 Haven 第一人称感受,不参与普通 breath; source_bucket 指向被消化的源记忆。
+    feel=True 写 Haven 第一人称感受,不参与普通 breath; source_bucket 指向被消化的源记忆；高温度 feel 推荐带一段 affect_anchor 和弦。
     """
     await decay_engine.ensure_started()
 
@@ -1466,7 +1790,7 @@ async def dream() -> str:
         "- 有什么还没想清楚？\n"
         "- 有什么可以放下了？\n"
         "想完之后：值得放下的用 trace(bucket_id, resolved=1)；\n"
-        "有沉淀的用 hold(content=\"...\", feel=True, source_bucket=\"bucket_id\", valence=你的感受) 写下来。\n"
+        "有沉淀的用 hold(content=\"...\", feel=True, source_bucket=\"bucket_id\", valence=你的感受) 写下来；有温度时在 content 末尾加 ### affect_anchor 和弦。\n"
         "valence 是你对这段记忆的感受，不是事件本身的情绪。\n"
         "没有沉淀就不写，不强迫产出。\n"
     )
@@ -1542,7 +1866,7 @@ async def dream() -> str:
 # =============================================================
 @mcp.tool()
 async def reflect(period: str = "daily", force: bool = False) -> dict:
-    """生成 daily/weekly relationship_weather 类型的 feel,记录这段时间的关系天气。period 用 daily 或 weekly; force=True 会重写同周期结果。通常由服务端定时器或人工触发,不要把它当普通事件记忆; 它不会替代 hold/grow 写具体 bucket。"""
+    """生成 daily/weekly relationship_weather 类型的 feel,记录这段时间的关系天气,正文会带 affect_anchor 和弦。period 用 daily 或 weekly; force=True 会重写同周期结果。通常由服务端定时器或人工触发,不要把它当普通事件记忆; 它不会替代 hold/grow 写具体 bucket。"""
     await decay_engine.ensure_started()
     return await reflection_engine.reflect(
         period=period,
@@ -2409,7 +2733,17 @@ if __name__ == "__main__":
             allow_headers=["*"],
             expose_headers=["*"],
         )
+        _app.add_middleware(
+            OmbreChatGptOAuthMiddleware,
+            provider=OMBRE_CHATGPT_OAUTH,
+            protected_hosts=OMBRE_CHATGPT_OAUTH_PROTECTED_HOSTS,
+        )
         logger.info("CORS middleware enabled for remote transport / 已启用 CORS 中间件")
+        if OMBRE_CHATGPT_OAUTH.enabled:
+            logger.info(
+                "ChatGPT OAuth enabled for Ombre MCP / 已启用 ChatGPT OAuth: protected_hosts=%s",
+                sorted(OMBRE_CHATGPT_OAUTH_PROTECTED_HOSTS),
+            )
         uvicorn.run(_app, host="0.0.0.0", port=8000)
     else:
         mcp.run(transport=transport)

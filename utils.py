@@ -83,6 +83,8 @@ def load_config(config_path: str = None) -> dict:
             "recent_context_budget": 300,
             "recalled_memory_budget": 400,
             "relationship_weather_budget": 220,
+            "favorite_memory_budget": 180,
+            "favorite_memory_max_cards": 1,
             "related_memory_budget": 220,
             "semantic_weight": 0.45,
             "keyword_weight": 0.35,
@@ -148,6 +150,9 @@ def load_config(config_path: str = None) -> dict:
             "weekly_day": 0,
             "weekly_hour": 4,
             "check_interval_minutes": 60,
+            "candidate_limit": 18,
+            "candidate_recent_limit": 8,
+            "candidate_semantic_limit": 6,
             "edge_min_confidence": 0.55,
         },
     }

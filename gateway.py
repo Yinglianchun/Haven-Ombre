@@ -83,6 +83,8 @@ class GatewayService:
         self.recent_budget = int(self.gateway_cfg.get("recent_context_budget", 300))
         self.recalled_budget = int(self.gateway_cfg.get("recalled_memory_budget", 400))
         self.relationship_weather_budget = int(self.gateway_cfg.get("relationship_weather_budget", 220))
+        self.favorite_memory_budget = int(self.gateway_cfg.get("favorite_memory_budget", 180))
+        self.favorite_memory_max_cards = max(0, int(self.gateway_cfg.get("favorite_memory_max_cards", 1)))
         self.related_memory_budget = int(self.gateway_cfg.get("related_memory_budget", 220))
 
         self.semantic_weight = float(self.gateway_cfg.get("semantic_weight", 0.45))
@@ -334,6 +336,7 @@ class GatewayService:
         recalled_buckets = await self._select_dynamic_buckets(query, session_id, all_buckets)
         recalled_memory = await self._summarize_buckets(recalled_buckets, self.recalled_budget)
         relationship_weather = await self._build_relationship_weather_block(all_buckets)
+        favorite_memory, favorite_ids = await self._build_favorite_memory_block(all_buckets, session_id)
         related_memory = await self._build_related_memory_block(recalled_buckets, all_buckets)
         stable_context, dynamic_context = self._build_injected_context_messages(
             persona_block=persona_block,
@@ -341,6 +344,7 @@ class GatewayService:
             recent_context=recent_context,
             recalled_memory=recalled_memory,
             relationship_weather=relationship_weather,
+            favorite_memory=favorite_memory,
             related_memory=related_memory,
         )
 
@@ -354,7 +358,10 @@ class GatewayService:
         )
         self._apply_prompt_cache_hints(forward_payload, session_id)
         forward_payload["stream"] = payload.get("stream") is True
-        return forward_payload, [bucket["id"] for bucket in recalled_buckets]
+        injected_ids = list(
+            dict.fromkeys([bucket["id"] for bucket in recalled_buckets] + favorite_ids)
+        )
+        return forward_payload, injected_ids
 
     def _apply_prompt_cache_hints(self, payload: dict[str, Any], session_id: str) -> None:
         model = str(payload.get("model") or "").strip()
@@ -1428,6 +1435,64 @@ class GatewayService:
                 break
         return "\n".join(parts)
 
+    async def _build_favorite_memory_block(
+        self,
+        all_buckets: list[dict],
+        session_id: str,
+    ) -> tuple[str, list[str]]:
+        if self.favorite_memory_budget <= 0 or self.favorite_memory_max_cards <= 0:
+            return "", []
+
+        recent_ids = self.state_store.get_recent_bucket_ids(session_id, self.skip_recent_rounds)
+        candidates = []
+        for bucket in all_buckets:
+            meta = bucket.get("metadata", {})
+            tags = {str(tag) for tag in meta.get("tags", [])}
+            if "haven_favorite" not in tags:
+                continue
+            if meta.get("resolved") or meta.get("digested"):
+                continue
+            candidates.append(bucket)
+
+        if not candidates:
+            return "", []
+
+        active_pool = [bucket for bucket in candidates if bucket.get("id") not in recent_ids] or candidates
+
+        def favorite_key(bucket: dict) -> tuple[int, int, int, str]:
+            meta = bucket.get("metadata", {})
+            tags = {str(tag) for tag in meta.get("tags", [])}
+            flavor_count = sum(1 for tag in tags if tag.startswith("flavor_"))
+            protected = 1 if (meta.get("anchor") or meta.get("pinned") or meta.get("protected")) else 0
+            return (
+                protected,
+                flavor_count,
+                int(meta.get("importance", 5)),
+                str(meta.get("last_active") or meta.get("created") or ""),
+            )
+
+        active_pool.sort(key=favorite_key, reverse=True)
+        selected = active_pool[: self.favorite_memory_max_cards]
+        remaining = self.favorite_memory_budget
+        parts = []
+        selected_ids = []
+        for bucket in selected:
+            summary = await self._summarize_bucket(bucket)
+            tokens = count_tokens_approx(summary)
+            if tokens <= 0:
+                continue
+            if tokens > remaining and parts:
+                break
+            if tokens > remaining:
+                summary = self._trim_text(summary, remaining)
+                tokens = count_tokens_approx(summary)
+            parts.append(f"- {summary}")
+            selected_ids.append(bucket["id"])
+            remaining -= tokens
+            if remaining <= 0:
+                break
+        return "\n".join(parts), selected_ids
+
     async def _build_related_memory_block(
         self,
         recalled_buckets: list[dict],
@@ -1624,6 +1689,7 @@ class GatewayService:
         recent_context: str,
         recalled_memory: str,
         relationship_weather: str,
+        favorite_memory: str,
         related_memory: str,
     ) -> tuple[str, str]:
         stable_sections = [
@@ -1640,6 +1706,9 @@ class GatewayService:
             "",
             "Relationship Weather",
             relationship_weather or "(none)",
+            "",
+            "Haven Favorite Memory",
+            favorite_memory or "(none)",
             "",
             "Recent Context",
             recent_context or "(none)",

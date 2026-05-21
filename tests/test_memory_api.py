@@ -17,6 +17,11 @@ class DummyRequest:
     async def json(self):
         return self._body
 
+    async def body(self):
+        if isinstance(self._body, bytes):
+            return self._body
+        return json.dumps(self._body or {}).encode("utf-8")
+
 
 @pytest.mark.asyncio
 async def test_create_memory_api_requires_write_token(monkeypatch, bucket_mgr):
@@ -125,3 +130,66 @@ async def test_dashboard_auth_setup_uses_state_dir(monkeypatch, test_config):
 
     assert response.status_code == 200
     assert os.path.exists(auth_file)
+
+
+def test_chatgpt_oauth_provider_issues_single_use_codes():
+    import server
+
+    provider = server.ChatGptOAuthProvider(
+        client_id="client",
+        client_secret="secret",
+        access_token="access",
+        refresh_token="refresh",
+        public_base_url="https://23456544321123.asia/ombre",
+    )
+    redirect_uri = "https://chatgpt.com/connector/oauth/test"
+
+    code = provider.create_authorization_code(redirect_uri)
+
+    assert provider.enabled is True
+    assert provider.token_auth_methods == ["client_secret_post", "client_secret_basic"]
+    assert provider.consume_authorization_code(code, redirect_uri) is True
+    assert provider.consume_authorization_code(code, redirect_uri) is False
+    assert provider.valid_access_token("access") is True
+    assert provider.valid_refresh_token("refresh") is True
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_oauth_middleware_protects_only_configured_host():
+    import server
+
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    provider = server.ChatGptOAuthProvider(
+        client_id="client",
+        access_token="access",
+        public_base_url="https://23456544321123.asia/ombre",
+    )
+    middleware = server.OmbreChatGptOAuthMiddleware(app, provider, {"23456544321123.asia"})
+
+    async def call(headers):
+        messages = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            messages.append(message)
+
+        await middleware(
+            {"type": "http", "method": "GET", "path": "/mcp", "headers": headers},
+            receive,
+            send,
+        )
+        return next(message["status"] for message in messages if message["type"] == "http.response.start")
+
+    assert await call([(b"host", b"23456544321123.asia")]) == 401
+    assert await call([(b"host", b"8.136.154.242")]) == 204
+    assert await call(
+        [
+            (b"host", b"23456544321123.asia"),
+            (b"authorization", b"Bearer access"),
+        ]
+    ) == 204
