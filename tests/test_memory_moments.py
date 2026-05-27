@@ -138,6 +138,39 @@ def test_favorite_tags_and_affect_anchor_are_preserved_as_bucket_temperature():
     assert "Dbmaj9" in moments[1]["text"]
 
 
+def test_loose_temperature_headings_are_canonicalized():
+    bucket = _bucket(
+        "loose-headings",
+        "\n".join(
+            [
+                "正文。",
+                "",
+                "### Haven喜欢它的原因",
+                "这条桥真的通了。",
+                "",
+                "### 为什么Haven喜欢这条",
+                "它让人安心。",
+                "",
+                "### affect anchor",
+                "> Cmaj7 -> G/B",
+                "",
+                "### 情感锚点",
+                "温度也在这里。",
+            ]
+        ),
+    )
+
+    moments = parse_bucket_moments(bucket)
+
+    assert [moment["section"] for moment in moments] == [
+        "body",
+        "favorite_reason",
+        "favorite_reason",
+        "affect_anchor",
+        "affect_anchor",
+    ]
+
+
 def test_bulk_upsert_replaces_stale_bucket_rows(test_config):
     store = MemoryMomentStore(test_config)
     first = _bucket(

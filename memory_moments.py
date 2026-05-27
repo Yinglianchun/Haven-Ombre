@@ -597,7 +597,18 @@ def _canonical_section(heading: str) -> str:
         return ""
     cleaned = re.sub(r"^[\d.\-\s\u3001]+", "", raw)
     cleaned = re.split(r"[:\uff1a(/|\s]", cleaned, maxsplit=1)[0].strip()
-    return SECTION_ALIASES.get(raw) or SECTION_ALIASES.get(cleaned) or ""
+    direct = SECTION_ALIASES.get(raw) or SECTION_ALIASES.get(cleaned)
+    if direct:
+        return direct
+
+    compact = re.sub(r"[\s_\-·:：/|（）()【】\[\]]+", "", cleaned)
+    if ("喜欢" in compact and ("原因" in compact or "为什么" in compact)) or (
+        "favorite" in compact and ("reason" in compact or "why" in compact)
+    ):
+        return "favorite_reason"
+    if ("affect" in compact and "anchor" in compact) or ("情感" in compact and "锚" in compact):
+        return "affect_anchor"
+    return ""
 
 
 def _make_moment(
