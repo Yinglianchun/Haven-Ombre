@@ -15,6 +15,8 @@ from utils import bucket_text_for_embedding, strip_wikilinks
 
 logger = logging.getLogger("ombre_brain.reflection")
 
+DAILY_REFLECTION_MIN_BUCKETS = 5
+
 
 CLASSIFY_PROMPT = """你是 Ombre-Brain 的记忆关系整理器。
 输入是一条新记忆和若干旧记忆候选。请只根据文本中能看见的内容，给新记忆补轻量分类和关系边。
@@ -175,6 +177,7 @@ class ReflectionEngine:
 
         self.enabled = bool(cfg.get("enabled", True))
         self.auto_enabled = bool(cfg.get("auto_enabled", True))
+        self.daily_enabled = bool(cfg.get("daily_enabled", True))
         self.enrich_on_write = bool(cfg.get("enrich_on_write", True))
         self.memory_affect_anchor_enabled = bool(cfg.get("memory_affect_anchor_enabled", True))
         self.relationship_weather_affect_anchor_enabled = bool(
@@ -333,6 +336,14 @@ class ReflectionEngine:
                 "diary_memory": {"status": "not_applicable", "reason": "reflection_disabled"},
             }
         period = self._normalize_period(period)
+        if period == "daily" and not self.daily_enabled:
+            return {
+                "status": "skipped",
+                "reason": "daily_disabled",
+                "period": period,
+                "diary": {"found": False},
+                "diary_memory": {"status": "not_applicable", "reason": "daily_disabled"},
+            }
         if period == "weekly" and not self.weekly_enabled:
             return {
                 "status": "skipped",
@@ -355,6 +366,34 @@ class ReflectionEngine:
             }
 
         materials = await self._reflection_materials(period, now_local, bucket_mgr, persona_engine)
+        if period == "daily" and len(materials["buckets"]) < DAILY_REFLECTION_MIN_BUCKETS:
+            diary_memory = await self._maybe_extract_diary_memory(
+                period,
+                key,
+                now_local,
+                materials,
+                bucket_mgr,
+                embedding_engine,
+            )
+            return {
+                "status": "skipped",
+                "reason": "insufficient_daily_memory",
+                "period": period,
+                "id": bucket_id,
+                "date": key,
+                "diary": {
+                    "found": bool(materials.get("diary")),
+                    "diary_id": materials.get("diary", {}).get("id") if materials.get("diary") else None,
+                },
+                "diary_memory": diary_memory,
+                "materials": {
+                    "buckets": len(materials["buckets"]),
+                    "daily_impressions": len(materials["daily_impressions"]),
+                    "persona_events": len(materials["persona_events"]),
+                    "commitments": len(materials["commitments"]),
+                    "min_buckets": DAILY_REFLECTION_MIN_BUCKETS,
+                },
+            }
         if not materials["buckets"] and not materials["daily_impressions"] and not materials["persona_events"] and not materials["diary"] and not force:
             return {
                 "status": "empty",
@@ -474,8 +513,9 @@ class ReflectionEngine:
             return []
         now_local = self._local_now()
         results = []
-        if now_local.hour >= self.daily_hour:
-            daily_target = now_local - timedelta(days=1)
+        if self.daily_enabled and now_local.hour >= self.daily_hour:
+            daily_date = (now_local - timedelta(days=1)).date()
+            daily_target = datetime.combine(daily_date, time.max, tzinfo=self.tz)
             results.append(
                 await self.reflect("daily", bucket_mgr, persona_engine, embedding_engine, force=False, now=daily_target)
             )
@@ -623,12 +663,14 @@ class ReflectionEngine:
         for bucket in all_buckets:
             meta = bucket.get("metadata", {})
             tags = {str(tag) for tag in meta.get("tags", [])}
-            created = self._to_local(meta.get("created") or meta.get("updated_at"))
-            if created and start <= created <= end:
-                if period == "weekly" and meta.get("type") == "feel" and "daily_impression" in tags:
-                    daily_impressions.append(self._memory_payload(bucket, content_limit=360))
-                elif meta.get("type") != "feel":
-                    buckets.append(self._memory_payload(bucket, content_limit=420))
+            created = self._to_local(meta.get("created"))
+            updated = self._to_local(meta.get("updated_at"))
+            created_in_window = bool(created and start <= created <= end)
+            updated_in_window = bool(updated and start <= updated <= end)
+            if period == "weekly" and meta.get("type") == "feel" and "daily_impression" in tags and created_in_window:
+                daily_impressions.append(self._memory_payload(bucket, content_limit=360))
+            elif meta.get("type") != "feel" and (created_in_window or updated_in_window):
+                buckets.append(self._memory_payload(bucket, content_limit=420))
             if tags & {"commitment", "todo", "wish"} and not meta.get("resolved"):
                 commitments.append(self._memory_payload(bucket, content_limit=260))
 
@@ -792,8 +834,9 @@ class ReflectionEngine:
                 continue
             if str(meta.get("date") or meta.get("event_date") or "") == key:
                 return True
-            created = self._to_local(meta.get("created") or meta.get("updated_at"))
-            if created and start <= created <= end:
+            created = self._to_local(meta.get("created"))
+            updated = self._to_local(meta.get("updated_at"))
+            if (created and start <= created <= end) or (updated and start <= updated <= end):
                 return True
         return False
 

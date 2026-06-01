@@ -4935,6 +4935,12 @@ async def api_config_get(request):
             "identity_anchor_id": dream_cfg.get("identity_anchor_id", ""),
         },
         "reflection": {
+            "daily_enabled": bool(
+                reflection_cfg.get(
+                    "daily_enabled",
+                    getattr(reflection_engine, "daily_enabled", True),
+                )
+            ),
             "memory_affect_anchor_enabled": bool(
                 reflection_cfg.get(
                     "memory_affect_anchor_enabled",
@@ -5055,7 +5061,7 @@ async def api_config_update(request):
     if "reflection" in body:
         r = body["reflection"]
         reflection_cfg = config.setdefault("reflection", {})
-        for key in ("memory_affect_anchor_enabled", "relationship_weather_affect_anchor_enabled"):
+        for key in ("daily_enabled", "memory_affect_anchor_enabled", "relationship_weather_affect_anchor_enabled"):
             if key in r:
                 reflection_cfg[key] = bool(r[key])
                 setattr(reflection_engine, key, reflection_cfg[key])
@@ -5126,7 +5132,7 @@ async def api_config_update(request):
 
             if "reflection" in body:
                 sc_reflection = save_config.setdefault("reflection", {})
-                for key in ("memory_affect_anchor_enabled", "relationship_weather_affect_anchor_enabled"):
+                for key in ("daily_enabled", "memory_affect_anchor_enabled", "relationship_weather_affect_anchor_enabled"):
                     if key in body["reflection"]:
                         sc_reflection[key] = bool(body["reflection"][key])
 
@@ -5438,6 +5444,9 @@ if __name__ == "__main__":
             while True:
                 try:
                     reflection_cfg = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
+                    local_reflection_engine.daily_enabled = bool(
+                        reflection_cfg.get("daily_enabled", True)
+                    )
                     local_reflection_engine.memory_affect_anchor_enabled = bool(
                         reflection_cfg.get("memory_affect_anchor_enabled", True)
                     )

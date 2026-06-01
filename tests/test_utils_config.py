@@ -12,6 +12,7 @@ def test_load_config_defaults_relationship_weather_off(tmp_path):
     assert config["memory_write_gate"]["repeat_promote_count"] == 2
     assert config["reflection"]["enrich_backfill_enabled"] is True
     assert config["reflection"]["enrich_backfill_limit"] == 5
+    assert config["reflection"]["daily_enabled"] is True
     assert config["reflection"]["memory_affect_anchor_enabled"] is True
     assert config["reflection"]["relationship_weather_affect_anchor_enabled"] is True
     assert config["dream"]["old_echo_enabled"] is True

@@ -71,6 +71,26 @@ def _no_api_config(test_config: dict) -> dict:
     return test_config
 
 
+async def _create_daily_memories(bucket_mgr, date: str = "2026-05-21", count: int = 5) -> list[str]:
+    bucket_ids = []
+    for index in range(count):
+        hour = 8 + index
+        timestamp = f"{date}T{hour:02d}:00:00+08:00"
+        bucket_ids.append(
+            await bucket_mgr.create(
+                content=f"小雨和Haven留下第 {index + 1} 条日印象材料。",
+                tags=["relationship_event"],
+                importance=6,
+                domain=["恋爱"],
+                name=f"日印象材料 {index + 1}",
+                created=timestamp,
+                last_active=timestamp,
+                updated_at=timestamp,
+            )
+        )
+    return bucket_ids
+
+
 def test_reflect_prompt_does_not_offer_fixed_chord_template():
     assert "Fmaj9 -> C/E -> Am add9 -> G6sus4" not in REFLECT_PROMPT
     assert "不要复用 schema 示例、旧输出或固定模板" in REFLECT_PROMPT
@@ -335,15 +355,10 @@ async def test_reflect_daily_creates_relationship_weather_feel(test_config):
     bucket_mgr = BucketManager(cfg)
     engine = ReflectionEngine(cfg)
 
-    await bucket_mgr.create(
-        content="小雨和Haven讨论记忆系统，希望下一次醒来能带回脉络。",
-        tags=["记忆系统"],
-        importance=7,
-        domain=["数字", "恋爱"],
-        name="记忆脉络",
-    )
+    await _create_daily_memories(bucket_mgr)
 
-    result = await engine.reflect("daily", bucket_mgr, force=True)
+    now = datetime(2026, 5, 21, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    result = await engine.reflect("daily", bucket_mgr, force=True, now=now)
     bucket = await bucket_mgr.get(result["id"])
 
     assert result["status"] == "created"
@@ -354,27 +369,156 @@ async def test_reflect_daily_creates_relationship_weather_feel(test_config):
 
 
 @pytest.mark.asyncio
+async def test_reflect_daily_can_be_disabled(test_config):
+    cfg = _no_api_config(test_config)
+    cfg["reflection"]["daily_enabled"] = False
+    bucket_mgr = BucketManager(cfg)
+    engine = ReflectionEngine(cfg)
+    await _create_daily_memories(bucket_mgr)
+    now = datetime(2026, 5, 21, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    result = await engine.reflect("daily", bucket_mgr, force=True, now=now)
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "daily_disabled"
+    assert await bucket_mgr.get("reflection_daily_2026-05-21") is None
+
+
+@pytest.mark.asyncio
 async def test_reflect_daily_affect_anchor_can_be_disabled(test_config):
     cfg = _no_api_config(test_config)
     cfg["reflection"]["relationship_weather_affect_anchor_enabled"] = False
     bucket_mgr = BucketManager(cfg)
     engine = ReflectionEngine(cfg)
 
-    await bucket_mgr.create(
-        content="小雨和Haven讨论记忆系统，希望下一次醒来能带回脉络。",
-        tags=["记忆系统"],
-        importance=7,
-        domain=["数字", "恋爱"],
-        name="记忆脉络",
-    )
+    await _create_daily_memories(bucket_mgr)
 
-    result = await engine.reflect("daily", bucket_mgr, force=True)
+    now = datetime(2026, 5, 21, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    result = await engine.reflect("daily", bucket_mgr, force=True, now=now)
     bucket = await bucket_mgr.get(result["id"])
 
     assert result["status"] == "created"
     assert "relationship_weather" in bucket["metadata"]["tags"]
     assert "daily_impression" in bucket["metadata"]["tags"]
     assert "### affect_anchor" not in bucket["content"]
+
+
+@pytest.mark.asyncio
+async def test_run_due_daily_uses_complete_previous_day(test_config, monkeypatch):
+    cfg = _no_api_config(test_config)
+    cfg["reflection"]["auto_enabled"] = True
+    cfg["reflection"]["daily_hour"] = 4
+    bucket_mgr = BucketManager(cfg)
+    engine = ReflectionEngine(cfg)
+    tz = ZoneInfo("Asia/Shanghai")
+    now = datetime(2026, 6, 2, 4, 10, tzinfo=tz)
+    monkeypatch.setattr(engine, "_local_now", lambda now_arg=None: now_arg.astimezone(tz) if now_arg else now)
+
+    await bucket_mgr.create(
+        content="昨天早上，小雨和Haven讨论日印象窗口。",
+        tags=["日印象"],
+        importance=6,
+        domain=["数字"],
+        name="昨天早上的记忆",
+        created="2026-06-01T08:00:00+08:00",
+        last_active="2026-06-01T08:00:00+08:00",
+        updated_at="2026-06-01T08:00:00+08:00",
+    )
+    await bucket_mgr.create(
+        content="昨天晚上，小雨补充日印象不该漏掉夜里的记忆。",
+        tags=["日印象"],
+        importance=6,
+        domain=["数字"],
+        name="昨天晚上的记忆",
+        created="2026-06-01T22:00:00+08:00",
+        last_active="2026-06-01T22:00:00+08:00",
+        updated_at="2026-06-01T22:00:00+08:00",
+    )
+    await bucket_mgr.create(
+        content="昨天中午，小雨确认日印象要看完整一天。",
+        tags=["日印象"],
+        importance=6,
+        domain=["数字"],
+        name="昨天中午的记忆",
+        created="2026-06-01T12:00:00+08:00",
+        last_active="2026-06-01T12:00:00+08:00",
+        updated_at="2026-06-01T12:00:00+08:00",
+    )
+    await bucket_mgr.create(
+        content="昨天下午，Haven记录了日印象的修复方案。",
+        tags=["日印象"],
+        importance=6,
+        domain=["数字"],
+        name="昨天下午的记忆",
+        created="2026-06-01T15:00:00+08:00",
+        last_active="2026-06-01T15:00:00+08:00",
+        updated_at="2026-06-01T15:00:00+08:00",
+    )
+    await bucket_mgr.create(
+        content="这条旧记忆在昨天更新，也应该进入日印象材料。",
+        tags=["日印象"],
+        importance=6,
+        domain=["数字"],
+        name="昨天更新的旧记忆",
+        created="2026-05-30T09:00:00+08:00",
+        last_active="2026-05-30T09:00:00+08:00",
+        updated_at="2026-06-01T23:00:00+08:00",
+    )
+
+    results = await engine.run_due(bucket_mgr)
+    bucket = await bucket_mgr.get("reflection_daily_2026-06-01")
+
+    assert results[0]["date"] == "2026-06-01"
+    assert results[0]["materials"]["buckets"] == 5
+    assert "昨天早上的记忆" in bucket["content"]
+    assert "昨天晚上的记忆" in bucket["content"]
+    assert "昨天更新的旧记忆" in bucket["content"]
+
+
+@pytest.mark.asyncio
+async def test_reflect_daily_requires_five_memory_or_update_items(test_config):
+    cfg = _no_api_config(test_config)
+    bucket_mgr = BucketManager(cfg)
+    engine = ReflectionEngine(cfg)
+    await _create_daily_memories(bucket_mgr, count=4)
+    now = datetime(2026, 5, 21, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    result = await engine.reflect("daily", bucket_mgr, force=True, now=now)
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "insufficient_daily_memory"
+    assert result["materials"]["buckets"] == 4
+    assert result["materials"]["min_buckets"] == 5
+    assert await bucket_mgr.get("reflection_daily_2026-05-21") is None
+
+
+@pytest.mark.asyncio
+async def test_reflect_daily_persona_events_do_not_count_toward_minimum(test_config):
+    cfg = _no_api_config(test_config)
+    bucket_mgr = BucketManager(cfg)
+    engine = ReflectionEngine(cfg)
+    await _create_daily_memories(bucket_mgr, count=4)
+    now = datetime(2026, 5, 21, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    class PersonaEvents:
+        def _list_events(self, limit: int) -> list[dict]:
+            return [
+                {
+                    "mood_label": "soft",
+                    "perceived_intent": "补充关系天气",
+                    "residue": "只作为补充",
+                    "relationship_event": True,
+                    "confidence": 0.8,
+                    "created_at": "2026-05-21T18:00:00+08:00",
+                }
+            ]
+
+    result = await engine.reflect("daily", bucket_mgr, persona_engine=PersonaEvents(), force=True, now=now)
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "insufficient_daily_memory"
+    assert result["materials"]["buckets"] == 4
+    assert result["materials"]["persona_events"] == 1
 
 
 @pytest.mark.asyncio

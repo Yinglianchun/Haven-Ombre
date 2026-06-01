@@ -388,6 +388,7 @@ persona:
 reflection:
   enabled: true
   auto_enabled: true
+  daily_enabled: true              # daily relationship-weather impressions; persona_events only supplement
   enrich_on_write: true
   memory_affect_anchor_enabled: true      # ordinary memory enrich may append affect_anchor; turn off for quieter buckets
   relationship_weather_affect_anchor_enabled: true  # daily/weekly relationship weather keeps affect_anchor by default

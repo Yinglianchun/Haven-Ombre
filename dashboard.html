@@ -1577,6 +1577,11 @@
     <div class="config-section">
       <h3>记忆关系整理</h3>
       <div class="config-row">
+        <label>日印象</label>
+        <select id="cfg-reflection-daily"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后不再自动生成 daily relationship_weather</div>
+      <div class="config-row">
         <label>普通记忆和弦</label>
         <select id="cfg-reflection-memory-anchor"><option value="true">开启</option><option value="false">关闭</option></select>
       </div>
@@ -3055,6 +3060,8 @@ async function loadConfig() {
     document.getElementById('cfg-dream-anchor').value = cfg.dream.identity_anchor_id || '';
     document.getElementById('cfg-gateway-cooldown').value = (cfg.gateway && cfg.gateway.cooldown_hours) ?? 6;
     document.getElementById('cfg-gateway-rounds').value = (cfg.gateway && cfg.gateway.skip_recent_rounds) ?? 5;
+    document.getElementById('cfg-reflection-daily').value =
+      (cfg.reflection && cfg.reflection.daily_enabled) === false ? 'false' : 'true';
     document.getElementById('cfg-reflection-memory-anchor').value =
       (cfg.reflection && cfg.reflection.memory_affect_anchor_enabled) === false ? 'false' : 'true';
     document.getElementById('cfg-reflection-weather-anchor').value =
@@ -3109,6 +3116,7 @@ async function saveConfig(persist) {
       skip_recent_rounds: numberValue('cfg-gateway-rounds', 5),
     },
     reflection: {
+      daily_enabled: document.getElementById('cfg-reflection-daily').value === 'true',
       memory_affect_anchor_enabled: document.getElementById('cfg-reflection-memory-anchor').value === 'true',
       relationship_weather_affect_anchor_enabled: document.getElementById('cfg-reflection-weather-anchor').value === 'true',
     },
