@@ -85,6 +85,35 @@ def test_word_map_private_terms_are_excluded(tmp_path):
     assert "称呼" in terms
 
 
+def test_word_map_excludes_reflection_identity_role_terms(tmp_path):
+    config = _config(tmp_path)
+    config["reflection"] = {
+        "identity_role_edges": {
+            "enabled": True,
+            "detail": {"private_role": ["专属身份", "RoleX"]},
+            "shared": {"private_title": ["专属称呼"]},
+        }
+    }
+    store = WordMapStore(config)
+    store.rebuild(
+        [
+            _bucket(
+                "a",
+                "这段关系里会出现专属身份、RoleX 和专属称呼。",
+                name="专属身份",
+                keywords=["专属身份", "RoleX", "专属称呼", "普通词"],
+                domain=["关系"],
+            ),
+        ]
+    )
+
+    terms = {node["term"] for node in store.list_nodes()}
+    assert "专属身份" not in terms
+    assert "rolex" not in terms
+    assert "专属称呼" not in terms
+    assert "普通词" in terms
+
+
 def test_word_map_excludes_structural_tags_and_identity_names(tmp_path):
     store = WordMapStore(_config(tmp_path))
     store.rebuild(

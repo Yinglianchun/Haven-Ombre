@@ -114,7 +114,10 @@ class WordMapStore:
         )
         self.private_terms = {
             _normalize_term(item)
-            for item in (cfg.get("private_terms", []) or [])
+            for item in itertools.chain(
+                cfg.get("private_terms", []) or [],
+                reflection_identity_terms(config),
+            )
             if _normalize_term(item)
         }
         self._init_db()
@@ -393,6 +396,37 @@ def _identity_stopwords(config: dict[str, Any]) -> list[str]:
     ]
     values.extend(identity.get("user_aliases") or [])
     return [str(item).strip() for item in values if str(item).strip()]
+
+
+def reflection_identity_terms(config: dict[str, Any]) -> list[str]:
+    reflection = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
+    role_edges = reflection.get("identity_role_edges", {}) if isinstance(reflection.get("identity_role_edges", {}), dict) else {}
+    if not role_edges.get("enabled"):
+        return []
+
+    terms: list[str] = []
+    for section in ("detail", "context", "relationship", "shared"):
+        terms.extend(_collect_config_terms(role_edges.get(section)))
+    return terms
+
+
+def _collect_config_terms(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        terms: list[str] = []
+        for key, child in value.items():
+            if str(key).strip():
+                terms.append(str(key).strip())
+            terms.extend(_collect_config_terms(child))
+        return terms
+    if isinstance(value, (list, tuple, set)):
+        terms: list[str] = []
+        for item in value:
+            terms.extend(_collect_config_terms(item))
+        return terms
+    text = str(value).strip()
+    return [text] if text else []
 
 
 def _int_between(value: Any, default: int, lower: int, upper: int) -> int:

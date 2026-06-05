@@ -112,7 +112,7 @@ from reflection_engine import ReflectionEngine
 from recall_diagnostics import RecallDiagnosticsLogger
 from reranker_engine import RerankerEngine
 from source_refs import source_ref_window
-from word_map import WordMapStore
+from word_map import WordMapStore, reflection_identity_terms
 from utils import (
     bucket_text_for_embedding,
     count_tokens_approx,
@@ -994,8 +994,9 @@ def _bucket_summary_payload(bucket: dict) -> dict:
 
 
 def _identity_seed_alias_terms() -> set[str]:
+    terms = set()
     try:
-        return {
+        terms |= {
             str(alias).strip()
             for node in identity_semantic_store.load_private_nodes()
             for alias in node.seed_aliases
@@ -1003,7 +1004,11 @@ def _identity_seed_alias_terms() -> set[str]:
         }
     except Exception as e:
         logger.warning("Failed to load private identity seed aliases: %s", e)
-        return set()
+    try:
+        terms |= {str(item).strip() for item in reflection_identity_terms(config) if str(item).strip()}
+    except Exception as e:
+        logger.warning("Failed to load reflection identity role aliases: %s", e)
+    return terms
 
 
 def _refresh_word_map_private_terms() -> list[str]:
