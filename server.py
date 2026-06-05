@@ -953,6 +953,8 @@ def _bucket_read_payload(bucket: dict) -> dict:
         "predicate",
         "object",
         "evidence",
+        "active",
+        "deprecated",
     ]
     return {
         "id": bucket["id"],
@@ -960,6 +962,155 @@ def _bucket_read_payload(bucket: dict) -> dict:
         "content": strip_wikilinks(bucket.get("content", "")),
         "score": decay_engine.calculate_score(meta),
     }
+
+
+def _is_profile_fact_bucket(bucket: dict) -> bool:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    tags = {str(tag).strip() for tag in meta.get("tags", []) or [] if str(tag).strip()}
+    return "profile_fact" in tags or bool(meta.get("profile_kind"))
+
+
+def _profile_fact_sections(content: str) -> dict[str, str]:
+    text = strip_wikilinks(str(content or "")).strip()
+    if not text:
+        return {}
+    matches = list(re.finditer(r"(?m)^###\s+([^\n]+)\n?", text))
+    if not matches:
+        return {"fact": text}
+    sections: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        heading = _profile_key(match.group(1), "")
+        if not heading:
+            continue
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        sections[heading] = text[start:end].strip()
+    if "fact" not in sections and text[: matches[0].start()].strip():
+        sections["fact"] = text[: matches[0].start()].strip()
+    return sections
+
+
+def _profile_kind_from_tags(tags: list | tuple | set | None) -> str:
+    for tag in tags or []:
+        text = str(tag or "").strip()
+        if not text.startswith("profile_"):
+            continue
+        if text in {"profile_fact", "profile_predicate"} or text.startswith("profile_predicate_"):
+            continue
+        return text.removeprefix("profile_")
+    return ""
+
+
+def _profile_fact_state(meta: dict) -> str:
+    if meta.get("deprecated") or meta.get("active") is False:
+        return "deprecated"
+    if meta.get("resolved") or meta.get("digested"):
+        return "inactive"
+    return "active"
+
+
+def _profile_fact_evidence(bucket: dict) -> list[dict]:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    rows: list[dict] = []
+
+    raw_evidence = meta.get("evidence")
+    if isinstance(raw_evidence, dict):
+        raw_evidence = [raw_evidence]
+    if isinstance(raw_evidence, list):
+        for item in raw_evidence:
+            if not isinstance(item, dict):
+                continue
+            bucket_id = str(item.get("bucket_id") or item.get("id") or "").strip()
+            moment_id = str(item.get("moment_id") or "").strip()
+            if bucket_id:
+                rows.append({"bucket_id": bucket_id, "moment_id": moment_id})
+
+    for bucket_key, moment_key in (
+        ("evidence_bucket_id", "evidence_moment_id"),
+        ("source_bucket_id", "source_moment_id"),
+    ):
+        bucket_id = str(meta.get(bucket_key) or "").strip()
+        moment_id = str(meta.get(moment_key) or "").strip()
+        if bucket_id:
+            rows.append({"bucket_id": bucket_id, "moment_id": moment_id})
+
+    try:
+        for edge in memory_edge_store.list_edges():
+            if (
+                str(edge.get("source") or "") == str(bucket.get("id") or "")
+                and str(edge.get("relation_type") or "") == "evidenced_by"
+            ):
+                rows.append({"bucket_id": str(edge.get("target") or ""), "moment_id": ""})
+    except Exception:
+        pass
+
+    seen: set[tuple[str, str]] = set()
+    result: list[dict] = []
+    for item in rows:
+        bucket_id = str(item.get("bucket_id") or "").strip()
+        moment_id = str(item.get("moment_id") or "").strip()
+        if not bucket_id:
+            continue
+        key = (bucket_id, moment_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"bucket_id": bucket_id, "moment_id": moment_id})
+    return result
+
+
+async def _profile_fact_payload(bucket: dict) -> dict:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    sections = _profile_fact_sections(bucket.get("content", ""))
+    kind = str(meta.get("profile_kind") or _profile_kind_from_tags(meta.get("tags", [])) or "").strip()
+    evidence_rows = []
+    for item in _profile_fact_evidence(bucket):
+        bucket_id = item["bucket_id"]
+        evidence_bucket = await bucket_mgr.get(bucket_id) if MEMORY_ID_RE.fullmatch(bucket_id) else None
+        evidence_meta = evidence_bucket.get("metadata", {}) if evidence_bucket else {}
+        evidence_rows.append({
+            "bucket_id": bucket_id,
+            "moment_id": item.get("moment_id", ""),
+            "name": evidence_meta.get("name", bucket_id),
+            "exists": bool(evidence_bucket),
+        })
+
+    state = _profile_fact_state(meta)
+    return {
+        "id": bucket.get("id", ""),
+        "name": meta.get("name", bucket.get("id", "")),
+        "fact": sections.get("fact", strip_wikilinks(bucket.get("content", "")).strip()),
+        "sections": sections,
+        "kind": kind,
+        "subject": meta.get("subject", ""),
+        "predicate": meta.get("predicate", ""),
+        "object": meta.get("object", ""),
+        "evidence": evidence_rows,
+        "confidence": meta.get("confidence"),
+        "source": meta.get("source", "profile_fact"),
+        "active": state == "active",
+        "deprecated": state == "deprecated",
+        "state": state,
+        "tags": meta.get("tags", []),
+        "created": meta.get("created", ""),
+        "updated_at": meta.get("updated_at", ""),
+        "last_active": meta.get("last_active", ""),
+        "content_preview": strip_wikilinks(bucket.get("content", ""))[:200],
+    }
+
+
+def _profile_fact_tags(current_tags: list | tuple | set | None, kind: str, predicate: str) -> list[str]:
+    tags = ["profile_fact", f"profile_{kind}"]
+    if predicate:
+        tags.append(f"profile_predicate_{predicate}")
+    for tag in current_tags or []:
+        text = str(tag or "").strip()
+        if not text:
+            continue
+        if text == "profile_fact" or text.startswith("profile_"):
+            continue
+        tags.append(text)
+    return list(dict.fromkeys(tags))
 
 
 def _queue_memory_enrichment(bucket_id: str, *, force: bool = False) -> None:
@@ -5767,6 +5918,126 @@ async def api_buckets(request):
         return JSONResponse(result)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/profile-facts", methods=["GET"])
+async def api_profile_facts(request):
+    """List evidence-bound profile facts for dashboard review."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=True)
+        facts = [
+            await _profile_fact_payload(bucket)
+            for bucket in all_buckets
+            if _is_profile_fact_bucket(bucket)
+        ]
+        facts.sort(
+            key=lambda item: (
+                item.get("state") == "active",
+                str(item.get("updated_at") or item.get("last_active") or item.get("created") or ""),
+            ),
+            reverse=True,
+        )
+        return JSONResponse({"count": len(facts), "facts": facts})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/profile-facts/{bucket_id}", methods=["PATCH"])
+async def api_profile_fact_update(request):
+    """Confirm, edit, or deprecate a profile fact bucket."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    bucket_id = request.path_params["bucket_id"]
+    if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
+        return JSONResponse({"error": "invalid bucket_id"}, status_code=400)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if not _is_profile_fact_bucket(bucket):
+        return JSONResponse({"error": "not a profile_fact bucket"}, status_code=400)
+
+    meta = bucket.get("metadata", {})
+    action = str(body.get("action") or "").strip().lower()
+    if action not in {"confirm", "deprecate", "edit"}:
+        return JSONResponse({"error": "action must be confirm, deprecate, or edit"}, status_code=400)
+
+    updates: dict = {
+        "last_active": meta.get("last_active") or meta.get("created"),
+    }
+    if action == "confirm":
+        updates.update({"active": True, "deprecated": False, "resolved": False, "digested": False})
+    elif action == "deprecate":
+        updates.update({"active": False, "deprecated": True, "resolved": True, "digested": True})
+    else:
+        sections = _profile_fact_sections(bucket.get("content", ""))
+        fact = str(body.get("fact", sections.get("fact", "")) or "").strip()
+        if not fact:
+            return JSONResponse({"error": "fact is required"}, status_code=400)
+        kind = _profile_key(body.get("profile_kind", meta.get("profile_kind") or "preference"), "preference")
+        subject = _profile_key(body.get("subject", meta.get("subject") or "user"), "user")
+        predicate = _profile_key(body.get("predicate", meta.get("predicate") or ""), "")
+        object_text = str(body.get("object", meta.get("object") or "") or "").strip()
+        evidence_context = str(
+            body.get("evidence_context", sections.get("evidence_context", "")) or ""
+        ).strip()
+        reflection = str(body.get("reflection", sections.get("reflection", "")) or "").strip()
+        followup = str(body.get("followup", sections.get("followup", "")) or "").strip()
+        confidence = _float_between(body.get("confidence", meta.get("confidence")), 0.9, 0.0, 1.0)
+        domain = list(dict.fromkeys(["profile", kind] + [
+            str(item).strip()
+            for item in meta.get("domain", []) or []
+            if str(item).strip() and str(item).strip() not in {"profile", kind}
+        ]))
+        updates.update({
+            "content": _profile_fact_body(
+                fact=fact,
+                evidence_context=evidence_context,
+                reflection=reflection,
+                followup=followup,
+            ),
+            "name": _profile_fact_name(fact),
+            "tags": _profile_fact_tags(meta.get("tags", []), kind, predicate),
+            "domain": domain,
+            "profile_kind": kind,
+            "subject": subject,
+            "predicate": predicate,
+            "object": object_text,
+            "confidence": confidence,
+            "source": meta.get("source") or "profile_fact",
+        })
+
+    ok = await bucket_mgr.update(bucket_id, **updates)
+    if not ok:
+        return JSONResponse({"error": "update failed"}, status_code=500)
+
+    updated_bucket = await bucket_mgr.get(bucket_id)
+    if action == "edit":
+        _queue_embedding_refresh(bucket_id)
+        try:
+            if updated_bucket:
+                memory_moment_store.upsert_bucket(updated_bucket)
+        except Exception as e:
+            logger.warning("Profile fact moment reindex failed: %s", e)
+    return JSONResponse({
+        "status": action,
+        "id": bucket_id,
+        "fact": await _profile_fact_payload(updated_bucket),
+    })
 
 
 @mcp.custom_route("/api/buckets/delete", methods=["POST"])

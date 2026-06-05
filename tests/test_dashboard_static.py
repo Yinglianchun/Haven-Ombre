@@ -111,6 +111,24 @@ def test_dashboard_breath_view_loads_gateway_injection_debug():
     assert "Gateway 最近注入" in html
 
 
+def test_dashboard_exposes_profile_fact_page():
+    html = Path("dashboard.html").read_text(encoding="utf-8")
+
+    assert 'data-tab="profile"' in html
+    assert 'id="profile-view"' in html
+    assert 'id="profile-facts-list"' in html
+    assert 'id="profile-summary"' in html
+    assert "loadProfileFacts()" in html
+    assert "renderProfileFactCard" in html
+    assert "runProfileFactAction" in html
+    assert "editProfileFact" in html
+    assert "BASE + '/api/profile-facts'" in html
+    assert "BASE + '/api/profile-facts/'" in html
+    assert "打开证据" in html
+    assert "Profile Facts" in html
+    assert ".profile-card" in html
+
+
 def test_dashboard_exposes_gateway_memory_cooldown_settings():
     html = Path("dashboard.html").read_text(encoding="utf-8")
     load_block = html.split("async function loadConfig()", 1)[1].split("async function saveConfig", 1)[0]

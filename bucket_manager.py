@@ -330,6 +330,20 @@ class BucketManager:
             post["comments"] = kwargs["comments"] if isinstance(kwargs["comments"], list) else []
         if "comment_count" in kwargs:
             post["comment_count"] = max(0, int(kwargs["comment_count"]))
+        if "active" in kwargs:
+            post["active"] = bool(kwargs["active"])
+        if "deprecated" in kwargs:
+            post["deprecated"] = bool(kwargs["deprecated"])
+        if "profile_kind" in kwargs:
+            post["profile_kind"] = str(kwargs["profile_kind"])
+        if "subject" in kwargs:
+            post["subject"] = str(kwargs["subject"])
+        if "predicate" in kwargs:
+            post["predicate"] = str(kwargs["predicate"])
+        if "object" in kwargs:
+            post["object"] = str(kwargs["object"])
+        if "evidence" in kwargs:
+            post["evidence"] = kwargs["evidence"] if isinstance(kwargs["evidence"], list) else []
 
         # --- Auto-refresh content update time and activation time ---
         # --- 自动刷新内容更新时间与激活时间 ---

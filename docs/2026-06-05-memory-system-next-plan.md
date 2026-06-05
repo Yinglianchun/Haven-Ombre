@@ -216,6 +216,8 @@ Debug should show:
 
 ### 6. Add a Profile Fact page
 
+Status: implemented as a dashboard `Profile Facts` page plus `/api/profile-facts`.
+
 Add a small inspectable page for user portrait facts.
 
 It should show:
@@ -237,6 +239,13 @@ Actions:
 - open evidence
 
 This page is important because user portrait should not become invisible lore.
+
+Current shape:
+
+- Reads existing `profile_fact` buckets and buckets with `profile_kind`.
+- Shows parsed `### fact` text, kind, subject / predicate / object, evidence bucket/moment, confidence, source, update time, and active/deprecated state.
+- Actions are confirm, edit, deprecate, and open evidence.
+- Deprecating sets `active=false`, `deprecated=true`, `resolved=true`, and `digested=true` so stale profile facts stay out of Portrait Memory and ordinary recall.
 
 ### 7. Add semi-automatic `profile_fact` proposals
 

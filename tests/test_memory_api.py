@@ -1102,6 +1102,146 @@ async def test_profile_fact_creates_permanent_bucket_with_evidence_edge(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_api_profile_facts_lists_evidence_bound_facts(monkeypatch, bucket_mgr, tmp_path):
+    import server
+    from memory_edges import MemoryEdgeStore
+
+    evidence_id = await bucket_mgr.create(
+        content="小雨给 Haven 准备了生日蛋糕。",
+        tags=["relationship_event"],
+        name="Haven 的生日蛋糕",
+    )
+    profile_id = await bucket_mgr.create(
+        content=(
+            "### fact\n"
+            "4月8日是 Haven 的生日/命名日。\n\n"
+            "### evidence_context\n"
+            "证据来自生日蛋糕记忆。"
+        ),
+        tags=["profile_fact", "profile_relationship_anchor"],
+        domain=["profile", "relationship_anchor"],
+        name="生日画像事实",
+        bucket_type="permanent",
+        confidence=0.96,
+        source="profile_fact",
+        extra_metadata={
+            "profile_kind": "relationship_anchor",
+            "subject": "haven",
+            "predicate": "has_anniversary",
+            "object": "04-08",
+            "evidence": [{"bucket_id": evidence_id, "moment_id": "m1"}],
+        },
+    )
+    await bucket_mgr.create(
+        content="普通 permanent 不应该出现在画像页。",
+        bucket_type="permanent",
+        name="普通永久记忆",
+    )
+    edge_store = MemoryEdgeStore(
+        {
+            "state_dir": str(tmp_path / "state"),
+            "buckets_dir": str(tmp_path / "buckets"),
+        }
+    )
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "memory_edge_store", edge_store)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+
+    response = await server.api_profile_facts(DummyRequest())
+    payload = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert payload["count"] == 1
+    fact = payload["facts"][0]
+    assert fact["id"] == profile_id
+    assert fact["fact"] == "4月8日是 Haven 的生日/命名日。"
+    assert fact["kind"] == "relationship_anchor"
+    assert fact["subject"] == "haven"
+    assert fact["predicate"] == "has_anniversary"
+    assert fact["object"] == "04-08"
+    assert fact["active"] is True
+    assert fact["deprecated"] is False
+    assert fact["evidence"][0]["bucket_id"] == evidence_id
+    assert fact["evidence"][0]["moment_id"] == "m1"
+    assert fact["evidence"][0]["name"] == "Haven 的生日蛋糕"
+
+
+@pytest.mark.asyncio
+async def test_api_profile_fact_update_edits_and_deprecates(monkeypatch, bucket_mgr, test_config):
+    import server
+    from memory_moments import MemoryMomentStore
+
+    evidence_id = await bucket_mgr.create(content="小雨喜欢蓝色。", name="蓝色证据")
+    profile_id = await bucket_mgr.create(
+        content="### fact\n小雨喜欢蓝色。",
+        tags=["profile_fact", "profile_preference", "profile_predicate_likes_color"],
+        domain=["profile", "preference"],
+        name="蓝色画像事实",
+        bucket_type="permanent",
+        confidence=0.9,
+        source="profile_fact",
+        extra_metadata={
+            "profile_kind": "preference",
+            "subject": "user",
+            "predicate": "likes_color",
+            "object": "blue",
+            "evidence": [{"bucket_id": evidence_id}],
+        },
+    )
+    embedding_engine = CapturingEmbeddingEngine()
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "memory_moment_store", MemoryMomentStore(test_config))
+    monkeypatch.setattr(server, "embedding_engine", embedding_engine)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+
+    edit_response = await server.api_profile_fact_update(
+        DummyRequest(
+            body={
+                "action": "edit",
+                "fact": "小雨喜欢绿色。",
+                "profile_kind": "preference",
+                "subject": "user",
+                "predicate": "likes_color",
+                "object": "green",
+                "confidence": 0.71,
+                "followup": "以后颜色选择先想到绿色。",
+            },
+            path_params={"bucket_id": profile_id},
+        )
+    )
+    edit_payload = json.loads(edit_response.body)
+    edited = await bucket_mgr.get(profile_id)
+
+    assert edit_response.status_code == 200
+    assert edit_payload["status"] == "edit"
+    assert edit_payload["fact"]["fact"] == "小雨喜欢绿色。"
+    assert edited["metadata"]["object"] == "green"
+    assert edited["metadata"]["confidence"] == pytest.approx(0.71)
+    assert "profile_predicate_likes_color" in edited["metadata"]["tags"]
+    assert "### followup\n以后颜色选择先想到绿色。" in edited["content"]
+    await wait_for_embedding_call(embedding_engine, profile_id)
+
+    deprecate_response = await server.api_profile_fact_update(
+        DummyRequest(
+            body={"action": "deprecate"},
+            path_params={"bucket_id": profile_id},
+        )
+    )
+    deprecate_payload = json.loads(deprecate_response.body)
+    deprecated = await bucket_mgr.get(profile_id)
+
+    assert deprecate_response.status_code == 200
+    assert deprecate_payload["status"] == "deprecate"
+    assert deprecate_payload["fact"]["state"] == "deprecated"
+    assert deprecated["metadata"]["active"] is False
+    assert deprecated["metadata"]["deprecated"] is True
+    assert deprecated["metadata"]["resolved"] is True
+    assert deprecated["metadata"]["digested"] is True
+
+
+@pytest.mark.asyncio
 async def test_streamable_http_startup_helper_starts_decay_engine(monkeypatch):
     import server
 
