@@ -1826,6 +1826,7 @@ let dashboardCommentAuthor = 'Rain';
 let dashboardAiAuthor = 'Haven';
 let reflectionSelectedDate = formatLocalDate(new Date());
 let reflectionCurrentMonth = monthStart(new Date());
+let configSnapshot = null;
 
 function authUrl(path) {
   return path.startsWith('http') ? path : BASE + path;
@@ -3377,6 +3378,7 @@ async function loadConfig() {
     var res = await authFetch(BASE + '/api/config');
     if (!res) return;
     var cfg = await res.json();
+    configSnapshot = JSON.parse(JSON.stringify(cfg || {}));
     document.getElementById('cfg-dehy-model').value = cfg.dehydration.model || '';
     document.getElementById('cfg-dehy-url').value = cfg.dehydration.base_url || '';
     document.getElementById('cfg-dehy-key').placeholder = '当前: ' + (cfg.dehydration.api_key_masked || '未设置');
@@ -3446,6 +3448,10 @@ async function loadConfig() {
 }
 
 async function saveConfig(persist, persistEnv) {
+  if (!configSnapshot) {
+    setConfigStatus('<span style="color:var(--negative)">配置还没加载完成，请先刷新配置页</span>');
+    return;
+  }
   function numberValue(id, fallback) {
     var n = parseInt(document.getElementById(id).value, 10);
     return Number.isFinite(n) ? n : fallback;
@@ -3453,6 +3459,20 @@ async function saveConfig(persist, persistEnv) {
   function floatValue(id, fallback) {
     var n = parseFloat(document.getElementById(id).value);
     return Number.isFinite(n) ? n : fallback;
+  }
+  function sameConfigValue(left, right) {
+    if (left === right) return true;
+    if (left === '' && (right === undefined || right === null)) return true;
+    if (typeof left === 'number' && typeof right === 'number') return Math.abs(left - right) < 0.000001;
+    return JSON.stringify(left) === JSON.stringify(right);
+  }
+  function addChangedSection(target, sectionName, candidate) {
+    var original = (configSnapshot && configSnapshot[sectionName]) || {};
+    var changed = {};
+    Object.keys(candidate).forEach(function(key) {
+      if (!sameConfigValue(candidate[key], original[key])) changed[key] = candidate[key];
+    });
+    if (Object.keys(changed).length) target[sectionName] = changed;
   }
 
   var recentContextEnabled = document.getElementById('cfg-recent-context-enabled').value === 'true';
@@ -3462,67 +3482,75 @@ async function saveConfig(persist, persistEnv) {
   var personaContextRounds = personaContextEnabled ? numberValue('cfg-persona-context-rounds', 15) : 0;
   if (personaContextEnabled && personaContextRounds <= 0) personaContextRounds = 15;
 
-  var body = {
-    dehydration: {
-      model: document.getElementById('cfg-dehy-model').value,
+  var activeTab = document.querySelector('.tab.active');
+  var activeTarget = activeTab ? activeTab.dataset.tab : '';
+  var candidate = {};
+  if (activeTarget === 'config') {
+    candidate.dehydration = {
       base_url: document.getElementById('cfg-dehy-url').value,
-      max_tokens: parseInt(document.getElementById('cfg-dehy-maxtokens').value) || 1024,
-      temperature: floatValue('cfg-dehy-temp', 0.1),
-    },
-    embedding: {
-      enabled: document.getElementById('cfg-emb-enabled').value === 'true',
-      model: document.getElementById('cfg-emb-model').value,
+    };
+    candidate.embedding = {
       base_url: document.getElementById('cfg-emb-url').value,
-    },
-    persona: {
-      enabled: document.getElementById('cfg-persona-enabled').value === 'true',
-      model: document.getElementById('cfg-persona-model').value,
+    };
+    candidate.persona = {
       base_url: document.getElementById('cfg-persona-url').value,
-    },
-    dream: {
-      enabled: document.getElementById('cfg-dream-engine-enabled').value === 'true',
-      auto_enabled: document.getElementById('cfg-dream-enabled').value === 'true',
-      surface_enabled: document.getElementById('cfg-dream-surface').value === 'true',
-      inject_enabled: document.getElementById('cfg-dream-inject').value === 'true',
-      retain_after_inject: document.getElementById('cfg-dream-retain').value === 'true',
-      model: document.getElementById('cfg-dream-model').value,
+    };
+    candidate.dream = {
       base_url: document.getElementById('cfg-dream-url').value,
-      daily_hour: numberValue('cfg-dream-hour', 3),
-      daily_probability: floatValue('cfg-dream-prob', 0.4),
-      min_material_count: numberValue('cfg-dream-min', 5),
-      material_window_hours: numberValue('cfg-dream-window', 48),
-      identity_anchor_id: document.getElementById('cfg-dream-anchor').value,
-    },
-    gateway: {
+    };
+    candidate.reflection = {
+      base_url: document.getElementById('cfg-reflection-url').value,
+    };
+  }
+  if (activeTarget === 'memory-config') {
+    candidate.gateway = {
       cooldown_hours: floatValue('cfg-gateway-cooldown', 6),
       skip_recent_rounds: numberValue('cfg-gateway-rounds', 5),
       recent_context_budget: recentContextBudget,
       current_inner_state_interval_rounds: personaContextRounds,
-    },
-    reflection: {
-      enabled: document.getElementById('cfg-reflection-enabled').value === 'true',
-      auto_enabled: document.getElementById('cfg-reflection-auto').value === 'true',
-      daily_enabled: document.getElementById('cfg-reflection-daily').value === 'true',
-      memory_affect_anchor_enabled: document.getElementById('cfg-reflection-memory-anchor').value === 'true',
-      relationship_weather_affect_anchor_enabled: document.getElementById('cfg-reflection-weather-anchor').value === 'true',
-      model: document.getElementById('cfg-reflection-model').value,
-      base_url: document.getElementById('cfg-reflection-url').value,
-    },
-    merge_threshold: numberValue('cfg-merge', 75),
+    };
+  }
+
+  var body = {
     persist: persist,
     persist_env: !!persistEnv,
   };
-  var keyVal = document.getElementById('cfg-dehy-key').value;
-  if (keyVal) body.dehydration.api_key = keyVal;
-  var embKeyVal = document.getElementById('cfg-emb-key').value;
-  if (embKeyVal) body.embedding.api_key = embKeyVal;
-  var personaKeyVal = document.getElementById('cfg-persona-key').value;
-  if (personaKeyVal) body.persona.api_key = personaKeyVal;
-  var reflectionKeyVal = document.getElementById('cfg-reflection-key').value;
-  if (reflectionKeyVal) body.reflection.api_key = reflectionKeyVal;
-  var dreamKeyVal = document.getElementById('cfg-dream-key').value;
-  if (dreamKeyVal) body.dream.api_key = dreamKeyVal;
+  [
+    'dehydration',
+    'embedding',
+    'persona',
+    'dream',
+    'gateway',
+    'reflection',
+  ].forEach(function(sectionName) {
+    if (candidate[sectionName]) addChangedSection(body, sectionName, candidate[sectionName]);
+  });
 
+  var keyVal = document.getElementById('cfg-dehy-key').value;
+  if (keyVal) {
+    if (!body.dehydration) body.dehydration = {};
+    body.dehydration.api_key = keyVal;
+  }
+  var embKeyVal = document.getElementById('cfg-emb-key').value;
+  if (embKeyVal) {
+    if (!body.embedding) body.embedding = {};
+    body.embedding.api_key = embKeyVal;
+  }
+  var personaKeyVal = document.getElementById('cfg-persona-key').value;
+  if (personaKeyVal) {
+    if (!body.persona) body.persona = {};
+    body.persona.api_key = personaKeyVal;
+  }
+  var reflectionKeyVal = document.getElementById('cfg-reflection-key').value;
+  if (reflectionKeyVal) {
+    if (!body.reflection) body.reflection = {};
+    body.reflection.api_key = reflectionKeyVal;
+  }
+  var dreamKeyVal = document.getElementById('cfg-dream-key').value;
+  if (dreamKeyVal) {
+    if (!body.dream) body.dream = {};
+    body.dream.api_key = dreamKeyVal;
+  }
   try {
     var res = await authFetch(BASE + '/api/config', {
       method: 'POST',

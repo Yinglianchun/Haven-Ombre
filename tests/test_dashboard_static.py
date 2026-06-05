@@ -65,6 +65,21 @@ def test_dashboard_exposes_gateway_memory_cooldown_settings():
     assert "retrieval_mode" not in html
 
 
+def test_dashboard_config_save_sends_only_changed_sections():
+    html = Path("dashboard.html").read_text(encoding="utf-8")
+    load_block = html.split("async function loadConfig()", 1)[1].split("async function saveConfig", 1)[0]
+    save_block = html.split("async function saveConfig", 1)[1].split("try {", 1)[0]
+
+    assert "let configSnapshot = null;" in html
+    assert "configSnapshot = JSON.parse(JSON.stringify(cfg || {}));" in load_block
+    assert "function addChangedSection(target, sectionName, candidate)" in save_block
+    assert "var activeTarget = activeTab ? activeTab.dataset.tab : '';" in save_block
+    assert "var body = {" in save_block
+    assert "if (candidate[sectionName]) addChangedSection(body, sectionName, candidate[sectionName]);" in save_block
+    assert "if (!body.persona) body.persona = {};" in save_block
+    assert "body.persona.api_key = personaKeyVal;" in save_block
+
+
 def test_dashboard_exposes_reflection_affect_anchor_switches():
     html = Path("dashboard.html").read_text(encoding="utf-8")
     load_block = html.split("async function loadConfig()", 1)[1].split("async function saveConfig", 1)[0]
@@ -82,11 +97,12 @@ def test_dashboard_exposes_reflection_affect_anchor_switches():
     assert "cfg.reflection.auto_enabled" in load_block
     assert "cfg.reflection.memory_affect_anchor_enabled" in load_block
     assert "cfg.reflection.relationship_weather_affect_anchor_enabled" in load_block
-    assert "enabled: document.getElementById('cfg-reflection-enabled').value === 'true'," in save_block
-    assert "auto_enabled: document.getElementById('cfg-reflection-auto').value === 'true'," in save_block
-    assert "memory_affect_anchor_enabled: document.getElementById('cfg-reflection-memory-anchor').value === 'true'," in save_block
-    assert "relationship_weather_affect_anchor_enabled: document.getElementById('cfg-reflection-weather-anchor').value === 'true'," in save_block
-    assert "if (reflectionKeyVal) body.reflection.api_key = reflectionKeyVal;" in html
+    reflection_block = save_block.split("candidate.reflection = {", 1)[1].split("};", 1)[0]
+    assert "base_url: document.getElementById('cfg-reflection-url').value," in reflection_block
+    assert "cfg-reflection-enabled" not in reflection_block
+    assert "cfg-reflection-model" not in reflection_block
+    assert "if (!body.reflection) body.reflection = {};" in html
+    assert "body.reflection.api_key = reflectionKeyVal;" in html
 
 
 def test_dashboard_exposes_persona_config_and_env_persist_button():
@@ -103,18 +119,20 @@ def test_dashboard_exposes_persona_config_and_env_persist_button():
     assert "保存密钥到 .env" in html
     assert "cfg.persona.enabled" in load_block
     assert "cfg.persona.api_key_masked" in load_block
-    assert "enabled: document.getElementById('cfg-persona-enabled').value === 'true'," in save_block
-    assert "model: document.getElementById('cfg-persona-model').value," in save_block
-    assert "base_url: document.getElementById('cfg-persona-url').value," in save_block
+    persona_block = save_block.split("candidate.persona = {", 1)[1].split("};", 1)[0]
+    assert "base_url: document.getElementById('cfg-persona-url').value," in persona_block
+    assert "cfg-persona-enabled" not in persona_block
+    assert "cfg-persona-model" not in persona_block
     assert "persist_env: !!persistEnv" in save_block
-    assert "if (personaKeyVal) body.persona.api_key = personaKeyVal;" in html
+    assert "if (!body.persona) body.persona = {};" in html
+    assert "body.persona.api_key = personaKeyVal;" in html
 
 
-def test_dashboard_dream_background_control_uses_auto_enabled_only():
+def test_dashboard_dream_controls_load_but_config_save_only_writes_url_and_key():
     html = Path("dashboard.html").read_text(encoding="utf-8")
     load_block = html.split("async function loadConfig()", 1)[1].split("async function saveConfig", 1)[0]
     save_block = html.split("async function saveConfig", 1)[1].split("var keyVal =", 1)[0]
-    dream_block = save_block.split("dream: {", 1)[1].split("gateway: {", 1)[0]
+    dream_block = save_block.split("candidate.dream = {", 1)[1].split("};", 1)[0]
     dream_lines = [line.strip() for line in dream_block.splitlines()]
 
     assert 'id="cfg-dream-engine-enabled"' in html
@@ -125,12 +143,10 @@ def test_dashboard_dream_background_control_uses_auto_enabled_only():
     assert "document.getElementById('cfg-dream-inject').value = cfg.dream.inject_enabled ? 'true' : 'false';" in load_block
     assert "document.getElementById('cfg-dream-retain').value = cfg.dream.retain_after_inject ? 'true' : 'false';" in load_block
     assert "document.getElementById('cfg-dream-enabled').value = cfg.dream.enabled" not in load_block
-    assert "enabled: document.getElementById('cfg-dream-engine-enabled').value === 'true'," in dream_lines
-    assert "auto_enabled: document.getElementById('cfg-dream-enabled').value === 'true'," in dream_lines
-    assert "enabled: document.getElementById('cfg-dream-enabled').value === 'true'," not in dream_lines
-    assert "surface_enabled: document.getElementById('cfg-dream-surface').value === 'true'," in dream_lines
-    assert "inject_enabled: document.getElementById('cfg-dream-inject').value === 'true'," in dream_lines
-    assert "retain_after_inject: document.getElementById('cfg-dream-retain').value === 'true'," in dream_lines
+    assert "base_url: document.getElementById('cfg-dream-url').value," in dream_lines
+    assert not any("cfg-dream-engine-enabled" in line for line in dream_lines)
+    assert not any("cfg-dream-model" in line for line in dream_lines)
+    assert not any("cfg-dream-inject" in line for line in dream_lines)
 
 
 def test_dashboard_config_number_zero_values_are_preserved():
@@ -140,8 +156,8 @@ def test_dashboard_config_number_zero_values_are_preserved():
 
     assert "document.getElementById('cfg-dehy-temp').value = cfg.dehydration.temperature ?? 0.1;" in load_block
     assert "document.getElementById('cfg-merge').value = cfg.merge_threshold ?? 75;" in load_block
-    assert "temperature: floatValue('cfg-dehy-temp', 0.1)," in save_block
-    assert "merge_threshold: numberValue('cfg-merge', 75)," in save_block
+    assert "temperature: floatValue('cfg-dehy-temp', 0.1)," not in save_block
+    assert "merge_threshold: numberValue('cfg-merge', 75)," not in save_block
     assert "cfg.dehydration.temperature || 0.1" not in load_block
     assert "cfg.merge_threshold || 75" not in load_block
     assert "parseFloat(document.getElementById('cfg-dehy-temp').value) || 0.1" not in save_block

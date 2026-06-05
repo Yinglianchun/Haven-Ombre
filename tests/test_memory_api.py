@@ -1434,6 +1434,80 @@ async def test_config_persist_syncs_existing_runtime_yaml(monkeypatch, test_conf
     assert reflection_engine.relationship_weather_affect_anchor_enabled is True
 
 
+@pytest.mark.asyncio
+async def test_config_persist_without_persona_body_preserves_minimal_persona_yaml(
+    monkeypatch,
+    test_config,
+    tmp_path,
+):
+    import server
+
+    config_path = tmp_path / "config.yaml"
+    runtime_path = tmp_path / "state" / "config.runtime.yaml"
+    runtime_path.parent.mkdir(exist_ok=True)
+    minimal_persona = {"enabled": True, "profile_id": "lili_gege_main"}
+    config_path.write_text(
+        "persona:\n  enabled: true\n  profile_id: lili_gege_main\n"
+        "gateway:\n  cooldown_hours: 48\n",
+        encoding="utf-8",
+    )
+    runtime_path.write_text(
+        "persona:\n  enabled: true\n  profile_id: lili_gege_main\n"
+        "gateway:\n  cooldown_hours: 48\n",
+        encoding="utf-8",
+    )
+
+    cfg = {
+        **test_config,
+        "_runtime_config_path": str(runtime_path),
+        "persona": {
+            **test_config["persona"],
+            "profile_id": "lili_gege_main",
+            "model": "deepseek-v4-flash",
+            "base_url": "https://api.deepseek.com/v1",
+            "thinking_mode": "disabled",
+        },
+        "gateway": {
+            **test_config.get("gateway", {}),
+            "cooldown_hours": 48,
+        },
+    }
+    hot_update_calls = []
+
+    async def fake_hot_update(body):
+        hot_update_calls.append(dict(body or {}))
+        return "gateway_hot_reloaded"
+
+    monkeypatch.setenv("OMBRE_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(server, "config", cfg)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(server, "_hot_update_gateway_config", fake_hot_update)
+
+    response = await server.api_config_update(
+        DummyRequest(
+            {
+                "gateway": {"cooldown_hours": 6},
+                "persist": True,
+            }
+        )
+    )
+    payload = json.loads(response.body)
+    saved_text = config_path.read_text(encoding="utf-8")
+    runtime_text = runtime_path.read_text(encoding="utf-8")
+    saved_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    runtime_config = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert saved_text.index("persona:") < saved_text.index("gateway:")
+    assert runtime_text.index("persona:") < runtime_text.index("gateway:")
+    assert saved_config["persona"] == minimal_persona
+    assert runtime_config["persona"] == minimal_persona
+    assert "persona" not in hot_update_calls[-1]
+    assert saved_config["gateway"]["cooldown_hours"] == 6
+    assert runtime_config["gateway"]["cooldown_hours"] == 6
+
+
 def test_chatgpt_oauth_provider_issues_single_use_codes():
     import server
 

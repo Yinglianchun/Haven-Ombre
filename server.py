@@ -3651,7 +3651,7 @@ async def api_config_update(request):
             save_config = _apply_dashboard_config(save_config)
 
             with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(save_config, f, default_flow_style=False, allow_unicode=True)
+                yaml.dump(save_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
             updated.append("persisted_to_yaml")
             if os.path.exists(runtime_config_path):
                 runtime_config = {}
@@ -3660,7 +3660,7 @@ async def api_config_update(request):
                 runtime_config = _apply_dashboard_config(runtime_config)
                 os.makedirs(os.path.dirname(runtime_config_path), exist_ok=True)
                 with open(runtime_config_path, "w", encoding="utf-8") as f:
-                    yaml.dump(runtime_config, f, default_flow_style=False, allow_unicode=True)
+                    yaml.dump(runtime_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
                 updated.append("runtime_yaml_synced")
         except Exception as e:
             try:
@@ -3671,7 +3671,7 @@ async def api_config_update(request):
                 runtime_config = _apply_dashboard_config(runtime_config)
                 os.makedirs(os.path.dirname(runtime_config_path), exist_ok=True)
                 with open(runtime_config_path, "w", encoding="utf-8") as f:
-                    yaml.dump(runtime_config, f, default_flow_style=False, allow_unicode=True)
+                    yaml.dump(runtime_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
                 updated.append("persisted_to_runtime_yaml")
                 updated.append(f"config_yaml_unwritable:{type(e).__name__}")
             except Exception as fallback_e:
