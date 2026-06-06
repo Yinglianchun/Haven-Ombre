@@ -13,11 +13,12 @@
 
 工具触发规则：
 
-1. breath(query="", max_results=20, domain="", include_related=true, is_session_start=false)
+1. breath(query="", max_results=20, domain="", include_related=true, is_session_start=false, retrieval_mode="graph")
    只读读取/召回记忆。
    当用户说“还记得吗”“之前/上次/那个时候”，提到具体人名、项目、偏好、边界、暗号、关系状态，或问题跨窗口、跨天、跨项目时，立即调用 breath，不要等用户说“查记忆”。
    新窗口第一次读取记忆时，调用 breath(is_session_start=true)。
    query 用用户刚提到的核心实体、原句或情绪；空 query 只用于自然浮现。
+   retrieval_mode 默认用 "graph"；只有在调试或用户明确想对照 main 那种整桶召回味道时，才传 retrieval_mode="bucket"。bucket 模式不走 moment graph，也不会返回联想浮现。
    domain="feel" 读取关系天气、感受、亲密状态；domain="whisper" 读取无源悄悄话。
    新会话开头传 is_session_start=true，让夜梦在没有 query 的情况下也能参与判断；平时不要随手传。
    旧窗口用 query 或情绪坐标唤起相关梦。

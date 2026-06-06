@@ -159,7 +159,7 @@
 3. 日印象：月历 + 单卡片详情，按日期显示完整 daily relationship weather；手动编辑仍走 bucket 详情面板
 4. Persona：查看 Persona State sessions / events / 当前状态
 5. 记忆网络：Canvas 力导向图（节点=桶，边=相似度）
-6. 配置：热更新脱水/embedding/合并参数
+6. 配置：热更新脱水、embedding、Gateway 记忆浮现、图扩散、反思、梦境和合并参数
 7. 导入：历史对话拖拽上传 → 分块处理进度条 → 词频规律分析 → 导入结果审阅
 
 **部署选项**

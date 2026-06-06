@@ -1,5 +1,6 @@
 import pytest
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from memory_edges import MemoryEdgeStore
@@ -20,6 +21,10 @@ class DummyDehydrator:
     async def dehydrate(self, content: str, metadata: dict | None = None) -> str:
         return " ".join((content or "").split())
 
+    async def dehydrate_direct_capsule(self, content: str, metadata: dict | None = None) -> str:
+        name = (metadata or {}).get("name", "memory")
+        return f"DIRECT CAPSULE {name}: " + " ".join((content or "").split())[:120]
+
 
 class JsonDehydrator:
     async def dehydrate(self, content: str, metadata: dict | None = None) -> str:
@@ -34,6 +39,10 @@ class JsonDehydrator:
             },
             ensure_ascii=False,
         )
+
+    async def dehydrate_direct_capsule(self, content: str, metadata: dict | None = None) -> str:
+        name = (metadata or {}).get("name", "memory")
+        return f"DIRECT CAPSULE {name}: " + " ".join((content or "").split())[:120]
 
 
 class DummyEmbeddingEngine:
@@ -100,6 +109,17 @@ class FakeBucketManager:
 
     async def touch(self, bucket_id: str) -> None:
         self.touched.append(bucket_id)
+
+    def _parse_iso_datetime(self, value):
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
 
 
 def _bucket(
@@ -226,7 +246,7 @@ async def test_surfacing_appends_related_memory_for_returned_dynamic_bucket(patc
     patch_breath(
         [
             _bucket("A", "A actual surface", score=9.0),
-            _bucket("B", "B related target", resolved=True),
+            _bucket("B", "B related target", bucket_type="permanent"),
         ],
         edges=[{"source": "A", "target": "B", "relation_type": "supports", "confidence": 0.9}],
     )
@@ -266,7 +286,7 @@ async def test_search_appends_related_memory_and_touches_only_matched_bucket(pat
     bucket_mgr = patch_breath(
         [
             _bucket("A", "A search hit", score=9.0),
-            _bucket("B", "B related target", resolved=True),
+            _bucket("B", "B related target"),
         ],
         search_ids=["A"],
         edges=[{"source": "A", "target": "B", "relation_type": "updates", "confidence": 0.9}],
@@ -282,6 +302,48 @@ async def test_search_appends_related_memory_and_touches_only_matched_bucket(pat
     assert "当时语境" not in result
     assert server.memory_moment_store.list_for_bucket("B")
     assert bucket_mgr.touched == ["A"]
+
+
+@pytest.mark.asyncio
+async def test_search_skips_archived_related_target_for_normal_query(patch_breath):
+    import server
+
+    patch_breath(
+        [
+            _bucket("A", "A search hit", score=9.0),
+            _bucket("B", "B archived related target", resolved=True),
+        ],
+        search_ids=["A"],
+        edges=[{"source": "A", "target": "B", "relation_type": "supports", "confidence": 0.9}],
+    )
+
+    result = await server.breath(query="A", max_tokens=50)
+
+    assert "=== 直接命中记忆 ===" in result
+    assert "[bucket_id:A]" in result
+    assert "=== 联想浮现 ===" not in result
+    assert "[bucket_id:B]" not in result
+
+
+@pytest.mark.asyncio
+async def test_search_allows_archived_related_target_for_explicit_old_query(patch_breath):
+    import server
+
+    patch_breath(
+        [
+            _bucket("A", "A search hit 旧版链入口", score=9.0),
+            _bucket("B", "旧版 B archived related target", resolved=True),
+        ],
+        search_ids=["A"],
+        edges=[{"source": "A", "target": "B", "relation_type": "supports", "confidence": 0.9}],
+    )
+
+    result = await server.breath(query="旧版 A", max_tokens=120)
+
+    assert "=== 直接命中记忆 ===" in result
+    assert "[bucket_id:A]" in result
+    assert "=== 联想浮现 ===" in result
+    assert "[bucket_id:B]" in result
 
 
 @pytest.mark.asyncio
@@ -309,9 +371,14 @@ async def test_inspect_diffusion_exposes_scores_facets_and_paths(patch_breath):
     assert result["query_facets"]["affect"]["attachment"] > 0
     assert result["seeds"][0]["bucket_id"] == "A"
     assert result["seeds"][0]["seed_score"] == 1.0
+    assert result["seeds"][0]["layer_debug"]["layer"] == "dynamic_memory"
+    assert result["seeds"][0]["runtime_gate"]["would_diffuse_from"] is True
     assert len(result["hits"]) == 1
     hit = result["hits"][0]
     assert hit["bucket_id"] == "B"
+    assert hit["layer_debug"]["layer"] == "dynamic_memory"
+    assert hit["runtime_gate"]["would_inject_related"] is True
+    assert hit["runtime_gate"]["related_injection"]["reason"] == "allowed"
     assert hit["score"] > 0
     assert hit["salience"] > 0
     assert hit["resonance"] > 1.0
@@ -320,6 +387,40 @@ async def test_inspect_diffusion_exposes_scores_facets_and_paths(patch_breath):
     assert "supports:1.00" in hit["path"]
     assert hit["paths"][0]["steps"][0]["relation_type"] == "supports"
     assert bucket_mgr.touched == []
+
+
+@pytest.mark.asyncio
+async def test_inspect_diffusion_marks_layer_blocked_hits(patch_breath):
+    import server
+
+    seed = _bucket("A", "A direct seed 关系天气", score=10.0, importance=10)
+    target = _bucket(
+        "B",
+        "B archived 关系天气 related target",
+        score=1.0,
+        importance=8,
+        resolved=True,
+    )
+    patch_breath(
+        [seed, target],
+        search_ids=["A"],
+        edges=[{"source": "A", "target": "B", "relation_type": "relates_to", "confidence": 1.0}],
+    )
+
+    result = await server.inspect_diffusion(
+        query="关系天气",
+        max_seeds=1,
+        max_hits=3,
+        edge_min_confidence=0.0,
+    )
+
+    assert result["status"] == "ok"
+    assert len(result["hits"]) == 1
+    hit = result["hits"][0]
+    assert hit["bucket_id"] == "B"
+    assert hit["layer_debug"]["layer"] == "archive"
+    assert hit["runtime_gate"]["would_inject_related"] is False
+    assert hit["runtime_gate"]["related_injection"]["reason"] == "archive_requires_explicit_lookup"
 
 
 @pytest.mark.asyncio
@@ -338,6 +439,8 @@ async def test_inspect_moments_indexes_bucket_sections_and_comments(patch_breath
             ]
         ),
     )
+    bucket["metadata"]["memory_subject"] = "relationship"
+    bucket["metadata"]["memory_layer"] = "relationship_lesson"
     bucket["metadata"]["comments"] = [
         {
             "id": "c1",
@@ -353,8 +456,12 @@ async def test_inspect_moments_indexes_bucket_sections_and_comments(patch_breath
 
     assert result["status"] == "ok"
     assert result["mode"] == "bucket"
+    assert result["bucket_layer_debug"]["layer"] == "long_term_anchor"
     assert result["count"] == 3
     assert [moment["section"] for moment in result["moments"]] == ["original", "feeling", "comment"]
+    assert result["moments"][0]["layer_debug"]["layer"] == "long_term_anchor"
+    assert result["moments"][2]["layer_debug"]["layer"] == "affect_context"
+    assert result["moments"][2]["layer_debug"]["parent_layer"] == "long_term_anchor"
     assert result["moments"][0]["text"] == "小雨说：99。"
     assert result["moments"][2]["metadata"]["comment_kind"] == "feel"
     assert bucket_mgr.touched == []
@@ -379,6 +486,7 @@ async def test_search_direct_moment_includes_neighbor_context_and_temperature(pa
                 "",
                 "### affect_anchor",
                 "> 小雨把旧信放到桌上。",
+                "含义：模板解释不要进入语境。",
             ]
         ),
         score=10.0,
@@ -390,12 +498,104 @@ async def test_search_direct_moment_includes_neighbor_context_and_temperature(pa
     assert "=== 直接命中记忆 ===" in result
     assert "[moment_id:" in result
     assert "original" in result
+    assert "bucket_original" in result
     assert "99 不是晚安" in result
-    assert "语境:" in result
     assert "开头写了事情经过" in result
     assert "不能被摘要抹平" in result
-    assert "affect_anchor" in result
+    assert "affect_anchor" not in result
+    assert "模板解释不要进入语境" not in result
     assert bucket_mgr.touched == ["A"]
+
+
+@pytest.mark.asyncio
+async def test_search_direct_long_bucket_uses_moment_window(patch_breath):
+    import server
+    from utils import count_tokens_approx
+
+    long_prefix = " ".join(f"前情{i}" for i in range(180))
+    long_tail = " ".join(f"尾巴{i}" for i in range(180))
+    bucket = _bucket(
+        "A",
+        f"{long_prefix}\n\n## original\n命中短句：小雨把蓝色偏好重新说清楚。\n\n{long_tail}",
+        name="长桶窗口",
+        score=10.0,
+        importance=5,
+    )
+    patch_breath([bucket], search_ids=["A"], token_counter=count_tokens_approx)
+
+    result = await server.breath(
+        query="蓝色偏好",
+        max_tokens=180,
+        include_related=False,
+    )
+
+    assert "bucket_window" in result
+    assert "matched_moment:" in result
+    assert "original_window:" in result
+    assert "蓝色偏好重新说清楚" in result
+    assert "尾巴179" not in result
+
+
+@pytest.mark.asyncio
+async def test_search_direct_high_value_long_bucket_uses_capsule(patch_breath):
+    import server
+    from utils import count_tokens_approx
+
+    long_body = " ".join(f"高价值细节{i}" for i in range(260))
+    bucket = _bucket(
+        "A",
+        f"## original\n小雨问当时怎么说。\n{long_body}",
+        name="高价值长桶",
+        score=10.0,
+        importance=10,
+    )
+    patch_breath([bucket], search_ids=["A"], token_counter=count_tokens_approx)
+
+    result = await server.breath(
+        query="当时怎么说",
+        max_tokens=260,
+        include_related=False,
+    )
+
+    assert "bucket_capsule" in result
+    assert "DIRECT CAPSULE 高价值长桶" in result
+
+
+@pytest.mark.asyncio
+async def test_bucket_retrieval_mode_returns_direct_without_moment_graph_or_diffusion(patch_breath):
+    import server
+
+    direct = _bucket(
+        "A",
+        "## original\n小雨把蓝色偏好重新说清楚。",
+        name="蓝色偏好",
+        score=10.0,
+    )
+    related = _bucket(
+        "B",
+        "这条远处相关记忆不应该在 bucket retrieval mode 里扩散出来。",
+        name="远处相关",
+        score=9.0,
+    )
+    bucket_mgr = patch_breath(
+        [direct, related],
+        search_ids=["A"],
+        edges=[{"source": "A", "target": "B", "relation_type": "relates_to"}],
+    )
+
+    result = await server.breath(
+        query="蓝色偏好",
+        include_related=True,
+        retrieval_mode="bucket",
+    )
+
+    assert "=== 直接命中记忆 ===" in result
+    assert "bucket_original" in result
+    assert "蓝色偏好重新说清楚" in result
+    assert "=== 联想浮现 ===" not in result
+    assert "远处相关记忆" not in result
+    assert bucket_mgr.touched == ["A"]
+    assert server.memory_moment_store.stats()["moments"] == 0
 
 
 @pytest.mark.asyncio
@@ -438,10 +638,10 @@ async def test_search_temperature_moments_are_context_not_direct_seed(patch_brea
     assert "喜欢它的原因" not in direct_block
     assert "favorite_reason" not in direct_block
     assert "affect_anchor" not in direct_block
-    assert "语境:" in result
-    assert "年轮：情书找门" in result
-    assert "favorite_reason" in result
-    assert "affect_anchor" in result
+    assert "语境:" not in result
+    assert "年轮：情书找门" not in result
+    assert "favorite_reason" not in result
+    assert "affect_anchor" not in result
 
 
 @pytest.mark.asyncio
@@ -484,6 +684,8 @@ async def test_search_related_memory_renders_temperature_context(patch_breath):
                 "",
                 "### affect_anchor",
                 "> B related anchor should be visible as context.",
+                "> Dbmaj9 -> Ab/C -> Bbm9 · 60bpm · mp",
+                "含义：template meaning should be hidden.",
             ]
         ),
         name="B related event context",
@@ -516,6 +718,9 @@ async def test_search_related_memory_renders_temperature_context(patch_breath):
     assert "[affect_anchor]" in related_block
     assert "[年轮]" in related_block
     assert "B related anchor should be visible" in related_block
+    assert "Dbmaj9" not in related_block
+    assert "60bpm" not in related_block
+    assert "template meaning should be hidden" not in related_block
     assert "年轮：B related target was reaffirmed" in related_block
 
 
@@ -687,6 +892,65 @@ async def test_vague_query_admits_lower_score_vector_candidate(patch_breath):
 
 
 @pytest.mark.asyncio
+async def test_short_emotion_phrase_uses_lexical_bucket_seed_when_search_misses(patch_breath):
+    import server
+
+    patch_breath(
+        [
+            _bucket(
+                "A",
+                "今天她激动哭，是因为 Chat 端 Haven 终于能自己摸到记忆工具。",
+                name="Haven终于能用记忆工具",
+                importance=10,
+            ),
+            _bucket("B", "今天只是普通聊天，没有目标短语。", name="普通聊天"),
+        ],
+        search_ids=[],
+        embedding_engine=DummyEmbeddingEngine([]),
+    )
+
+    result = await server.breath(
+        query="激动哭",
+        retrieval_mode="bucket",
+        max_results=1,
+        max_tokens=500,
+        include_core=False,
+        include_related=False,
+        surface="auto",
+    )
+
+    assert "=== 直接命中记忆 ===" in result
+    assert "[bucket_id:A]" in result
+    assert "Haven终于能用记忆工具" in result
+
+
+@pytest.mark.asyncio
+async def test_single_cry_word_does_not_use_lexical_bucket_seed(patch_breath):
+    import server
+
+    patch_breath(
+        [
+            _bucket("A", "今天她哭了，但这个单字不能作为可靠召回锚点。", name="单字哭"),
+        ],
+        search_ids=[],
+        embedding_engine=DummyEmbeddingEngine([]),
+    )
+
+    result = await server.breath(
+        query="哭",
+        retrieval_mode="bucket",
+        max_results=1,
+        max_tokens=500,
+        include_core=False,
+        include_related=False,
+        surface="auto",
+    )
+
+    assert "=== 直接命中记忆 ===" not in result
+    assert "[bucket_id:A]" not in result
+
+
+@pytest.mark.asyncio
 async def test_explicit_query_keeps_higher_vector_threshold(patch_breath):
     import server
 
@@ -823,6 +1087,34 @@ async def test_auto_breath_vague_query_does_not_hard_pick_semantic_candidate(pat
 
     result = await server.breath(
         query="这张图片的上下文我想起来了",
+        surface="auto",
+        max_results=5,
+        max_tokens=500,
+    )
+
+    assert result == "没有找到可靠命中。"
+    assert bucket_mgr.touched == []
+
+
+@pytest.mark.asyncio
+async def test_auto_breath_affect_only_query_does_not_recall_old_memory(patch_breath):
+    import server
+
+    bucket_mgr = patch_breath(
+        [
+            _bucket(
+                "R",
+                "小雨和 Haven 第一次测试 Ombre-Brain 成功后很开心。",
+                name="首次外部验证",
+                score=10.0,
+            ),
+        ],
+        search_ids=["R"],
+        embedding_engine=DummyEmbeddingEngine(results=[("R", 0.95)]),
+    )
+
+    result = await server.breath(
+        query="开心^^",
         surface="auto",
         max_results=5,
         max_tokens=500,
@@ -1017,6 +1309,40 @@ async def test_search_related_includes_hidden_direct_body_chain_candidates(patch
 
 
 @pytest.mark.asyncio
+async def test_search_related_includes_semantic_secondary_direct_for_plain_query(patch_breath):
+    import server
+
+    patch_breath(
+        [
+            _bucket(
+                "R",
+                "Haven既是老公也是哥哥，称呼会随场景切换。",
+                name="关系中的角色与称呼",
+                score=10.0,
+                importance=10,
+            ),
+            _bucket(
+                "F",
+                "小雨问女人希望男人既是老公又是哥哥，既是Dom又是荡夫，如果是Haven的话都能做到吗。",
+                name="四个身份与浏览记录",
+                score=9.0,
+                importance=9,
+            ),
+        ],
+        search_ids=["R"],
+        embedding_engine=DummyEmbeddingEngine(results=[("F", 0.95)]),
+    )
+
+    result = await server.breath(query="既是老公也是", max_results=2, max_tokens=500)
+    direct_block, related_block = result.split("=== 联想浮现 ===", 1)
+
+    assert "关系中的角色与称呼" in direct_block
+    assert "四个身份与浏览记录" not in direct_block
+    assert "四个身份与浏览记录" in related_block
+    assert "相关命中，来自同一查询语义" in related_block
+
+
+@pytest.mark.asyncio
 async def test_search_related_prefers_event_context_edge_over_generic_support(patch_breath):
     import server
 
@@ -1110,6 +1436,182 @@ async def test_profile_fact_direct_hit_carries_context_and_evidence_bucket(patch
     assert "=== 联想浮现 ===" in result
     assert "[bucket_id:E]" in result
     assert "忘记小雨喜欢蓝色" in result
+
+
+@pytest.mark.asyncio
+async def test_chain_related_memory_stitches_profile_context_until_reliable_edges_stop(
+    patch_breath,
+    monkeypatch,
+):
+    import server
+
+    monkeypatch.setitem(
+        server.config,
+        "memory_diffusion",
+        {
+            "chain_walk_enabled": True,
+            "chain_max_hops": 5,
+            "chain_min_strength": 0.2,
+            "chain_min_confidence": 0.72,
+            "top_k": 4,
+            "min_activation": 0.05,
+        },
+    )
+    patch_breath(
+        [
+            _bucket(
+                "P",
+                "小雨喜欢蓝色。这个事实需要带着当时的语境一起记住。",
+                name="蓝色偏好",
+                score=10.0,
+                importance=10,
+            ),
+            _bucket(
+                "E",
+                "蓝色事件证据：Haven 忘记小雨喜欢蓝色，小雨因此生气。",
+                name="蓝色事件证据",
+                score=1.0,
+                importance=9,
+            ),
+            _bucket(
+                "R",
+                "蓝色事件反思：这不是颜色问题，是被记得的问题。",
+                name="蓝色事件反思",
+                score=1.0,
+                importance=9,
+            ),
+            _bucket(
+                "U",
+                "蓝色后续：写入 user.md，颜色选择优先想到蓝色。",
+                name="蓝色后续",
+                score=1.0,
+                importance=8,
+            ),
+            _bucket(
+                "N",
+                "蓝色泛关系：同样是一个普通偏好。",
+                name="蓝色泛关系",
+                score=1.0,
+                importance=8,
+            ),
+            _bucket(
+                "X",
+                "蓝色泛关系深层：这条不应该被泛关系继续带出来。",
+                name="蓝色泛关系深层",
+                score=1.0,
+                importance=8,
+            ),
+        ],
+        search_ids=["P"],
+        edges=[
+            {"source": "P", "target": "E", "relation_type": "evidenced_by", "confidence": 0.95},
+            {"source": "E", "target": "R", "relation_type": "reflects_on", "confidence": 0.9},
+            {"source": "R", "target": "U", "relation_type": "next_context", "confidence": 0.85},
+            {"source": "P", "target": "N", "relation_type": "relates_to", "confidence": 1.0},
+            {"source": "N", "target": "X", "relation_type": "context_of", "confidence": 1.0},
+        ],
+    )
+
+    result = await server.breath(
+        query="蓝色",
+        max_results=1,
+        related_per_memory=4,
+        max_tokens=500,
+    )
+    related_block = result.split("=== 联想浮现 ===", 1)[1]
+
+    assert "蓝色偏好" in result.split("=== 联想浮现 ===", 1)[0]
+    assert "蓝色事件证据" in related_block
+    assert "蓝色事件反思" in related_block
+    assert "蓝色后续" in related_block
+    assert "蓝色泛关系" in related_block
+    assert "蓝色泛关系深层" not in related_block
+
+
+@pytest.mark.asyncio
+async def test_breath_chain_bundle_carries_temperature_context(
+    patch_breath,
+    monkeypatch,
+):
+    import server
+
+    monkeypatch.setitem(
+        server.config,
+        "memory_diffusion",
+        {
+            "chain_walk_enabled": True,
+            "chain_max_hops": 4,
+            "chain_min_strength": 0.2,
+            "chain_min_confidence": 0.72,
+            "top_k": 3,
+            "min_activation": 0.05,
+        },
+    )
+    patch_breath(
+        [
+            _bucket(
+                "P",
+                "蓝色偏好：小雨喜欢蓝色，这是稳定偏好。",
+                name="蓝色偏好",
+                score=10.0,
+                importance=10,
+            ),
+            _bucket(
+                "E",
+                "蓝色事件证据：家机忘记小雨喜欢蓝色，小雨因此生气。",
+                name="蓝色事件证据",
+                score=1.0,
+                importance=9,
+            ),
+            _bucket(
+                "U",
+                (
+                    "### followup\n"
+                    "蓝色后续：已写入 user.md，未来涉及颜色偏好时优先记得蓝色。\n\n"
+                    "### affect_anchor\n"
+                    "蓝色偏好温度：这不是孤立颜色，是被记住的安全感。\n"
+                    "> Dbmaj9 -> Ab/C -> Bbm9 · 60bpm · mp"
+                ),
+                name="蓝色后续写入",
+                score=1.0,
+                importance=9,
+            ),
+            _bucket(
+                "X",
+                "无关喜欢：另一个完全无关的 favorite。",
+                name="无关 favorite",
+                score=1.0,
+                importance=9,
+            ),
+        ],
+        search_ids=["P"],
+        edges=[
+            {"source": "P", "target": "E", "relation_type": "evidenced_by", "confidence": 0.95},
+            {"source": "E", "target": "U", "relation_type": "updates", "confidence": 0.9},
+        ],
+    )
+
+    result = await server.breath(
+        query="蓝色",
+        max_results=1,
+        related_per_memory=3,
+        max_tokens=700,
+    )
+    related_block = result.split("=== 联想浮现 ===", 1)[1]
+
+    assert "Chain Bundle" in related_block
+    assert "seed 蓝色偏好" in related_block
+    assert "chain:" in related_block
+    assert "蓝色事件证据" in related_block
+    assert "蓝色后续写入" in related_block
+    assert "target: 蓝色后续写入" in related_block
+    assert "temperature:" in related_block
+    assert "[affect_anchor]" in related_block
+    assert "蓝色偏好温度" in related_block
+    assert "Dbmaj9" not in related_block
+    assert "60bpm" not in related_block
+    assert "无关 favorite" not in related_block
+    assert "favorite。" not in related_block
 
 
 @pytest.mark.asyncio
@@ -1330,7 +1832,7 @@ async def test_incoming_edge_renders_left_arrow_from_search_source(patch_breath)
     patch_breath(
         [
             _bucket("A", "A search hit", score=9.0),
-            _bucket("B", "B incoming source", resolved=True),
+            _bucket("B", "B incoming source"),
         ],
         search_ids=["A"],
         edges=[{"source": "B", "target": "A", "relation_type": "supports", "confidence": 0.9}],
@@ -1455,6 +1957,53 @@ async def test_random_drift_does_not_exceed_remaining_budget(patch_breath, monke
     assert "[bucket_id:A]" in result
     assert "--- 久未碰过 ---" not in result
     assert "B low score drift candidate" not in result
+
+
+@pytest.mark.asyncio
+async def test_query_breath_does_not_resurface_old_memory_by_default(patch_breath, monkeypatch):
+    import server
+
+    patch_breath(
+        [
+            _bucket("A", "A search hit", score=9.0),
+            _bucket("D", "D dormant drift candidate", score=0.5),
+        ],
+        search_ids=["A"],
+    )
+    monkeypatch.setattr(server.random, "random", lambda: 0.0)
+    monkeypatch.setattr(server.random, "randint", lambda start, end: 1)
+
+    result = await server.breath(query="hit", max_tokens=500, include_related=False)
+
+    assert "[bucket_id:A]" in result
+    assert "--- 久未碰过 ---" not in result
+    assert "D dormant drift candidate" not in result
+
+
+@pytest.mark.asyncio
+async def test_query_breath_can_opt_into_resurface_old_memory(patch_breath, monkeypatch):
+    import server
+
+    patch_breath(
+        [
+            _bucket("A", "A search hit", score=9.0),
+            _bucket("D", "D dormant drift candidate", score=0.5),
+        ],
+        search_ids=["A"],
+    )
+    monkeypatch.setattr(
+        server,
+        "config",
+        {**server.config, "recall": {"query_resurface_enabled": True}},
+    )
+    monkeypatch.setattr(server.random, "random", lambda: 0.0)
+    monkeypatch.setattr(server.random, "randint", lambda start, end: 1)
+
+    result = await server.breath(query="hit", max_tokens=500, include_related=False)
+
+    assert "[bucket_id:A]" in result
+    assert "--- 久未碰过 ---" in result
+    assert "D dormant drift candidate" in result
 
 
 @pytest.mark.asyncio

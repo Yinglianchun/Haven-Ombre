@@ -1,7 +1,11 @@
 import sqlite3
 from pathlib import Path
 
+import frontmatter
+
+from bucket_manager import BucketManager
 from memory_moments import MemoryMomentStore, parse_bucket_moments
+from source_refs import source_ref_window
 
 
 def _bucket(bucket_id: str, content: str, **metadata) -> dict:
@@ -85,6 +89,24 @@ def test_moments_store_summary_facets_and_evidence_spans(test_config):
     assert any(span["facet"] == "relationship_identity" for span in meta["evidence_spans"])
 
 
+def test_moment_metadata_preserves_writer_classification(test_config):
+    store = MemoryMomentStore(test_config)
+    bucket = _bucket(
+        "writer-layer",
+        "Haven 以后要先接住小雨的情绪。",
+        memory_subject="relationship",
+        memory_layer="relationship_lesson",
+        memory_classification_source="model",
+    )
+
+    moments = store.upsert_bucket(bucket)
+    meta = moments[0]["metadata"]
+
+    assert meta["bucket_memory_subject"] == "relationship"
+    assert meta["bucket_memory_layer"] == "relationship_lesson"
+    assert meta["bucket_memory_classification_source"] == "model"
+
+
 def test_structured_bucket_splits_known_sections_and_preserves_unknown_blocks():
     bucket = _bucket(
         "structured",
@@ -119,6 +141,96 @@ def test_structured_bucket_splits_known_sections_and_preserves_unknown_blocks():
     assert moments[0]["text"] == "开头背景片段。"
     assert moments[2]["text"] == "小雨说：99。"
     assert moments[3]["text"] == "## unknown\n未识别标题不要丢。"
+
+
+def test_moments_include_bucket_source_ref_line_ranges(tmp_path):
+    bucket_path = tmp_path / "buckets" / "dynamic" / "恋爱" / "source_bucket.md"
+    content = "\n".join(
+        [
+            "开头背景片段。",
+            "",
+            "## moment",
+            "一条短事实。",
+            "",
+            "## original",
+            "小雨说：99。",
+        ]
+    )
+    bucket = _bucket(
+        "source-ref",
+        content,
+        path=str(bucket_path),
+        content_start_line=8,
+    )
+
+    moments = parse_bucket_moments(bucket)
+    refs = [moment["metadata"]["source_ref"] for moment in moments]
+
+    assert refs[0] == {
+        "path": str(bucket_path),
+        "content_start_line": 8,
+        "start_line": 8,
+        "end_line": 8,
+        "source": "bucket_content",
+    }
+    assert refs[1]["content_start_line"] == 8
+    assert refs[1]["start_line"] == 10
+    assert refs[1]["end_line"] == 11
+    assert refs[2]["start_line"] == 13
+    assert refs[2]["end_line"] == 14
+
+
+def test_source_ref_window_reads_allowed_bucket_lines(tmp_path):
+    bucket_path = tmp_path / "bucket.md"
+    bucket_path.write_text(
+        "\n".join(
+            [
+                "---",
+                "id: source-ref",
+                "---",
+                "before",
+                "## original",
+                "小雨说：99。",
+                "after",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    moment = {
+        "metadata": {
+            "source_ref": {
+                "path": str(bucket_path),
+                "content_start_line": 4,
+                "start_line": 5,
+                "end_line": 6,
+                "source": "bucket_content",
+            }
+        }
+    }
+
+    window = source_ref_window(moment, allowed_root=str(tmp_path), context_lines=1)
+
+    assert "before" in window
+    assert "id: source-ref" not in window
+    assert "## original" in window
+    assert "小雨说：99。" in window
+    assert "after" in window
+    assert source_ref_window(moment, allowed_root=str(tmp_path / "other")) == ""
+
+
+def test_bucket_manager_loads_content_start_line(test_config):
+    bucket_mgr = BucketManager(test_config)
+    bucket_path = Path(test_config["buckets_dir"]) / "dynamic" / "source.md"
+    bucket_path.parent.mkdir(parents=True, exist_ok=True)
+    post = frontmatter.Post("正文第一行\n正文第二行", id="source", name="source", type="dynamic")
+    bucket_path.write_text(frontmatter.dumps(post), encoding="utf-8")
+
+    bucket = bucket_mgr._load_bucket(str(bucket_path))
+    lines = bucket_path.read_text(encoding="utf-8").splitlines()
+
+    assert bucket["path"] == str(bucket_path)
+    assert bucket["content_start_line"] > 1
+    assert lines[bucket["content_start_line"] - 1] == "正文第一行"
 
 
 def test_favorite_tags_and_affect_anchor_are_preserved_as_bucket_temperature():

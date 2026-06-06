@@ -8,6 +8,7 @@ from memory_relevance import (
     MemoryRelevanceOptions,
     content_terms_for_query,
     memory_relevance_options_from_config,
+    query_has_facet,
     query_has_explicit_entity_marker,
     query_has_technical_recall_marker,
     recall_admission_decision,
@@ -15,6 +16,20 @@ from memory_relevance import (
 
 
 CONTEXT_ONLY_SECTIONS = frozenset({"affect_anchor", "favorite_reason", "comment"})
+CONTEXT_ONLY_SECTION_ALIASES = {
+    "affect_anchor": "affect_anchor",
+    "affect anchor": "affect_anchor",
+    "favorite_reason": "favorite_reason",
+    "favorite reason": "favorite_reason",
+    "comment": "comment",
+    "year_ring": "comment",
+    "year ring": "comment",
+    "喜欢它的原因": "favorite_reason",
+    "喜欢的原因": "favorite_reason",
+    "年轮": "comment",
+    "评论": "comment",
+}
+MARKDOWN_HEADING_RE = re.compile(r"^(#{2,6})\s+(.+?)\s*$")
 WEAK_RECALL_TOPIC_TERMS = frozenset(
     {
         "进度",
@@ -55,6 +70,89 @@ WEAK_RECALL_TOPIC_TERMS = frozenset(
         "topic",
     }
 )
+OLD_OR_RESOLVED_QUERY_MARKERS = frozenset(
+    {
+        "冲突",
+        "吵架",
+        "争吵",
+        "矛盾",
+        "误会",
+        "旧版本",
+        "旧版",
+        "旧链",
+        "旧窗口",
+        "已解决",
+        "过期",
+        "归档",
+        "conflict",
+        "fight",
+        "argument",
+        "old version",
+        "old path",
+        "old chain",
+        "resolved",
+        "archived",
+        "deprecated",
+        "obsolete",
+    }
+)
+CAUTION_CONTEXT_MODES = frozenset({"reflective_repair", "conflict_repair"})
+RESPONSE_ACTION_QUERY_MARKERS = frozenset(
+    {
+        "回复",
+        "回一下",
+        "回个",
+        "评论",
+        "留言",
+        "跟个",
+        "跟一句",
+        "说个",
+        "说一句",
+        "发个",
+        "发一句",
+        "补个",
+        "补一句",
+        "嗯",
+    }
+)
+RESPONSE_ACTION_FILLER_TERMS = frozenset(
+    {
+        "要不要",
+        "要不",
+        "是否",
+        "是不是",
+        "需不需要",
+        "需要",
+        "可以",
+        "可不可以",
+        "能不能",
+        "回复一下",
+        "回一下",
+        "回个",
+        "回复",
+        "评论一下",
+        "评论",
+        "留言",
+        "跟个",
+        "跟一句",
+        "说个",
+        "说一句",
+        "发个",
+        "发一句",
+        "补个",
+        "补一句",
+        "或者",
+        "还是",
+        "这条帖子",
+        "那条帖子",
+        "帖子",
+        "这条消息",
+        "那条消息",
+        "消息",
+        "嗯嗯",
+        "嗯",
+    }
+)
 AUTO_VAGUE_RECALL_MARKERS = frozenset(
     {
         "上下文",
@@ -78,6 +176,7 @@ AUTO_VAGUE_RECALL_MARKERS = frozenset(
         "这个",
         "这个图",
         "这条",
+        "那次",
         "那条",
         "那个",
         "相关",
@@ -118,6 +217,7 @@ AUTO_VAGUE_FILLER_TERMS = frozenset(
         "现在",
         "当前",
         "这次",
+        "那次",
         "想起来",
         "想起",
         "想到了",
@@ -146,6 +246,100 @@ AUTO_VAGUE_FILLER_TERMS = frozenset(
         "anything",
     }
 )
+AFFECT_ONLY_QUERY_TERMS = frozenset(
+    {
+        "开心",
+        "高兴",
+        "快乐",
+        "幸福",
+        "甜",
+        "温柔",
+        "感动",
+        "安心",
+        "舒服",
+        "喜欢",
+        "难过",
+        "伤心",
+        "痛苦",
+        "委屈",
+        "焦虑",
+        "烦",
+        "烦躁",
+        "生气",
+        "愤怒",
+        "害怕",
+        "恐惧",
+        "低落",
+        "沮丧",
+        "崩溃",
+        "累",
+        "疲惫",
+        "想哭",
+        "不开心",
+        "不高兴",
+        "不安",
+        "孤独",
+        "寂寞",
+        "emo",
+        "sad",
+        "happy",
+        "angry",
+        "tired",
+        "anxious",
+        "lonely",
+        "upset",
+    }
+)
+AFFECT_ONLY_QUERY_FILLERS = frozenset(
+    {
+        "我",
+        "你",
+        "他",
+        "她",
+        "它",
+        "我们",
+        "你们",
+        "他们",
+        "她们",
+        "今天",
+        "昨天",
+        "刚才",
+        "刚刚",
+        "现在",
+        "当前",
+        "有点",
+        "一点",
+        "一点点",
+        "很",
+        "好",
+        "超",
+        "太",
+        "特别",
+        "非常",
+        "真的",
+        "确实",
+        "有些",
+        "有点儿",
+        "了",
+        "啦",
+        "呢",
+        "啊",
+        "呀",
+        "嘛",
+        "吗",
+        "吧",
+        "qwq",
+        "tt",
+        "so",
+        "very",
+        "really",
+        "abit",
+        "bit",
+        "little",
+        "today",
+        "now",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -160,6 +354,35 @@ class RecallPolicyDecision:
     @property
     def admit(self) -> bool:
         return self.admit_direct
+
+
+@dataclass(frozen=True)
+class RecallQueryPlan:
+    query: str
+    wants_body_chain: bool
+    requires_topic_evidence: bool
+    enforce_topic_evidence: bool
+    recent_context_requires_topic_evidence: bool
+    explicit_old_memory: bool
+    allow_caution_diffusion: bool
+    specific_terms: tuple[str, ...]
+
+    @property
+    def allow_archive_targets(self) -> bool:
+        return self.allow_caution_diffusion
+
+    @property
+    def related_max_chars(self) -> int:
+        return 90 if self.wants_body_chain else 180
+
+    def secondary_direct_limit(self, related_per_memory: int) -> int:
+        if self.wants_body_chain:
+            return 5
+        return max(0, min(2, int(related_per_memory or 0)))
+
+    @property
+    def secondary_direct_requires_topic_evidence(self) -> bool:
+        return not self.wants_body_chain
 
 
 class RecallPolicy:
@@ -180,12 +403,43 @@ class RecallPolicy:
     def should_enforce_topic_evidence(self, query: str, *, allow_body_chain: bool = False) -> bool:
         return self.requires_topic_evidence(query) and not allow_body_chain
 
+    def plan_query(self, query: str, *, context_mode: str = "") -> RecallQueryPlan:
+        text = str(query or "").strip()
+        wants_body_chain = query_has_facet(text, "embodiment", self.options)
+        explicit_old_memory = self._query_explicitly_requests_old_memory(text)
+        allow_caution_diffusion = explicit_old_memory or str(context_mode or "").strip() in CAUTION_CONTEXT_MODES
+        return RecallQueryPlan(
+            query=text,
+            wants_body_chain=wants_body_chain,
+            requires_topic_evidence=self.requires_topic_evidence(text),
+            enforce_topic_evidence=self.should_enforce_topic_evidence(
+                text,
+                allow_body_chain=wants_body_chain,
+            ),
+            recent_context_requires_topic_evidence=self.is_auto_concrete_topic_query(text),
+            explicit_old_memory=explicit_old_memory,
+            allow_caution_diffusion=allow_caution_diffusion,
+            specific_terms=tuple(self.specific_query_terms(text)),
+        )
+
+    def _query_explicitly_requests_old_memory(self, query: str) -> bool:
+        if not str(query or "").strip():
+            return False
+        if query_has_facet(query, "old_or_resolved", self.options):
+            return True
+        text = " ".join(str(query or "").lower().split())
+        return any(marker in text for marker in OLD_OR_RESOLVED_QUERY_MARKERS)
+
     def is_auto_query_too_vague(self, query: str) -> bool:
         text = str(query or "").strip()
         if not text:
             return False
         if query_has_explicit_entity_marker(text) or query_has_technical_recall_marker(text):
             return False
+        if self._is_affect_only_query(text):
+            return True
+        if self._is_context_free_response_action_query(text):
+            return True
         lowered = text.lower()
         if not any(marker in lowered for marker in AUTO_VAGUE_RECALL_MARKERS):
             return False
@@ -194,6 +448,8 @@ class RecallPolicy:
     def is_auto_concrete_topic_query(self, query: str) -> bool:
         text = str(query or "").strip()
         if not text or self.is_auto_query_too_vague(text):
+            return False
+        if self._is_affect_only_query(text):
             return False
         if query_has_explicit_entity_marker(text) or query_has_technical_recall_marker(text):
             return True
@@ -242,6 +498,39 @@ class RecallPolicy:
                 stripped = stripped.replace(cleaned, "")
         stripped = re.sub(r"[我你他她它的是了嘛吗呢啊呀欸诶吧哈嗯呜有里看查找问说]+", "", stripped)
         return len(stripped) >= 2
+
+    def _is_context_free_response_action_query(self, query: str) -> bool:
+        lowered = str(query or "").lower()
+        if not any(marker in lowered for marker in RESPONSE_ACTION_QUERY_MARKERS):
+            return False
+        compact = re.sub(r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+", "", lowered)
+        stripped = compact
+        removable = list(
+            RESPONSE_ACTION_FILLER_TERMS
+            | AUTO_VAGUE_FILLER_TERMS
+            | set(self.options.context_terms)
+        )
+        for term in sorted(removable, key=len, reverse=True):
+            cleaned = re.sub(r"\s+", "", str(term or "").lower())
+            if cleaned:
+                stripped = stripped.replace(cleaned, "")
+        stripped = re.sub(
+            r"[我你他她它的是了嘛吗呢啊呀欸诶吧哈嗯呜有里看查找问说]+",
+            "",
+            stripped,
+        )
+        return len(stripped) < 2
+
+    def _is_affect_only_query(self, query: str) -> bool:
+        compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(query or "").lower())
+        if not compact:
+            return False
+        stripped = compact
+        for term in sorted(AFFECT_ONLY_QUERY_FILLERS, key=len, reverse=True):
+            stripped = stripped.replace(term, "")
+        if not stripped:
+            return False
+        return stripped in AFFECT_ONLY_QUERY_TERMS
 
     def specific_query_terms(self, query: str) -> list[str]:
         raw = str(query or "")
@@ -295,7 +584,7 @@ class RecallPolicy:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         fields = " ".join(
             [
-                str(bucket.get("content") or ""),
+                _content_without_context_only_sections(str(bucket.get("content") or "")),
                 str(meta.get("name") or ""),
                 str(meta.get("annotation_summary") or ""),
                 _evidence_spans_text(meta.get("evidence_spans")),
@@ -456,6 +745,35 @@ def _evidence_spans_text(value: Any) -> str:
         elif isinstance(item, str) and item.strip():
             parts.append(item.strip())
     return " ".join(parts)
+
+
+def _content_without_context_only_sections(content: str) -> str:
+    lines = str(content or "").splitlines()
+    kept: list[str] = []
+    skip_until_level = 0
+    for line in lines:
+        match = MARKDOWN_HEADING_RE.match(line)
+        if match:
+            level = len(match.group(1))
+            raw_heading = match.group(2).strip()
+            if skip_until_level and level > skip_until_level:
+                continue
+            skip_until_level = 0
+            if _context_only_heading(raw_heading):
+                skip_until_level = level
+                continue
+        if skip_until_level:
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _context_only_heading(heading: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(heading or "").strip().lower())
+    normalized = normalized.strip("：: -_")
+    normalized = re.sub(r"^\d+[.、]\s*", "", normalized)
+    normalized = normalized.replace("-", "_")
+    return CONTEXT_ONLY_SECTION_ALIASES.get(normalized, normalized) in CONTEXT_ONLY_SECTIONS
 
 
 def _term_subsumes(container: str, contained: str) -> bool:

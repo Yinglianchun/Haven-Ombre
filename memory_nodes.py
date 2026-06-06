@@ -225,6 +225,19 @@ class MemoryNodeStore:
         conn.close()
         return self._row_to_node(row) if row else None
 
+    def delete(self, bucket_id: str) -> bool:
+        bucket_id = str(bucket_id or "").strip()
+        if not bucket_id:
+            return False
+        conn = self._connect()
+        cursor = conn.execute(
+            "DELETE FROM memory_nodes WHERE bucket_id = ?",
+            (bucket_id,),
+        )
+        conn.commit()
+        conn.close()
+        return bool(cursor.rowcount)
+
     def node_salience(self, bucket_or_id: Any, fallback_bucket: dict | None = None) -> float:
         if isinstance(bucket_or_id, dict):
             return float(self._node_from_bucket(bucket_or_id)["salience"])

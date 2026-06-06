@@ -142,6 +142,18 @@ def _embedding_results(case: dict[str, Any], bucket_ids: dict[str, str]) -> list
     return results
 
 
+def _create_edges(cfg: dict, case: dict[str, Any], bucket_ids: dict[str, str]) -> None:
+    edge_store = MemoryEdgeStore(cfg)
+    for edge in case.get("edges", []):
+        edge_store.add_edge(
+            bucket_ids[str(edge["source"])],
+            bucket_ids[str(edge["target"])],
+            str(edge.get("relation_type", "relates_to")),
+            float(edge.get("confidence", 0.5)),
+            str(edge.get("reason", "")),
+        )
+
+
 def _dehydrator(case: dict[str, Any]):
     if case.get("dehydrator") == "json_summary":
         return JsonSummaryDehydrator()
@@ -165,13 +177,17 @@ def _run_gateway_recall_case(cfg: dict, bucket_mgr: BucketManager, case: dict[st
     query = str(case["query"])
     all_buckets = _run(bucket_mgr.list_all(include_archive=False))
     all_moments, grouped_moments, moment_edges = service._refresh_moment_graph(all_buckets)
-    recalled_moments, moment_candidates, _suppressed_moments = _run(
+    recalled_moments, moment_candidates, _suppressed_moments, _suppressed_buckets = _run(
         service._select_dynamic_moments(query, session_id, all_buckets, grouped_moments)
     )
-    recalled_memory = service._format_recalled_moments(
-        recalled_moments,
-        grouped_moments,
-        service.recalled_budget,
+    recalled_memory = _run(
+        service._format_recalled_moments(
+            recalled_moments,
+            grouped_moments,
+            all_buckets,
+            service.recalled_budget,
+            query_text=query,
+        )
     )
     diffused_memory = service._build_moment_diffused_memory_block(
         recalled_moments,
@@ -183,11 +199,13 @@ def _run_gateway_recall_case(cfg: dict, bucket_mgr: BucketManager, case: dict[st
     _, dynamic_context = service._build_injected_context_messages(
         persona_block="",
         core_memory="",
+        portrait_memory="",
         recent_context="",
         recalled_memory=recalled_memory,
         relationship_weather="",
         favorite_memory="",
         related_memory=diffused_memory,
+        dream_context="",
     )
     return {
         "dynamic_context": dynamic_context,
@@ -197,16 +215,6 @@ def _run_gateway_recall_case(cfg: dict, bucket_mgr: BucketManager, case: dict[st
 
 
 def _run_diffused_block_case(cfg: dict, bucket_mgr: BucketManager, case: dict[str, Any], bucket_ids: dict[str, str]) -> dict[str, str]:
-    edge_store = MemoryEdgeStore(cfg)
-    for edge in case.get("edges", []):
-        edge_store.add_edge(
-            bucket_ids[str(edge["source"])],
-            bucket_ids[str(edge["target"])],
-            str(edge.get("relation_type", "relates_to")),
-            float(edge.get("confidence", 0.5)),
-            str(edge.get("reason", "")),
-        )
-
     service = _build_service(cfg, bucket_mgr, case, bucket_ids)
     all_buckets = _run(bucket_mgr.list_all(include_archive=False))
     recalled = [
@@ -217,11 +225,13 @@ def _run_diffused_block_case(cfg: dict, bucket_mgr: BucketManager, case: dict[st
     _, dynamic_context = service._build_injected_context_messages(
         persona_block="",
         core_memory="",
+        portrait_memory="",
         recent_context="",
         recalled_memory="",
         relationship_weather="",
         favorite_memory="",
         related_memory=block,
+        dream_context="",
     )
     return {"dynamic_context": dynamic_context, "recalled_memory": "", "diffused_memory": block}
 
@@ -247,6 +257,7 @@ def test_memory_recall_golden(case, test_config):
     cfg = _case_config(test_config, case)
     bucket_mgr = BucketManager(cfg)
     bucket_ids = _create_buckets(bucket_mgr, case)
+    _create_edges(cfg, case, bucket_ids)
 
     if case["mode"] == "gateway_recall":
         outputs = _run_gateway_recall_case(cfg, bucket_mgr, case, bucket_ids)

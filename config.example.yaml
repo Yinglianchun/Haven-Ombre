@@ -189,6 +189,34 @@ recall_thresholds:
   explicit_admission_rerank_score: 0.65
   vague_top_k: 50
 
+# --- Recall behavior / 召回行为 ---
+recall:
+  query_resurface_enabled: false      # true allows query breath() to append a random dormant memory when direct/related recall is sparse
+
+# --- Word Map Lite / 派生词图 ---
+# Derived keyword/co-occurrence index for diagnostics and future recall hints.
+# It is rebuilt manually from buckets and does not inject anything into Gateway by itself.
+# 派生的关键词/共现索引，用于诊断和后续召回提示；手动从桶重建，本身不注入 Gateway。
+word_map:
+  enabled: false
+  max_terms_per_bucket: 16
+  edge_top_k: 10
+  min_term_len: 2
+  stopwords: []                       # Extra generic stopwords / 额外通用停用词
+  private_terms: []                   # Deployment-private terms to exclude from generic Word Map
+  stopword_prefixes: []               # Extra prefixes such as custom_ / 额外前缀
+
+# --- Private identity semantics / 私有身份语义 ---
+# Optional private canonical alias overlay. Do not put personal canonical nodes
+# into this template; load them from a private YAML/JSON file or env var.
+# 可选私有 canonical/alias 覆盖层。不要把个人 canonical 写进模板；
+# 请通过私有 YAML/JSON 文件或环境变量加载。
+identity_semantics:
+  enabled: false
+  private_config_path: ""             # or OMBRE_IDENTITY_SEMANTICS_PATH
+  min_confidence: 0.78
+  evidence_tags: ["profile_fact", "haven_favorite", "favorite_memory"]
+
 # --- Moment annotations / 记忆片段标注 ---
 # Stores lightweight summary/facets/evidence_spans in moment metadata.
 # The current built-in annotator is a deterministic fallback; future workers can
@@ -248,6 +276,8 @@ gateway:
   #       - "Qwen/Qwen3-32B"
   #       - "THUDM/GLM-4-32B"
   head_recent_hours: 72
+  recent_context_reentry_idle_hours: 24
+  recent_context_cooldown_hours: 6
   dynamic_top_k: 10
   inject_max_cards: 2
   skip_recent_rounds: 5
@@ -257,6 +287,20 @@ gateway:
   core_memory_budget: 0
   recent_context_budget: 300
   recalled_memory_budget: 400
+  direct_render_mode: auto   # auto | compact | full; direct/recalled display shape
+  retrieval_mode: graph       # graph | bucket; bucket skips moment graph diffusion
+  portrait_memory_enabled: true  # read-only stable portrait cache from profile_fact + selected anchor
+  portrait_memory_budget: 360
+  portrait_memory_max_sources: 8
+  portrait_memory_include_anchors: true # false = profile_fact only; never includes pinned/protected by default
+  query_planner_enabled: true  # extra LLM call: split long/low-confidence messages into short recall queries
+  query_planner_model: ""      # empty = gateway upstream_default_model
+  query_planner_min_chars: 16  # also catches short emotional reason lookups like "今天为什么激动哭"
+  query_planner_max_queries: 3
+  query_planner_max_tokens: 360
+  memory_detail_recall_enabled: false # optional internal [memory_detail ids="..."] retry for admitted bucket ids
+  memory_detail_recall_max_ids: 3
+  memory_detail_recall_budget: 1200
   relationship_weather_budget: 220
   relationship_weather_include_weekly: false
   favorite_memory_budget: 180
@@ -300,18 +344,46 @@ memory_diffusion:
   decay: 0.55
   include_incoming: true
   max_paths_per_hit: 3
+  # Optional reliable chain walk: keep following strong narrative/evidence edges
+  # until path strength, confidence, or relation quality drops. top_k still
+  # controls how many final related memories are rendered.
+  chain_walk_enabled: false
+  chain_max_hops: 6
+  chain_min_strength: 0.2
+  chain_min_confidence: 0.72
+  chain_min_relation_priority: 60
+  chain_max_frontier: 24
+  chain_continue_relation_types:
+    - same_event
+    - context_of
+    - precedes
+    - previous_context
+    - next_context
+    - updates
+    - evidenced_by
+    - reflects_on
   relation_type_weights:
     same_event: 1.15
     context_of: 1.1
+    embodiment_chain: 1.05
+    same_topic: 0.9
     precedes: 1.0
     triggers: 1.0
+    cause: 0.95
     causes: 0.95
+    followup: 0.9
     updates: 0.9
     supports: 0.85
     promises: 0.9
     belongs_to: 0.8
     emotional_echo: 0.95
+    next_context: 0.85
+    previous_context: 0.75
+    reflects_on: 0.8
+    evidenced_by: 1.0
     relates_to: 0.7
+    old_version: 0.35
+    conflict: 0.4
     contradicts: 0.45
     blocks: 0.45
 
@@ -354,6 +426,8 @@ persona:
   max_affect_delta: 0.18
   # Recent Persona Events is a sparse log, not a per-message transcript.
   # Strong relationship/personality/affect signals write immediately; ordinary turns batch.
+  # Turn this off to keep evaluating numeric state without writing persona_events.
+  event_recording_enabled: true
   event_batch_size: 2
   event_affect_total_threshold: 0.45
   event_affect_single_threshold: 0.14
@@ -381,6 +455,7 @@ persona:
     mood_label: "warm_neutral"
     session_defensiveness: 0.12
     residue: ""
+    inner_thought: ""
   # Env vars:
   #   OMBRE_PERSONA_API_KEY
   #   OMBRE_PERSONA_BASE_URL
@@ -414,6 +489,12 @@ reflection:
   candidate_recent_limit: 8
   candidate_semantic_limit: 6
   edge_min_confidence: 0.55
+  identity_role_edges:
+    enabled: false                 # optional, deployment-specific role/title edge hints
+    detail: {}                     # e.g. concrete role combinations or private aliases
+    context: {}                    # e.g. role/title/category memories
+    relationship: {}               # e.g. broader relationship/trust memories
+    shared: {}                     # e.g. terms that count as overlap but do not decide edge direction
   diary_mcp_url: ""               # optional Haven-diary MCP URL, e.g. http://127.0.0.1:8000/mcp
   diary_mcp_token_env: ""         # optional bearer token env var name, e.g. MCP_BEARER_TOKEN
   diary_memory_extract_enabled: true

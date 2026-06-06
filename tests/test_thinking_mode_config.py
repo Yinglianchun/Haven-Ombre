@@ -23,6 +23,22 @@ class RecordingChatClient:
         return SimpleNamespace(choices=[choice])
 
 
+class QueueRecordingChatClient:
+    def __init__(self, contents):
+        self.calls = []
+        self.contents = list(contents)
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=self._create)
+        )
+
+    async def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        content = self.contents.pop(0)
+        message = SimpleNamespace(content=content)
+        choice = SimpleNamespace(message=message)
+        return SimpleNamespace(choices=[choice])
+
+
 @pytest.mark.asyncio
 async def test_dehydrator_sends_disabled_thinking_mode_when_configured(test_config):
     cfg = deepcopy(test_config)
@@ -55,6 +71,28 @@ async def test_dehydrator_omits_thinking_mode_by_default(test_config):
     await dehydrator._api_dehydrate("这是一段需要脱水的长文本")
 
     assert "extra_body" not in client.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_dehydrator_direct_capsule_uses_separate_cache(test_config):
+    cfg = deepcopy(test_config)
+    cfg["dehydration"].update(api_key="test-key")
+    dehydrator = Dehydrator(cfg)
+    client = QueueRecordingChatClient(["normal summary", "direct capsule"])
+    dehydrator.client = client
+    content = "long bucket content " * 140
+
+    normal = await dehydrator.dehydrate(content)
+    capsule = await dehydrator.dehydrate_direct_capsule(content)
+    cached_capsule = await dehydrator.dehydrate_direct_capsule(content)
+    cached_normal = await dehydrator.dehydrate(content)
+
+    assert normal == "normal summary"
+    assert capsule == "direct capsule"
+    assert cached_capsule == "direct capsule"
+    assert cached_normal == "normal summary"
+    assert len(client.calls) == 2
+    assert client.calls[0]["messages"][0]["content"] != client.calls[1]["messages"][0]["content"]
 
 
 @pytest.mark.asyncio

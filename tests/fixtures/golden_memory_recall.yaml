@@ -162,3 +162,89 @@ cases:
         - keywords
         - do not inject
         - 临时雨夜是短窗口里的连续性暗号
+
+  - id: blue_preference_reliable_chain
+    mode: gateway_recall
+    description: 蓝色偏好通过可靠 seed 和边扩散到链条上下文，并携带温度层。
+    query: 小雨 蓝色 偏好
+    session_id: golden-blue-preference-chain
+    gateway:
+      recent_context_budget: 0
+      recalled_memory_budget: 500
+      related_memory_budget: 1200
+      inject_total_budget: 2200
+      current_inner_state_interval_rounds: 0
+      inject_max_cards: 1
+    memory_diffusion:
+      max_hops: 1
+      min_activation: 0.0
+      top_k: 3
+      chain_walk_enabled: true
+      chain_max_hops: 4
+    buckets:
+      - key: blue_seed
+        content: 蓝色偏好种子：小雨明确说过她偏好蓝色。
+        name: 蓝色偏好种子
+        hours_ago: 8
+        importance: 10
+        domain: [preference]
+        tags: [blue_preference]
+      - key: blue_bridge
+        content: |
+          ### fact
+          颜色线索和界面场景被放在同一条记录链上。
+        name: 颜色场景承接
+        hours_ago: 9
+        importance: 9
+        domain: [rain_context]
+        tags: [rain_context]
+      - key: blue_chain
+        content: |
+          ### fact
+          雨天和安静界面，是这份稳定颜色线索的使用场景。
+
+          ### affect_anchor
+
+          蓝色偏好温度：这不是孤立颜色，是小雨雨天里留下的柔软感。
+        name: 雨天可靠确认
+        hours_ago: 10
+        importance: 10
+        domain: [rain_context]
+        tags: [rain_context]
+      - key: unrelated
+        content: 咖啡采购清单：豆子、滤纸、杯架。
+        name: 咖啡采购
+        hours_ago: 6
+        importance: 10
+        domain: [ops]
+        tags: [shopping]
+    edges:
+      - source: blue_seed
+        target: blue_bridge
+        relation_type: context_of
+        confidence: 1.0
+        reason: reliable blue preference bridge
+      - source: blue_bridge
+        target: blue_chain
+        relation_type: updates
+        confidence: 1.0
+        reason: reliable blue preference chain
+    embedding_results:
+      - [blue_seed, 0.99]
+      - [unrelated, 0.98]
+    expected:
+      section_title: Diffused Memory
+      target: dynamic_context
+      must_include:
+        - Recalled Memory
+        - 蓝色偏好种子
+        - Diffused Memory
+        - Chain Bundle
+        - "chain:"
+        - 雨天可靠确认
+        - "temperature:"
+        - "[affect_anchor]"
+        - 蓝色偏好温度
+      must_not_include:
+        - 咖啡采购
+        - 咖啡采购清单

@@ -521,6 +521,93 @@
     line-height: 1;
     padding: 0;
   }
+  .detail-moments {
+    margin-top: 18px;
+  }
+  .detail-moments h3 {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--accent);
+    margin: 0 0 10px;
+  }
+  .moment-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-bottom: 10px;
+  }
+  .moment-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .moment-item {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    padding: 12px 14px;
+    font-size: 12px;
+    line-height: 1.7;
+  }
+  .moment-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    align-items: flex-start;
+    margin-bottom: 7px;
+  }
+  .moment-title {
+    color: var(--accent);
+    font-weight: 500;
+    min-width: 0;
+  }
+  .moment-source {
+    color: var(--text-light);
+    font-size: 10px;
+    max-width: 45%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+  }
+  .moment-body {
+    white-space: pre-wrap;
+    color: var(--text);
+    max-height: 170px;
+    overflow-y: auto;
+    padding-top: 7px;
+    border-top: 1px solid var(--border);
+  }
+  .moment-source-window {
+    margin-top: 9px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--border);
+  }
+  .moment-source-window-title {
+    color: var(--text-light);
+    font-size: 10px;
+    margin-bottom: 5px;
+  }
+  .moment-source-window pre {
+    margin: 0;
+    white-space: pre-wrap;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 11px;
+    line-height: 1.65;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+  .moment-edge-list {
+    margin-top: 12px;
+  }
+  .moment-edge-title {
+    color: var(--text-light);
+    font-size: 11px;
+    margin: 0 0 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
 
   .config-section {
     margin-bottom: 28px;
@@ -1030,12 +1117,12 @@
   }
   .score-row {
     display: grid;
-    grid-template-columns: 32px 180px 1fr 60px;
+    grid-template-columns: 32px minmax(180px, 260px) minmax(240px, 1fr) 64px;
     gap: 12px;
     padding: 12px 16px;
     border-radius: 12px;
     font-size: 13px;
-    align-items: center;
+    align-items: start;
     transition: all 0.2s ease;
     margin-bottom: 4px;
   }
@@ -1050,6 +1137,27 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .score-main { min-width: 0; }
+  .score-trace {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 5px;
+  }
+  .score-chip {
+    max-width: 100%;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: rgba(47,79,79,0.08);
+    color: var(--text-dim);
+    font-size: 10px;
+    line-height: 1.5;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .score-chip.allow { color: var(--positive); background: rgba(74,124,89,0.11); }
+  .score-chip.block { color: var(--negative); background: rgba(139,74,74,0.1); }
   .score-bars { display: flex; gap: 4px; align-items: center; }
   .score-bar-group { display: flex; flex-direction: column; gap: 1px; flex: 1; }
   .score-bar-track {
@@ -1068,6 +1176,157 @@
   .score-final { font-size: 14px; font-weight: 600; text-align: right; }
   .score-pass { color: var(--positive); }
   .score-fail { color: var(--text-light); }
+  .diffusion-panel {
+    margin-top: 18px;
+    padding: 18px 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: 4px 4px 10px var(--shadow-dark-subtle), -4px -4px 10px var(--shadow-light);
+  }
+  .diffusion-panel h3 {
+    color: var(--accent);
+    font-size: 14px;
+    font-weight: 500;
+    margin: 0 0 12px;
+  }
+  .diffusion-columns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+  .diffusion-section-title {
+    color: var(--text-light);
+    font-size: 11px;
+    margin: 0 0 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+  .diffusion-row {
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    line-height: 1.6;
+    background: var(--surface-solid);
+  }
+  .diffusion-name {
+    color: var(--text);
+    font-weight: 500;
+    margin-bottom: 4px;
+  }
+  .diffusion-path {
+    color: var(--text-dim);
+    font-size: 11px;
+    margin-top: 6px;
+    white-space: pre-wrap;
+  }
+  .diffusion-warning {
+    color: var(--warning);
+    font-size: 11px;
+    margin-top: 8px;
+  }
+  .gateway-injection-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+  .gateway-injection-controls input[type="text"] {
+    width: min(260px, 100%);
+    min-width: 0;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-solid);
+    color: var(--text);
+    font-size: 12px;
+  }
+  .gateway-injection-controls input[type="checkbox"] {
+    width: 14px;
+    height: 14px;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    accent-color: var(--accent);
+  }
+  .gateway-injection-controls label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .gateway-injection-controls button {
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-solid);
+    color: var(--accent);
+    cursor: pointer;
+  }
+  .gateway-injections-content {
+    text-align: left;
+  }
+  .gateway-injection-empty {
+    color: var(--text-dim);
+    font-size: 12px;
+    padding: 8px 0 2px;
+  }
+  .gateway-injection-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .gateway-injection-item {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface-solid);
+    padding: 12px 14px;
+    font-size: 12px;
+    line-height: 1.55;
+    text-align: left;
+  }
+  .gateway-injection-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+  .gateway-injection-title {
+    color: var(--accent);
+    font-weight: 600;
+    min-width: 0;
+  }
+  .gateway-injection-time {
+    color: var(--text-light);
+    font-size: 10px;
+    white-space: nowrap;
+  }
+  .gateway-injection-lines {
+    display: grid;
+    gap: 4px;
+    margin-top: 8px;
+  }
+  .gateway-injection-line {
+    color: var(--text-dim);
+    white-space: pre-wrap;
+  }
+  .gateway-injection-line .label {
+    color: var(--text-light);
+  }
+  .gateway-context-preview {
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.7;
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--border);
+    white-space: pre-wrap;
+  }
 
   .breath-flow {
     display: flex;
@@ -1322,6 +1581,276 @@
   .dream-row-title { color: var(--text); font-size: 14px; }
   .dream-row-status { color: var(--text-light); font-size: 12px; white-space: nowrap; }
 
+  .profile-shell { max-width: 1040px; margin: 0 auto; }
+  .profile-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 16px;
+    margin-bottom: 18px;
+  }
+  .profile-toolbar h2 {
+    font-family: 'Cormorant Garamond', serif;
+    color: var(--accent);
+    font-size: 28px;
+    font-weight: 600;
+  }
+  .profile-toolbar p {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin-top: 4px;
+  }
+  .profile-toolbar button,
+  .profile-actions button {
+    min-height: 32px;
+    padding: 7px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+  }
+  .profile-toolbar button:hover,
+  .profile-actions button:hover {
+    border-color: var(--border-strong);
+    color: var(--accent);
+  }
+  .profile-actions button.danger { color: var(--negative); }
+  .profile-summary {
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-bottom: 12px;
+  }
+  .profile-proposal-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px;
+    margin-bottom: 16px;
+  }
+  .profile-proposal-form {
+    display: grid;
+    grid-template-columns: minmax(180px, 1fr) minmax(140px, 220px) auto;
+    gap: 10px;
+    align-items: center;
+  }
+  .profile-proposal-form input {
+    min-height: 34px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-solid);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 12px;
+  }
+  .profile-proposal-form button,
+  .profile-proposal-card button {
+    min-height: 34px;
+    padding: 7px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+  }
+  .profile-proposal-form button:hover,
+  .profile-proposal-card button:hover {
+    border-color: var(--border-strong);
+    color: var(--accent);
+  }
+  .profile-proposal-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .profile-proposal-card {
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .profile-proposal-card strong {
+    display: block;
+    color: var(--text);
+    font-size: 14px;
+    margin-bottom: 6px;
+  }
+  .profile-proposal-message {
+    min-height: 18px;
+    margin-top: 8px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .profile-proposal-message.error { color: var(--negative); }
+  .profile-proposal-message.ok { color: var(--positive); }
+  .profile-list { display: flex; flex-direction: column; gap: 10px; }
+  .profile-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    box-shadow: 4px 4px 10px var(--shadow-dark-subtle), -4px -4px 10px var(--shadow-light);
+  }
+  .profile-card.deprecated { opacity: 0.68; }
+  .profile-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .profile-fact-text {
+    color: var(--text);
+    font-size: 15px;
+    line-height: 1.7;
+    white-space: pre-wrap;
+  }
+  .profile-chip-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin: 10px 0;
+  }
+  .profile-chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 11px;
+    background: rgba(255, 255, 255, 0.24);
+  }
+  .profile-chip.active { color: var(--positive); border-color: rgba(74, 124, 89, 0.36); }
+  .profile-chip.deprecated { color: var(--negative); border-color: rgba(139, 74, 74, 0.36); }
+  .profile-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px 14px;
+    margin-top: 12px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .profile-meta-grid label {
+    display: block;
+    color: var(--text-light);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    margin-bottom: 2px;
+  }
+  .profile-evidence {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .profile-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    min-width: 260px;
+  }
+  .word-map-shell { max-width: 1120px; margin: 0 auto; }
+  .word-map-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 16px;
+    margin-bottom: 18px;
+  }
+  .word-map-toolbar h2 {
+    font-family: 'Cormorant Garamond', serif;
+    color: var(--accent);
+    font-size: 28px;
+    font-weight: 600;
+  }
+  .word-map-toolbar p {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin-top: 4px;
+  }
+  .word-map-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .word-map-actions button {
+    min-height: 32px;
+    padding: 7px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+  }
+  .word-map-actions button:hover {
+    border-color: var(--border-strong);
+    color: var(--accent);
+  }
+  .word-map-summary {
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-bottom: 12px;
+  }
+  .word-map-message {
+    min-height: 18px;
+    margin-bottom: 12px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .word-map-message.error { color: var(--negative); }
+  .word-map-message.ok { color: var(--positive); }
+  .word-map-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+  .word-map-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px;
+    min-height: 180px;
+  }
+  .word-map-panel h3 {
+    color: var(--accent);
+    font-size: 14px;
+    margin-bottom: 10px;
+  }
+  .word-map-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .word-map-card {
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+  .word-map-card:first-child {
+    border-top: none;
+    padding-top: 0;
+  }
+  .word-map-card strong {
+    display: block;
+    color: var(--text);
+    font-size: 13px;
+    margin-bottom: 4px;
+  }
+
   @media (max-width: 768px) {
     .header { padding: 20px; flex-wrap: wrap; }
     .header h1 { font-size: 22px; }
@@ -1355,6 +1884,15 @@
     .persona-meter-row { grid-template-columns: 108px 1fr 38px; }
     .persona-event { grid-template-columns: 1fr; }
     .persona-event-time { white-space: normal; }
+    .diffusion-columns { grid-template-columns: 1fr; }
+    .profile-toolbar { align-items: flex-start; flex-direction: column; }
+    .profile-head { flex-direction: column; }
+    .profile-actions { justify-content: flex-start; min-width: 0; }
+    .profile-meta-grid { grid-template-columns: 1fr; }
+    .profile-proposal-form { grid-template-columns: 1fr; }
+    .word-map-toolbar { align-items: flex-start; flex-direction: column; }
+    .word-map-actions { justify-content: flex-start; }
+    .word-map-grid { grid-template-columns: 1fr; }
     .reflection-toolbar { align-items: flex-start; flex-direction: column; }
     .reflection-board { grid-template-columns: 1fr; }
     .reflection-day-panel { height: auto; max-height: none; }
@@ -1379,6 +1917,8 @@
   <div class="tab" data-tab="reflection">日印象</div>
   <div class="tab" data-tab="dreams">梦境</div>
   <div class="tab" data-tab="persona">Persona</div>
+  <div class="tab" data-tab="profile">画像</div>
+  <div class="tab" data-tab="word-map">词图</div>
   <div class="tab" data-tab="network">记忆网络</div>
   <div class="tab" data-tab="config">配置</div>
   <div class="tab" data-tab="memory-config">记忆浮现</div>
@@ -1426,6 +1966,142 @@
   <div class="breath-info" id="breath-info" style="display:none"></div>
   <div id="breath-results">
     <div class="loading">输入 query 后点击「模拟 Breath」查看评分链路</div>
+  </div>
+  <div id="recall-results" class="diffusion-panel" style="display:none"></div>
+  <div id="diffusion-results" class="diffusion-panel" style="display:none"></div>
+  <div class="diffusion-panel" id="gateway-injections-panel">
+    <h3>Gateway 最近注入</h3>
+    <div class="gateway-injection-controls">
+      <input type="text" id="gateway-session-filter" placeholder="session_id（可选）" />
+      <label><input type="checkbox" id="gateway-include-context" /> 包含 context</label>
+      <button onclick="loadGatewayInjections()">刷新</button>
+    </div>
+    <div id="gateway-injections-content" class="gateway-injections-content">
+      <div class="gateway-injection-empty">打开 Breath 模拟时读取最近注入记录。</div>
+    </div>
+  </div>
+</div>
+
+<div class="content" id="memory-config-view" style="display:none">
+  <div style="max-width:760px;margin:0 auto;">
+    <div class="config-section">
+      <h3>记忆浮现</h3>
+      <div class="config-row">
+        <label>最近记忆</label>
+        <select id="cfg-recent-context-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后 Gateway 不自动注入 Recent Context；可靠直命中和扩散不受影响</div>
+      <div class="config-row">
+        <label>Persona提示</label>
+        <select id="cfg-persona-context-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">控制 Gateway 每隔若干轮注入一次 Persona State 提示；关闭后仍会后台更新 Persona</div>
+      <div class="config-row">
+        <label>Persona轮数</label>
+        <input type="number" id="cfg-persona-context-rounds" min="0" max="200" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 15；设 0 等同关闭提示注入</div>
+      <div class="config-row">
+        <label>冷却时间</label>
+        <input type="number" id="cfg-gateway-cooldown" min="0" max="168" step="0.5" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 6，就是同一条记忆浮现后，6 小时内降低再次出现的概率</div>
+      <div class="config-row">
+        <label>冷却轮数</label>
+        <input type="number" id="cfg-gateway-rounds" min="0" max="50" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 5，就是最近 5 轮浮现过的记忆会优先避开</div>
+      <div class="config-row">
+        <label>最近冷却</label>
+        <input type="number" id="cfg-recent-context-cooldown" min="0" max="168" step="0.5" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 6，Recent Context 注入后多久不再自动重复注入</div>
+      <div class="config-row">
+        <label>再进入</label>
+        <input type="number" id="cfg-recent-context-reentry" min="0" max="168" step="0.5" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 24，小于这个闲置时长不算长时间再进入；设 0 关闭再进入触发</div>
+      <div class="config-row">
+        <label>最近预算</label>
+        <input type="number" id="cfg-recent-context-budget" min="0" max="4000" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 300；设 0 可关闭 Recent Context 自动注入</div>
+      <div class="config-row">
+        <label>直命中预算</label>
+        <input type="number" id="cfg-recalled-memory-budget" min="0" max="4000" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 400，控制 Recalled Memory 直命中最多带多少内容</div>
+      <div class="config-row">
+        <label>扩散预算</label>
+        <input type="number" id="cfg-related-memory-budget" min="0" max="4000" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 220；设 0 可关闭 Gateway 的 Diffused Memory 注入</div>
+      <div class="config-row">
+        <label>直命中形状</label>
+        <select id="cfg-direct-render-mode">
+          <option value="auto">auto</option>
+          <option value="compact">compact</option>
+          <option value="full">full</option>
+        </select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">auto：短桶原文，长桶窗口，高价值/细节请求用脱水胶囊</div>
+      <div class="config-row">
+        <label>召回模式</label>
+        <select id="cfg-retrieval-mode">
+          <option value="graph">graph</option>
+          <option value="bucket">bucket</option>
+        </select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">graph 是 p0 图召回；bucket 是接近 main 的直命中对照档</div>
+      <div class="config-row">
+        <label>旧记忆随机</label>
+        <select id="cfg-query-resurface-enabled">
+          <option value="false">关闭</option>
+          <option value="true">开启</option>
+        </select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认关闭；开启后 query breath 在直命中稀疏时可能追加久未碰过的旧记忆</div>
+      <div class="config-row">
+        <label>图扩散</label>
+        <select id="cfg-diffusion-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后只保留可靠直接命中，不追加 Related/Diffused 背景</div>
+      <div class="config-row">
+        <label>扩散条数</label>
+        <input type="number" id="cfg-diffusion-topk" min="0" max="20" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 4，控制最多返回几条扩散背景</div>
+      <div class="config-row">
+        <label>最小激活</label>
+        <input type="number" id="cfg-diffusion-min" min="0" max="10" step="0.01" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 0.18，越高越保守</div>
+      <div class="config-row">
+        <label>链式扩散</label>
+        <select id="cfg-chain-walk"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">允许沿可靠关系继续走，不只是看一跳邻居</div>
+      <div class="config-row">
+        <label>链路深度</label>
+        <input type="number" id="cfg-chain-hops" min="1" max="12" />
+      </div>
+      <div class="config-row">
+        <label>链路置信</label>
+        <input type="number" id="cfg-chain-confidence" min="0" max="1" step="0.01" />
+      </div>
+      <div class="config-row">
+        <label>链路前沿</label>
+        <input type="number" id="cfg-chain-frontier" min="1" max="200" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">保存后 breath 和 Gateway 都会立即读取新的扩散参数</div>
+    </div>
+
+    <div style="display:flex;gap:12px;margin-top:8px;">
+      <button class="btn-primary" onclick="saveConfig(false)">应用（仅运行时）</button>
+      <button class="btn-secondary" onclick="saveConfig(true)">应用并写入 config.yaml</button>
+      <button class="btn-secondary" onclick="saveConfig(true, true)">应用并保存密钥到 .env</button>
+    </div>
+    <div id="memory-config-status" style="margin-top:16px;font-size:13px;"></div>
   </div>
 </div>
 
@@ -1480,6 +2156,76 @@
     </div>
     <div id="persona-content">
       <div class="loading">加载 Persona 状态…</div>
+    </div>
+  </div>
+</div>
+
+<div class="content" id="profile-view" style="display:none">
+  <div class="profile-shell">
+    <div class="profile-toolbar">
+      <div>
+        <h2>Profile Facts</h2>
+        <p>证据化用户画像事实；Portrait Memory 只读这些事实，不自动写入。</p>
+      </div>
+      <button type="button" onclick="loadProfileFacts()">刷新</button>
+    </div>
+    <div class="profile-proposal-panel">
+      <div class="profile-proposal-form">
+        <input type="text" id="profile-proposal-bucket-id" placeholder="证据 bucket id" />
+        <input type="text" id="profile-proposal-moment-id" placeholder="moment id（可选）" />
+        <button type="button" onclick="generateProfileFactProposals()">生成画像候选</button>
+      </div>
+      <div class="profile-proposal-message" id="profile-proposal-message"></div>
+      <div class="profile-proposal-list" id="profile-proposal-list"></div>
+    </div>
+    <div class="profile-proposal-panel">
+      <div class="profile-proposal-form">
+        <input type="text" id="anchor-proposal-bucket-id" placeholder="候选 anchor bucket id" />
+        <span></span>
+        <button type="button" onclick="generateAnchorProposals()">生成 Anchor 候选</button>
+      </div>
+      <div class="profile-proposal-message" id="anchor-proposal-message"></div>
+      <div class="profile-proposal-list" id="anchor-proposal-list"></div>
+    </div>
+    <div class="profile-summary" id="profile-summary">加载中…</div>
+    <div class="profile-list" id="profile-facts-list">
+      <div class="loading">加载画像事实…</div>
+    </div>
+  </div>
+</div>
+
+<div class="content" id="word-map-view" style="display:none">
+  <div class="word-map-shell">
+    <div class="word-map-toolbar">
+      <div>
+        <h2>Word Map Lite</h2>
+        <p>只读查看派生词图和私有 identity alias；不会自动注入 Gateway。</p>
+      </div>
+      <div class="word-map-actions">
+        <button type="button" onclick="loadWordMap()">刷新</button>
+        <button type="button" onclick="rebuildWordMap()">重建 Word Map</button>
+        <button type="button" onclick="rebuildIdentitySemantics()">重建 Private Alias</button>
+      </div>
+    </div>
+    <div class="word-map-summary" id="word-map-summary">加载中…</div>
+    <div class="word-map-message" id="word-map-message"></div>
+    <div class="word-map-grid">
+      <section class="word-map-panel">
+        <h3>Top Nodes</h3>
+        <div class="word-map-list" id="word-map-nodes"><div class="loading">加载中…</div></div>
+      </section>
+      <section class="word-map-panel">
+        <h3>Co-occurrence Edges</h3>
+        <div class="word-map-list" id="word-map-edges"><div class="loading">加载中…</div></div>
+      </section>
+      <section class="word-map-panel">
+        <h3>Private Alias</h3>
+        <div class="word-map-list" id="identity-aliases"><div class="loading">加载中…</div></div>
+      </section>
+      <section class="word-map-panel">
+        <h3>Boundary</h3>
+        <div class="word-map-list" id="word-map-boundary"><div class="loading">加载中…</div></div>
+      </section>
     </div>
   </div>
 </div>
@@ -1601,6 +2347,11 @@
         <select id="cfg-persona-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
       </div>
       <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后 Gateway 不再注入 Persona 状态，也不再做回复后的 Persona 更新</div>
+      <div class="config-row">
+        <label>记录事件</label>
+        <select id="cfg-persona-event-recording"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后仍评估数值状态，但不新增 Recent Persona Events</div>
       <div class="config-row">
         <label>Model</label>
         <input type="text" id="cfg-persona-model" placeholder="deepseek-chat" />
@@ -1746,51 +2497,6 @@
   </div>
 </div>
 
-<div class="content" id="memory-config-view" style="display:none">
-  <div style="max-width:640px;margin:0 auto;">
-    <div class="config-section">
-      <h3>记忆浮现</h3>
-      <div class="config-row">
-        <label>最近记忆</label>
-        <select id="cfg-recent-context-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
-      </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">控制 Gateway 是否自动注入 Recent Context；关闭后直命中记忆不受影响</div>
-      <div class="config-row">
-        <label>最近记忆预算</label>
-        <input type="number" id="cfg-recent-context-budget" min="0" max="2000" />
-      </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 300；设 0 等同关闭最近记忆自动注入</div>
-      <div class="config-row">
-        <label>Persona提示</label>
-        <select id="cfg-persona-context-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
-      </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">控制 Gateway 是否按轮次注入 Persona State 提示；关闭后仍会后台更新 Persona</div>
-      <div class="config-row">
-        <label>Persona轮数</label>
-        <input type="number" id="cfg-persona-context-rounds" min="0" max="200" />
-      </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 15；设 0 等同关闭 Persona 提示注入</div>
-      <div class="config-row">
-        <label>冷却时间</label>
-        <input type="number" id="cfg-gateway-cooldown" min="0" max="168" step="0.5" />
-      </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 6，就是同一条记忆浮现后，6 小时内降低再次出现的概率</div>
-      <div class="config-row">
-        <label>冷却轮数</label>
-        <input type="number" id="cfg-gateway-rounds" min="0" max="50" />
-      </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 5，就是最近 5 轮浮现过的记忆会优先避开</div>
-    </div>
-
-    <div style="display:flex;gap:12px;margin-top:8px;">
-      <button class="btn-primary" onclick="saveConfig(false)">应用（仅运行时）</button>
-      <button class="btn-secondary" onclick="saveConfig(true)">应用并写入 config.yaml</button>
-      <button class="btn-secondary" onclick="saveConfig(true, true)">应用并保存密钥到 .env</button>
-    </div>
-    <div id="memory-config-status" style="margin-top:16px;font-size:13px;"></div>
-  </div>
-</div>
-
 <div class="detail-panel" id="detail-panel">
   <button class="close-btn" onclick="closeDetail()">✕</button>
   <div id="detail-content"></div>
@@ -1819,6 +2525,11 @@ const PATH_PREFIX = location.pathname.replace(/\/dashboard\/?$/, '');
 const BASE = location.origin + PATH_PREFIX;
 let allBuckets = [];
 let renderedBuckets = [];
+let profileFacts = [];
+let profileFactProposals = [];
+let anchorProposals = [];
+let wordMapData = null;
+let identitySemanticData = null;
 let currentFilter = 'all';
 let bucketBulkMode = false;
 let selectedBucketIds = new Set();
@@ -1934,19 +2645,24 @@ document.querySelectorAll('.tab').forEach(tab => {
     const target = tab.dataset.tab;
     document.getElementById('list-view').style.display = target === 'list' ? '' : 'none';
     document.getElementById('breath-view').style.display = target === 'breath' ? '' : 'none';
+    document.getElementById('memory-config-view').style.display = target === 'memory-config' ? '' : 'none';
     document.getElementById('reflection-view').style.display = target === 'reflection' ? '' : 'none';
     document.getElementById('dreams-view').style.display = target === 'dreams' ? '' : 'none';
     document.getElementById('persona-view').style.display = target === 'persona' ? '' : 'none';
+    document.getElementById('profile-view').style.display = target === 'profile' ? '' : 'none';
+    document.getElementById('word-map-view').style.display = target === 'word-map' ? '' : 'none';
     document.getElementById('network-view').style.display = target === 'network' ? '' : 'none';
     document.getElementById('config-view').style.display = target === 'config' ? '' : 'none';
-    document.getElementById('memory-config-view').style.display = target === 'memory-config' ? '' : 'none';
     document.getElementById('import-view').style.display = target === 'import' ? '' : 'none';
+    if (target === 'breath') loadGatewayInjections();
+    if (target === 'memory-config') loadConfig();
     if (target === 'reflection') renderReflectionReview();
     if (target === 'dreams') loadDreams();
     if (target === 'persona') loadPersona();
+    if (target === 'profile') loadProfileFacts();
+    if (target === 'word-map') loadWordMap();
     if (target === 'network') loadNetwork();
     if (target === 'config') loadConfig();
-    if (target === 'memory-config') loadConfig();
     if (target === 'import') { pollImportStatus(); loadImportResults(); }
   });
 });
@@ -1976,6 +2692,8 @@ async function loadBuckets() {
     renderBuckets(filterBuckets(allBuckets));
     if (getActiveTab() === 'reflection') renderReflectionReview();
     if (getActiveTab() === 'dreams') loadDreams();
+    if (getActiveTab() === 'profile') loadProfileFacts();
+    if (getActiveTab() === 'word-map') loadWordMap();
   } catch (e) {
     document.getElementById('bucket-list').innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
   }
@@ -2186,6 +2904,510 @@ async function loadDreams() {
   } catch (e) {
     content.innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
   }
+}
+
+async function loadProfileFacts() {
+  var list = document.getElementById('profile-facts-list');
+  var summary = document.getElementById('profile-summary');
+  if (!list || !summary) return;
+  list.innerHTML = '<div class="loading">加载画像事实…</div>';
+  summary.textContent = '读取中…';
+  try {
+    var res = await authFetch(BASE + '/api/profile-facts');
+    if (!res) return;
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || '加载失败');
+    profileFacts = Array.isArray(data.facts) ? data.facts : [];
+    renderProfileFacts();
+  } catch (e) {
+    summary.textContent = '读取失败';
+    list.innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+function setProfileProposalMessage(message, tone) {
+  var el = document.getElementById('profile-proposal-message');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.remove('ok', 'error');
+  if (tone) el.classList.add(tone);
+}
+
+async function generateProfileFactProposals() {
+  var bucketInput = document.getElementById('profile-proposal-bucket-id');
+  var momentInput = document.getElementById('profile-proposal-moment-id');
+  var bucketId = (bucketInput && bucketInput.value || '').trim();
+  var momentId = (momentInput && momentInput.value || '').trim();
+  if (!bucketId) {
+    setProfileProposalMessage('先填证据 bucket id。', 'error');
+    return;
+  }
+  setProfileProposalMessage('生成中…', '');
+  var list = document.getElementById('profile-proposal-list');
+  if (list) list.innerHTML = '';
+  try {
+    var res = await authFetch(BASE + '/api/profile-fact-proposals', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        bucket_id: bucketId,
+        evidence_moment_id: momentId,
+        max_proposals: 3
+      })
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '生成失败');
+    profileFactProposals = Array.isArray(data.proposals) ? data.proposals : [];
+    renderProfileFactProposals(data);
+  } catch (e) {
+    profileFactProposals = [];
+    setProfileProposalMessage('生成失败: ' + e.message, 'error');
+    if (list) list.innerHTML = '';
+  }
+}
+
+function renderProfileFactProposals(data) {
+  var list = document.getElementById('profile-proposal-list');
+  if (!list) return;
+  var proposals = profileFactProposals || [];
+  var rejected = Array.isArray(data && data.rejected) ? data.rejected : [];
+  if (!proposals.length) {
+    setProfileProposalMessage(
+      rejected.length ? '没有可用候选，已拒绝 ' + rejected.length + ' 条。' : '没有生成候选。',
+      rejected.length ? 'error' : ''
+    );
+    list.innerHTML = '';
+    return;
+  }
+  setProfileProposalMessage('生成 ' + proposals.length + ' 条候选。', 'ok');
+  list.innerHTML = proposals.map(function(item, index) {
+    var meta = [
+      item.profile_kind || 'other',
+      item.subject || 'user',
+      item.predicate || 'related_to',
+      'confidence ' + Number(item.confidence || 0).toFixed(2)
+    ].join(' · ');
+    return '<div class="profile-proposal-card">' +
+      '<strong>' + esc(item.fact || '') + '</strong>' +
+      '<div>' + esc(meta) + '</div>' +
+      '<div>object: ' + esc(item.object || '—') + '</div>' +
+      '<div>evidence: ' + esc(item.evidence_bucket_id || '') + (item.evidence_moment_id ? ' · ' + esc(item.evidence_moment_id) : '') + '</div>' +
+      '<div>reason: ' + esc(item.reason || '—') + '</div>' +
+      '<div style="margin-top:8px;"><button type="button" onclick="confirmProfileFactProposal(' + index + ')">确认写入</button></div>' +
+    '</div>';
+  }).join('');
+}
+
+async function confirmProfileFactProposal(index) {
+  var proposal = profileFactProposals[index];
+  if (!proposal) return;
+  if (!confirm('确认写入画像事实？\n\n' + proposal.fact)) return;
+  setProfileProposalMessage('写入中…', '');
+  try {
+    var res = await authFetch(BASE + '/api/profile-fact-proposals/confirm', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(proposal)
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '写入失败');
+    var successMessage = '已写入画像事实 ' + (data.id || '');
+    profileFactProposals.splice(index, 1);
+    renderProfileFactProposals({ proposals: profileFactProposals, rejected: [] });
+    setProfileProposalMessage(successMessage, 'ok');
+    await loadProfileFacts();
+    await loadBuckets();
+  } catch (e) {
+    setProfileProposalMessage('写入失败: ' + e.message, 'error');
+  }
+}
+
+function setAnchorProposalMessage(message, tone) {
+  var el = document.getElementById('anchor-proposal-message');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.remove('ok', 'error');
+  if (tone) el.classList.add(tone);
+}
+
+async function generateAnchorProposals() {
+  var bucketInput = document.getElementById('anchor-proposal-bucket-id');
+  var bucketId = (bucketInput && bucketInput.value || '').trim();
+  if (!bucketId) {
+    setAnchorProposalMessage('先填 bucket id。', 'error');
+    return;
+  }
+  setAnchorProposalMessage('生成中…', '');
+  var list = document.getElementById('anchor-proposal-list');
+  if (list) list.innerHTML = '';
+  try {
+    var res = await authFetch(BASE + '/api/anchor-proposals', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ bucket_id: bucketId })
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '生成失败');
+    anchorProposals = Array.isArray(data.proposals) ? data.proposals : [];
+    renderAnchorProposals(data);
+  } catch (e) {
+    anchorProposals = [];
+    setAnchorProposalMessage('生成失败: ' + e.message, 'error');
+    if (list) list.innerHTML = '';
+  }
+}
+
+function renderAnchorProposals(data) {
+  var list = document.getElementById('anchor-proposal-list');
+  if (!list) return;
+  var proposals = anchorProposals || [];
+  var rejected = Array.isArray(data && data.rejected) ? data.rejected : [];
+  var bucket = data && data.bucket ? data.bucket : {};
+  if (!proposals.length) {
+    setAnchorProposalMessage(
+      rejected.length ? '没有可用候选：' + (rejected[0].reason || '已拒绝') : '没有生成候选。',
+      rejected.length ? 'error' : ''
+    );
+    list.innerHTML = '';
+    return;
+  }
+  setAnchorProposalMessage('生成 ' + proposals.length + ' 条 Anchor 候选。', 'ok');
+  list.innerHTML = proposals.map(function(item, index) {
+    var meta = [
+      item.anchor_kind || 'other',
+      'confidence ' + Number(item.confidence || 0).toFixed(2),
+      bucket.name || item.bucket_id || ''
+    ].filter(Boolean).join(' · ');
+    return '<div class="profile-proposal-card">' +
+      '<strong>' + esc(bucket.name || item.bucket_id || '') + '</strong>' +
+      '<div>' + esc(meta) + '</div>' +
+      '<div>bucket: ' + esc(item.bucket_id || '') + '</div>' +
+      '<div>reason: ' + esc(item.reason || '—') + '</div>' +
+      '<div>future: ' + esc(item.future_use || '—') + '</div>' +
+      '<div style="margin-top:8px;"><button type="button" onclick="confirmAnchorProposal(' + index + ')">确认标为 Anchor</button></div>' +
+    '</div>';
+  }).join('');
+}
+
+async function confirmAnchorProposal(index) {
+  var proposal = anchorProposals[index];
+  if (!proposal) return;
+  if (!confirm('确认标为 Anchor？\n\n' + proposal.bucket_id)) return;
+  setAnchorProposalMessage('写入中…', '');
+  try {
+    var res = await authFetch(BASE + '/api/anchor-proposals/confirm', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(proposal)
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '写入失败');
+    var successMessage = data.status === 'already_anchor' ? '已经是 Anchor。' : '已标为 Anchor ' + (data.id || '');
+    anchorProposals.splice(index, 1);
+    renderAnchorProposals({ proposals: anchorProposals, rejected: [] });
+    setAnchorProposalMessage(successMessage, 'ok');
+    await loadBuckets();
+  } catch (e) {
+    setAnchorProposalMessage('写入失败: ' + e.message, 'error');
+  }
+}
+
+function renderProfileFacts() {
+  var list = document.getElementById('profile-facts-list');
+  var summary = document.getElementById('profile-summary');
+  if (!list || !summary) return;
+  var activeCount = profileFacts.filter(function(fact) { return fact.active; }).length;
+  var deprecatedCount = profileFacts.filter(function(fact) { return fact.deprecated; }).length;
+  summary.textContent = profileFacts.length + ' 条画像事实 · ' + activeCount + ' active · ' + deprecatedCount + ' deprecated';
+  if (!profileFacts.length) {
+    list.innerHTML = '<div class="loading">还没有画像事实。</div>';
+    return;
+  }
+  list.innerHTML = profileFacts.map(renderProfileFactCard).join('');
+}
+
+function profileFactById(id) {
+  id = String(id || '');
+  return profileFacts.find(function(fact) { return String(fact.id || '') === id; });
+}
+
+function profileFactStatus(fact) {
+  if (fact.deprecated || fact.state === 'deprecated') return { text: 'deprecated', cls: 'deprecated' };
+  if (fact.active || fact.state === 'active') return { text: 'active', cls: 'active' };
+  return { text: fact.state || 'inactive', cls: '' };
+}
+
+function renderProfileFactCard(fact) {
+  var id = String(fact.id || '');
+  var status = profileFactStatus(fact);
+  var conf = fact.confidence == null ? '—' : Number(fact.confidence).toFixed(2);
+  var evidence = Array.isArray(fact.evidence) ? fact.evidence : [];
+  var confirmButton = status.cls === 'active'
+    ? ''
+    : '<button type="button" onclick="runProfileFactAction(\'' + jsString(id) + '\', \'confirm\')">确认</button>';
+  var evidenceHtml = evidence.length
+    ? evidence.map(function(item) {
+        var bucketId = String(item.bucket_id || '');
+        var label = (item.name || bucketId) + (item.moment_id ? ' · ' + item.moment_id : '');
+        var openButton = bucketId
+          ? '<button type="button" onclick="showDetail(\'' + jsString(bucketId) + '\')">打开证据</button>'
+          : '';
+        return '<div>' + esc(label) + ' ' + openButton + '</div>';
+      }).join('')
+    : '<div>未记录证据。</div>';
+  return '<article class="profile-card ' + escAttr(status.cls) + '">' +
+    '<div class="profile-head">' +
+      '<div>' +
+        '<div class="profile-fact-text">' + esc(fact.fact || '') + '</div>' +
+        '<div class="profile-chip-row">' +
+          '<span class="profile-chip ' + escAttr(status.cls) + '">' + esc(status.text) + '</span>' +
+          '<span class="profile-chip">' + esc(fact.kind || 'unknown') + '</span>' +
+          '<span class="profile-chip">confidence ' + esc(conf) + '</span>' +
+          '<span class="profile-chip">' + esc(fact.source || 'profile_fact') + '</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="profile-actions">' +
+        confirmButton +
+        '<button type="button" onclick="editProfileFact(\'' + jsString(id) + '\')">编辑</button>' +
+        '<button type="button" class="danger" onclick="runProfileFactAction(\'' + jsString(id) + '\', \'deprecate\')">废弃</button>' +
+        '<button type="button" onclick="showDetail(\'' + jsString(id) + '\')">打开</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="profile-meta-grid">' +
+      '<div><label>subject</label>' + esc(fact.subject || '—') + '</div>' +
+      '<div><label>predicate</label>' + esc(fact.predicate || '—') + '</div>' +
+      '<div><label>object</label>' + esc(fact.object || '—') + '</div>' +
+      '<div><label>updated</label>' + esc(fact.updated_at || fact.last_active || fact.created || '—') + '</div>' +
+      '<div><label>bucket</label>' + esc(id) + '</div>' +
+      '<div><label>tags</label>' + esc((fact.tags || []).join(', ') || '—') + '</div>' +
+    '</div>' +
+    '<div class="profile-evidence">' + evidenceHtml + '</div>' +
+  '</article>';
+}
+
+async function runProfileFactAction(id, action, payload) {
+  payload = Object.assign({ action: action }, payload || {});
+  try {
+    var res = await authFetch(BASE + '/api/profile-facts/' + encodeURIComponent(id), {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '操作失败');
+    await loadProfileFacts();
+    await loadBuckets();
+  } catch (e) {
+    alert('画像事实操作失败: ' + e.message);
+  }
+}
+
+function editProfileFact(id) {
+  var fact = profileFactById(id);
+  if (!fact) return;
+  var nextFact = prompt('编辑画像事实', fact.fact || '');
+  if (nextFact == null) return;
+  nextFact = nextFact.trim();
+  if (!nextFact) return;
+  var nextKind = prompt('kind', fact.kind || 'preference');
+  if (nextKind == null) return;
+  var nextSubject = prompt('subject', fact.subject || 'user');
+  if (nextSubject == null) return;
+  var nextPredicate = prompt('predicate', fact.predicate || '');
+  if (nextPredicate == null) return;
+  var nextObject = prompt('object', fact.object || '');
+  if (nextObject == null) return;
+  var currentConfidence = fact.confidence == null ? '0.9' : String(fact.confidence);
+  var nextConfidence = prompt('confidence 0~1', currentConfidence);
+  if (nextConfidence == null) return;
+  var sections = fact.sections || {};
+  runProfileFactAction(id, 'edit', {
+    fact: nextFact,
+    profile_kind: nextKind,
+    subject: nextSubject,
+    predicate: nextPredicate,
+    object: nextObject,
+    confidence: Number(nextConfidence),
+    evidence_context: sections.evidence_context || '',
+    reflection: sections.reflection || '',
+    followup: sections.followup || ''
+  });
+}
+
+function setWordMapMessage(message, tone) {
+  var el = document.getElementById('word-map-message');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.remove('ok', 'error');
+  if (tone) el.classList.add(tone);
+}
+
+async function loadWordMap() {
+  var summary = document.getElementById('word-map-summary');
+  var nodes = document.getElementById('word-map-nodes');
+  var edges = document.getElementById('word-map-edges');
+  var aliases = document.getElementById('identity-aliases');
+  var boundary = document.getElementById('word-map-boundary');
+  if (!summary || !nodes || !edges || !aliases || !boundary) return;
+  summary.textContent = '读取中…';
+  nodes.innerHTML = '<div class="loading">加载中…</div>';
+  edges.innerHTML = '<div class="loading">加载中…</div>';
+  aliases.innerHTML = '<div class="loading">加载中…</div>';
+  boundary.innerHTML = '<div class="loading">加载中…</div>';
+  setWordMapMessage('', '');
+  try {
+    var wordRes = await authFetch(BASE + '/api/word-map?nodes=20&edges=20');
+    if (!wordRes) return;
+    var word = await wordRes.json().catch(function() { return {}; });
+    if (!wordRes.ok) throw new Error(word.error || 'Word Map 读取失败');
+    var identityRes = await authFetch(BASE + '/api/identity-semantics?limit=50');
+    if (!identityRes) return;
+    var identity = await identityRes.json().catch(function() { return {}; });
+    if (!identityRes.ok) throw new Error(identity.error || 'Identity 读取失败');
+    wordMapData = word;
+    identitySemanticData = identity;
+    renderWordMap();
+  } catch (e) {
+    summary.textContent = '读取失败';
+    nodes.innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
+    edges.innerHTML = '';
+    aliases.innerHTML = '';
+    boundary.innerHTML = '';
+    setWordMapMessage('读取失败: ' + e.message, 'error');
+  }
+}
+
+async function rebuildWordMap() {
+  setWordMapMessage('重建 Word Map 中…', '');
+  try {
+    var res = await authFetch(BASE + '/api/word-map/rebuild', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ include_archive: false, nodes: 20, edges: 20 })
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '重建失败');
+    wordMapData = data;
+    setWordMapMessage('Word Map 已重建：' + formatWordMapStats(data.stats), 'ok');
+    await loadWordMap();
+  } catch (e) {
+    setWordMapMessage('重建失败: ' + e.message, 'error');
+  }
+}
+
+async function rebuildIdentitySemantics() {
+  setWordMapMessage('重建 private alias 中…', '');
+  try {
+    var res = await authFetch(BASE + '/api/identity-semantics/rebuild', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ include_archive: false, limit: 50 })
+    });
+    if (!res) return;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || '重建失败');
+    identitySemanticData = data;
+    setWordMapMessage('Private alias 已重建：' + formatIdentityStats(data.stats), 'ok');
+    await loadWordMap();
+  } catch (e) {
+    setWordMapMessage('重建失败: ' + e.message, 'error');
+  }
+}
+
+function formatWordMapStats(stats) {
+  stats = stats || {};
+  return (stats.nodes || 0) + ' nodes · ' + (stats.card_nodes || 0) + ' card links · ' + (stats.edge_evidence || 0) + ' edge evidence';
+}
+
+function formatIdentityStats(stats) {
+  stats = stats || {};
+  return (stats.canonical || 0) + ' canonical · ' + (stats.aliases || 0) + ' aliases · ' + (stats.evidence || 0) + ' evidence';
+}
+
+function renderWordMap() {
+  var word = wordMapData || {};
+  var identity = identitySemanticData || {};
+  var stats = word.stats || {};
+  var identityStats = identity.stats || {};
+  var privateTerms = Array.isArray(word.private_terms_excluded) ? word.private_terms_excluded : [];
+  var summary = document.getElementById('word-map-summary');
+  if (summary) {
+    summary.textContent = [
+      'Word Map ' + formatWordMapStats(stats),
+      'Private Alias ' + formatIdentityStats(identityStats),
+      identity.enabled ? 'private config enabled' : 'private config disabled'
+    ].join(' · ');
+  }
+  renderWordMapNodes(word.nodes || []);
+  renderWordMapEdges(word.edges || []);
+  renderIdentityAliases(identity.aliases || []);
+  renderWordMapBoundary(privateTerms, identity);
+}
+
+function renderWordMapNodes(nodes) {
+  var el = document.getElementById('word-map-nodes');
+  if (!el) return;
+  if (!nodes.length) {
+    el.innerHTML = '<div class="loading">还没有节点；先点重建 Word Map。</div>';
+    return;
+  }
+  el.innerHTML = nodes.map(function(node) {
+    return '<div class="word-map-card">' +
+      '<strong>' + esc(node.term || '') + '</strong>' +
+      '<div>' + esc(node.kind || 'keyword') + ' · buckets ' + esc(node.bucket_count || 0) + ' · weight ' + esc(Number(node.weight || 0).toFixed(2)) + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function renderWordMapEdges(edges) {
+  var el = document.getElementById('word-map-edges');
+  if (!el) return;
+  if (!edges.length) {
+    el.innerHTML = '<div class="loading">还没有共现边。</div>';
+    return;
+  }
+  el.innerHTML = edges.map(function(edge) {
+    return '<div class="word-map-card">' +
+      '<strong>' + esc(edge.term_a || '') + ' ↔ ' + esc(edge.term_b || '') + '</strong>' +
+      '<div>buckets ' + esc(edge.bucket_count || 0) + ' · weight ' + esc(Number(edge.weight || 0).toFixed(2)) + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function renderIdentityAliases(aliases) {
+  var el = document.getElementById('identity-aliases');
+  if (!el) return;
+  if (!aliases.length) {
+    el.innerHTML = '<div class="loading">没有 private alias。未配置私有 canonical 时这里会保持为空。</div>';
+    return;
+  }
+  el.innerHTML = aliases.map(function(item) {
+    var evidence = Array.isArray(item.evidence_bucket_ids) ? item.evidence_bucket_ids.join(', ') : '';
+    return '<div class="word-map-card">' +
+      '<strong>' + esc(item.alias || '') + '</strong>' +
+      '<div>' + esc(item.canonical || '') + '</div>' +
+      '<div>' + esc(item.scope || '') + ' · confidence ' + esc(Number(item.confidence || 0).toFixed(2)) + '</div>' +
+      '<div>evidence: ' + esc(evidence || '—') + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function renderWordMapBoundary(privateTerms, identity) {
+  var el = document.getElementById('word-map-boundary');
+  if (!el) return;
+  var identityEnabled = identity && identity.enabled;
+  var privateText = privateTerms.length ? privateTerms.join(', ') : '无';
+  el.innerHTML =
+    '<div class="word-map-card"><strong>Generic Word Map</strong><div>从 subject / keywords / tags / TF-IDF 派生，只存词与 bucket 的共现证据。</div></div>' +
+    '<div class="word-map-card"><strong>Private Scope</strong><div>私有 alias 不进入通用词图；当前排除词：' + esc(privateText) + '</div></div>' +
+    '<div class="word-map-card"><strong>Gateway</strong><div>当前页面不会改变 Gateway 注入；这里只是诊断和手动索引。</div></div>' +
+    '<div class="word-map-card"><strong>Identity</strong><div>' + esc(identityEnabled ? 'private canonical 已启用。' : '未配置私有 canonical，alias 索引保持关闭。') + '</div></div>';
 }
 
 function updateStats() {
@@ -2493,11 +3715,127 @@ async function showDetail(id) {
           '</div>' +
         '</form>' +
       '</div>' +
+      '<div id="bucket-moments-block" class="detail-moments" data-bucket-id="' + escAttr(id) + '">' +
+        '<h3>Moments</h3>' +
+        '<div class="loading">解析 moments…</div>' +
+      '</div>' +
       commentsHtml +
       commentFormHtml;
+    loadBucketMoments(id);
   } catch (e) {
     content.innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
   }
+}
+
+async function loadBucketMoments(bucketId) {
+  var block = document.getElementById('bucket-moments-block');
+  if (!block) return;
+  try {
+    var res = await authFetch(BASE + '/api/moments?bucket_id=' + encodeURIComponent(bucketId) + '&limit=40');
+    if (!res) return;
+    var data = await res.json();
+    if (!block || block.getAttribute('data-bucket-id') !== bucketId) return;
+    block.innerHTML = renderBucketMoments(data);
+  } catch (e) {
+    if (block && block.getAttribute('data-bucket-id') === bucketId) {
+      block.innerHTML = '<h3>Moments</h3><div class="loading">加载失败: ' + esc(e.message) + '</div>';
+    }
+  }
+}
+
+function renderBucketMoments(data) {
+  if (!data || data.status !== 'ok') {
+    return '<h3>Moments</h3><div class="loading">无 moment 诊断数据</div>';
+  }
+  var layer = data.bucket_layer_debug || {};
+  var moments = Array.isArray(data.moments) ? data.moments : [];
+  var edges = Array.isArray(data.edges) ? data.edges : [];
+  var chips = [
+    { text: 'bucket layer ' + (layer.layer || 'unknown') },
+    { text: 'direct ' + (layer.can_direct_seed ? 'yes' : 'no'), state: layer.can_direct_seed ? 'allow' : 'block' },
+    { text: 'diffuse ' + (layer.can_diffuse ? 'yes' : 'no'), state: layer.can_diffuse ? 'allow' : 'block' },
+    { text: 'related ' + (layer.can_related_target ? 'yes' : 'no'), state: layer.can_related_target ? 'allow' : 'block' },
+    { text: moments.length + ' moments' },
+  ];
+  if (data.edge_count != null) chips.push({ text: data.edge_count + ' edges' });
+  var body = moments.length
+    ? '<div class="moment-list">' + moments.map(renderMomentItem).join('') + '</div>'
+    : '<div class="loading">这条 bucket 暂时没有拆出 moment。</div>';
+  return '<h3>Moments</h3>' + renderMomentChips(chips) + body + renderMomentEdges(edges);
+}
+
+function renderMomentItem(moment, index) {
+  var m = moment || {};
+  var layer = m.layer_debug || {};
+  var gate = m.runtime_gate || {};
+  var direct = gate.direct_seed || {};
+  var related = gate.related_target || {};
+  var recall = gate.recall_context || {};
+  var chips = [
+    { text: 'layer ' + (layer.layer || gate.layer || 'unknown') },
+    { text: 'section ' + (m.section || 'moment') },
+    { text: 'direct ' + (direct.allowed ? 'yes' : 'no') + (direct.reason ? ' · ' + direct.reason : ''), state: direct.allowed ? 'allow' : 'block' },
+    { text: 'related ' + (related.allowed ? 'yes' : 'no') + (related.reason ? ' · ' + related.reason : ''), state: related.allowed ? 'allow' : 'block' },
+    { text: 'context ' + (recall.allowed ? 'yes' : 'no'), state: recall.allowed ? 'allow' : 'block' },
+  ];
+  if (layer.context_only) chips.push({ text: 'context-only', state: 'block' });
+  var source = formatMomentSource(m.metadata && m.metadata.source_ref);
+  var text = m.text || m.text_preview || '';
+  var sourceWindow = m.source_window
+    ? '<div class="moment-source-window"><div class="moment-source-window-title">原文窗口</div><pre>' + esc(m.source_window) + '</pre></div>'
+    : '';
+  return '<div class="moment-item">' +
+    '<div class="moment-head">' +
+      '<div class="moment-title">#' + (index + 1) + ' ' + esc(m.moment_id || '') + '</div>' +
+      (source ? '<div class="moment-source">' + esc(source) + '</div>' : '') +
+    '</div>' +
+    renderMomentChips(chips) +
+    '<div class="moment-body">' + esc(text) + '</div>' +
+    sourceWindow +
+  '</div>';
+}
+
+function renderMomentChips(chips) {
+  return '<div class="moment-summary">' + chips.map(function(chip) {
+    return '<span class="score-chip ' + (chip.state || '') + '">' + esc(chip.text) + '</span>';
+  }).join('') + '</div>';
+}
+
+function renderMomentEdges(edges) {
+  if (!edges.length) {
+    return '<div class="moment-edge-list"><div class="moment-edge-title">Moment Edges</div><div class="loading">无 edge</div></div>';
+  }
+  return '<div class="moment-edge-list">' +
+    '<div class="moment-edge-title">Moment Edges</div>' +
+    edges.map(renderMomentEdge).join('') +
+  '</div>';
+}
+
+function renderMomentEdge(edge) {
+  var e = edge || {};
+  var chips = [
+    { text: e.relation_type || 'relates_to' },
+  ];
+  if (e.confidence != null) chips.push({ text: 'confidence ' + Number(e.confidence).toFixed(2) });
+  if (e.reason) chips.push({ text: String(e.reason).slice(0, 80) });
+  var line = (e.source || 'unknown') + ' → ' + (e.target || 'unknown');
+  return '<div class="moment-item">' +
+    '<div class="moment-head">' +
+      '<div class="moment-title">' + esc(line) + '</div>' +
+      '<div class="moment-source">' + esc(e.created_at || '') + '</div>' +
+    '</div>' +
+    renderMomentChips(chips) +
+  '</div>';
+}
+
+function formatMomentSource(ref) {
+  if (!ref || typeof ref !== 'object') return '';
+  var path = ref.path ? String(ref.path).split(/[\\/]/).pop() : '';
+  var source = ref.source || 'bucket_content';
+  var start = ref.start_line || ref.content_start_line || '';
+  var end = ref.end_line || '';
+  var line = start ? ':' + start + (end && end !== start ? '-' + end : '') : '';
+  return (path ? path + ' · ' : '') + source + line;
 }
 
 function startBucketContentEdit(bucketId) {
@@ -3077,6 +4415,12 @@ function esc(s) {
   return d.innerHTML;
 }
 
+function clipUiText(value, maxChars) {
+  var text = String(value || '').trim();
+  var limit = Math.max(20, Number(maxChars || 240));
+  return text.length > limit ? text.slice(0, limit) + '…' : text;
+}
+
 function formatTimeAgo(iso) {
   if (!iso) return '—';
   var normalized = String(iso);
@@ -3141,9 +4485,10 @@ function renderPersona(data) {
         '</div>' +
         '<div>' +
           '<div class="persona-guidance">我现在的心情是....</div>' +
-          '<div class="persona-guidance">' + esc((affect && affect.residue) || '当前没有明显余味。') + '</div>' +
+          '<div class="persona-guidance">' + esc((affect && (affect.inner_thought || affect.residue)) || '当前没有明显余味。') + '</div>' +
           '<div class="persona-status-line">' +
             '<span class="persona-pill">' + (cfg.enabled ? 'engine on' : 'engine paused') + '</span>' +
+            '<span class="persona-pill">' + (cfg.event_recording_enabled === false ? 'events paused' : 'events on') + '</span>' +
             '<span class="persona-pill">' + (cfg.api_ready ? 'LLM ready' : 'fallback state') + '</span>' +
             '<span class="persona-pill">' + esc(cfg.model || 'model unset') + '</span>' +
           '</div>' +
@@ -3207,12 +4552,14 @@ function renderPersonaEvents(events) {
     return '<div class="persona-empty">还没有 Persona 事件。通过 gateway 聊一轮后，这里会出现评估结果和状态增量。</div>';
   }
   return '<div class="persona-event-list">' + events.map(function(ev) {
-    var intent = ev.perceived_intent || ev.error || 'no intent recorded';
-    var residue = ev.residue ? '<div class="persona-event-residue">' + esc(ev.residue) + '</div>' : '';
+    var thought = ev.inner_thought || ev.residue || ev.perceived_intent || ev.error || 'no thought recorded';
+    var trigger = ev.surface_trigger || ev.perceived_intent || '';
+    var residue = ev.residue && ev.residue !== thought ? '<div class="persona-event-residue">' + esc(ev.residue) + '</div>' : '';
     return '<div class="persona-event">' +
       '<div class="persona-event-type">' + esc(ev.event_type || 'unknown') + '</div>' +
       '<div class="persona-event-main">' +
-        esc(intent) +
+        esc(thought) +
+        (trigger ? '<small>' + esc(trigger) + '</small>' : '') +
         residue +
         '<small>' + esc(ev.mood_label || 'mood unset') + ' · confidence ' + personaNumber(ev.confidence) + ' · #' + esc(ev.message_hash || '') + '</small>' +
         renderPersonaDeltas(ev) +
@@ -3291,8 +4638,22 @@ async function runBreathDebug() {
   var arousal = document.getElementById('breath-arousal').value;
   var results = document.getElementById('breath-results');
   var info = document.getElementById('breath-info');
+  var recall = document.getElementById('recall-results');
+  var diffusion = document.getElementById('diffusion-results');
 
   results.innerHTML = '<div class="loading">计算中…</div>';
+  if (recall) {
+    recall.style.display = '';
+    recall.innerHTML = query
+      ? '<h3>Moment 命中</h3><div class="loading">读取 recall debug…</div>'
+      : '<h3>Moment 命中</h3><div class="loading">输入 query 后查看 moment candidates。</div>';
+  }
+  if (diffusion) {
+    diffusion.style.display = '';
+    diffusion.innerHTML = query
+      ? '<h3>扩散路径</h3><div class="loading">读取 diffusion debug…</div>'
+      : '<h3>扩散路径</h3><div class="loading">输入 query 后查看 seeds / hits / paths。</div>';
+  }
 
   var url = BASE + '/api/breath-debug?q=' + encodeURIComponent(query);
   if (valence) url += '&valence=' + valence;
@@ -3321,6 +4682,11 @@ async function runBreathDebug() {
       ' &nbsp;|&nbsp; 候选=<code>' + data.total_candidates + '</code> 桶' +
       ' → 通过=<code>' + data.passed_count + '</code> 桶' +
       (query ? '' : ' &nbsp;|&nbsp; <em>未输入 query，topic 分数全为 0</em>');
+
+    if (query) {
+      loadRecallDebug(query);
+      loadDiffusionDebug(query);
+    }
 
     if (!data.results.length) {
       results.innerHTML = '<div class="loading">无结果</div>';
@@ -3352,7 +4718,10 @@ async function runBreathDebug() {
 
       return '<div class="score-row" title="' + esc(r.name) + '">' +
         '<span class="rank">' + (i < 9 ? '0' : '') + (i + 1) + '</span>' +
-        '<span class="name">' + icon + ' ' + esc(r.name) + '</span>' +
+        '<div class="score-main">' +
+          '<div class="name">' + icon + ' ' + esc(r.name) + '</div>' +
+          breathGateTrace(r) +
+        '</div>' +
         '<div class="score-bars">' + bars + '</div>' +
         '<span class="score-final ' + (passed ? 'score-pass' : 'score-fail') + '">' + r.normalized.toFixed(1) + (r.resolved ? '<small>×0.3</small>' : '') + '</span>' +
       '</div>';
@@ -3362,16 +4731,306 @@ async function runBreathDebug() {
   }
 }
 
+async function loadRecallDebug(query) {
+  var target = document.getElementById('recall-results');
+  if (!target) return;
+  try {
+    var url = BASE + '/api/recall-debug?q=' + encodeURIComponent(query) + '&max_candidates=12&max_results=3';
+    var res = await authFetch(url);
+    if (!res) return;
+    var data = await res.json();
+    target.innerHTML = renderRecallDebug(data);
+  } catch (e) {
+    target.innerHTML = '<h3>Moment 命中</h3><div class="loading">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+function renderRecallDebug(data) {
+  if (!data || data.status !== 'ok') {
+    return '<h3>Moment 命中</h3><div class="loading">无 recall 诊断数据</div>';
+  }
+  var candidates = Array.isArray(data.candidates) ? data.candidates : [];
+  var thresholds = data.recall_thresholds || {};
+  var chips = [
+    { text: (data.seed_buckets || []).length + ' seed buckets' },
+    { text: candidates.length + ' candidates' },
+    { text: (data.admitted_count || 0) + ' admitted', state: data.admitted_count ? 'allow' : '' },
+    { text: (data.suppressed_count || 0) + ' suppressed', state: data.suppressed_count ? 'block' : '' },
+    { text: 'profile ' + (thresholds.profile || 'default') },
+    { text: 'direct ' + (thresholds.direct_render_mode || 'auto') },
+  ];
+  var body = candidates.length
+    ? '<div class="moment-list">' + candidates.map(renderRecallCandidate).join('') + '</div>'
+    : '<div class="loading">没有 moment candidates。</div>';
+  return '<h3>Moment 命中</h3>' + renderMomentChips(chips) + body;
+}
+
+function renderRecallCandidate(candidate) {
+  var c = candidate || {};
+  var admitted = c.admission === 'admitted';
+  var direct = !!c.selected_direct;
+  var secondary = !!c.selected_secondary;
+  var selected = direct || secondary || !!c.selected_returned;
+  var roleText = direct ? 'direct' : secondary ? 'secondary' : selected ? 'returned' : admitted ? 'admitted' : 'suppressed';
+  var chips = [
+    { text: roleText, state: selected || admitted ? 'allow' : 'block' },
+    { text: 'pre #' + rankText(c.pre_rank) },
+    { text: 'gate ' + (c.gate_rank == null ? 'filtered' : '#' + rankText(c.gate_rank)), state: c.gate === 'filtered' ? 'block' : 'allow' },
+    { text: 'final ' + (c.final_rank == null ? '—' : '#' + rankText(c.final_rank)) },
+    { text: 'section ' + (c.section || 'moment') },
+  ];
+  if (c.admission_reason) chips.push({ text: c.admission_reason, state: admitted ? 'allow' : 'block' });
+  if (c.rerank_score != null) chips.push({ text: 'rerank ' + Number(c.rerank_score).toFixed(2) });
+  if (c.embedding_score != null) chips.push({ text: 'semantic ' + Number(c.embedding_score).toFixed(2) });
+  if (c.direct_render && c.direct_render.shape) {
+    chips.push({
+      text: 'render ' + c.direct_render.shape + ' · ' + (c.direct_render.reason || ''),
+      state: c.direct_render.shape === 'bucket_capsule' ? 'allow' : '',
+    });
+  }
+  if (c.gate_reasons && c.gate_reasons.length) {
+    chips.push({ text: c.gate_reasons.join(' · '), state: c.gate === 'filtered' ? 'block' : '' });
+  }
+  return '<div class="moment-item">' +
+    '<div class="moment-head">' +
+      '<div class="moment-title">' + esc(c.bucket_name || c.bucket_id || 'unknown') + '</div>' +
+      '<div class="moment-source">' + esc(c.moment_id || '') + '</div>' +
+    '</div>' +
+    renderMomentChips(chips) +
+    (c.annotation_summary ? '<div class="diffusion-path">summary: ' + esc(c.annotation_summary) + '</div>' : '') +
+    '<div class="moment-body">' + esc(c.text_preview || '') + '</div>' +
+  '</div>';
+}
+
+function rankText(value) {
+  if (value == null) return '—';
+  return String(Number(value) + 1);
+}
+
+async function loadDiffusionDebug(query) {
+  var target = document.getElementById('diffusion-results');
+  if (!target) return;
+  try {
+    var url = BASE + '/api/diffusion-debug?q=' + encodeURIComponent(query);
+    var res = await authFetch(url);
+    if (!res) return;
+    var data = await res.json();
+    target.innerHTML = renderDiffusionDebug(data);
+  } catch (e) {
+    target.innerHTML = '<h3>扩散路径</h3><div class="loading">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+function renderDiffusionDebug(data) {
+  if (!data || data.status !== 'ok') {
+    return '<h3>扩散路径</h3><div class="loading">无扩散诊断数据</div>';
+  }
+  var seeds = Array.isArray(data.seeds) ? data.seeds : [];
+  var hits = Array.isArray(data.hits) ? data.hits : [];
+  var options = data.options || {};
+  var warnings = Array.isArray(data.warnings) ? data.warnings : [];
+  var summary = renderMomentChips([
+    { text: seeds.length + ' seeds' },
+    { text: hits.length + ' hits' },
+    { text: 'edge ≥ ' + (options.edge_min_confidence != null ? options.edge_min_confidence : '—') },
+    { text: 'max hops ' + (options.max_hops != null ? options.max_hops : '—') },
+  ]);
+  var body = '<div class="diffusion-columns">' +
+    renderDiffusionSection('Seeds', seeds, 'seed') +
+    renderDiffusionSection('Hits', hits, 'hit') +
+  '</div>';
+  var warningHtml = warnings.length
+    ? '<div class="diffusion-warning">' + esc(warnings.join(' · ')) + '</div>'
+    : '';
+  return '<h3>扩散路径</h3>' + summary + body + warningHtml;
+}
+
+function renderDiffusionSection(title, items, kind) {
+  if (!items.length) {
+    return '<div><div class="diffusion-section-title">' + esc(title) + '</div><div class="loading">无</div></div>';
+  }
+  return '<div><div class="diffusion-section-title">' + esc(title) + '</div>' +
+    items.map(function(item, index) { return renderDiffusionRow(item, index, kind); }).join('') +
+  '</div>';
+}
+
+function renderDiffusionRow(item, index, kind) {
+  var row = item || {};
+  var runtime = row.runtime_gate || {};
+  var related = runtime.related_injection || runtime.related_target || {};
+  var chips = [
+    { text: (kind === 'seed' ? 'seed ' : 'hit ') + '#' + (index + 1) },
+    { text: 'layer ' + ((row.layer_debug && row.layer_debug.layer) || runtime.layer || 'unknown') },
+  ];
+  if (row.seed_score != null) chips.push({ text: 'seed score ' + Number(row.seed_score).toFixed(2) });
+  if (row.score != null) chips.push({ text: 'activation ' + Number(row.score).toFixed(2) });
+  if (related.reason) {
+    chips.push({
+      text: 'related ' + (related.allowed ? 'yes' : 'no') + ' · ' + related.reason,
+      state: related.allowed ? 'allow' : 'block',
+    });
+  }
+  var path = row.path ? '<div class="diffusion-path">path: ' + esc(row.path) + '</div>' : '';
+  if (!path && row.path_ids && row.path_ids.length) {
+    path = '<div class="diffusion-path">path ids: ' + esc(row.path_ids.join(' → ')) + '</div>';
+  }
+  if (row.caution) {
+    chips.push({ text: 'caution', state: 'block' });
+  }
+  return '<div class="diffusion-row">' +
+    '<div class="diffusion-name">' + esc(row.name || row.bucket_id || 'unknown') + '</div>' +
+    renderMomentChips(chips) +
+    path +
+  '</div>';
+}
+
+async function loadGatewayInjections() {
+  var target = document.getElementById('gateway-injections-content');
+  if (!target) return;
+  var sessionInput = document.getElementById('gateway-session-filter');
+  var includeInput = document.getElementById('gateway-include-context');
+  var sessionId = sessionInput ? sessionInput.value.trim() : '';
+  var includeContext = includeInput && includeInput.checked;
+  target.innerHTML = '<div class="gateway-injection-empty">读取 Gateway 注入记录…</div>';
+  var url = BASE + '/api/gateway-injections?limit=10&include_context=' + (includeContext ? '1' : '0');
+  if (sessionId) url += '&session_id=' + encodeURIComponent(sessionId);
+  try {
+    var res = await authFetch(url);
+    if (!res) return;
+    var data = await res.json();
+    target.innerHTML = renderGatewayInjections(data);
+  } catch (e) {
+    target.innerHTML = '<div class="loading">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+function renderGatewayInjections(data) {
+  if (!data || data.status !== 'ok') {
+    var error = data && data.error ? data.error : '无 Gateway 注入记录';
+    return '<div class="gateway-injection-empty">' + esc(error) + '</div>';
+  }
+  var items = Array.isArray(data.items) ? data.items : [];
+  if (!items.length) return '<div class="gateway-injection-empty">暂无 Gateway 注入记录。</div>';
+  return '<div class="gateway-injection-list">' + items.map(renderGatewayInjectionItem).join('') + '</div>';
+}
+
+function renderGatewayInjectionItem(item) {
+  var row = item || {};
+  var payload = row.payload || {};
+  var recalled = payload.recalled_bucket_ids || [];
+  var diffused = payload.diffused_bucket_ids || [];
+  var injected = payload.injected_bucket_ids || [];
+  var recalledMoments = payload.recalled_moment_ids || [];
+  var diffusedMoments = payload.diffused_moment_ids || [];
+  var directRender = gatewayDirectRenderSummaries(payload);
+  var chainDebug = gatewayChainDebugSummaries(payload);
+  var dreamStatus = payload.dream_context_status || {};
+  var chips = [
+    { text: 'round ' + (row.round_id || '—') },
+    { text: 'recalled ' + recalled.length, state: recalled.length ? 'allow' : '' },
+    { text: 'diffused ' + diffused.length, state: diffused.length ? 'allow' : '' },
+    { text: 'injected ' + injected.length, state: injected.length ? 'allow' : '' },
+    { text: payload.recent_context_injected ? 'recent yes' : 'recent no', state: payload.recent_context_injected ? 'allow' : '' },
+  ];
+  if (dreamStatus.status) {
+    chips.push({
+      text: payload.dream_context_injected
+        ? 'dream injected' + (dreamStatus.retained ? ' · retained' : '')
+        : 'dream skipped' + (dreamStatus.reason ? ' · ' + dreamStatus.reason : ''),
+      state: payload.dream_context_injected ? 'allow' : '',
+    });
+  }
+  if (payload.context_mode) chips.push({ text: 'mode ' + payload.context_mode });
+  var contextPreview = gatewayContextPreview(payload);
+  return '<div class="gateway-injection-item">' +
+    '<div class="gateway-injection-head">' +
+      '<div class="gateway-injection-title">' + esc(row.session_id || 'session') + '</div>' +
+      '<div class="gateway-injection-time">' + esc(row.created_at || '') + '</div>' +
+    '</div>' +
+    renderMomentChips(chips) +
+    '<div class="gateway-injection-lines">' +
+      '<div class="gateway-injection-line"><span class="label">query:</span> ' + esc(payload.query_preview || '') + '</div>' +
+      '<div class="gateway-injection-line"><span class="label">buckets:</span> ' + esc(injected.slice(0, 8).join(', ') || '—') + '</div>' +
+      '<div class="gateway-injection-line"><span class="label">moments:</span> ' + esc(recalledMoments.concat(diffusedMoments).slice(0, 8).join(', ') || '—') + '</div>' +
+      (directRender ? '<div class="gateway-injection-line"><span class="label">direct render:</span> ' + esc(directRender) + '</div>' : '') +
+      (chainDebug ? '<div class="gateway-injection-line"><span class="label">diffused chain:</span> ' + esc(chainDebug) + '</div>' : '') +
+    '</div>' +
+    (contextPreview ? '<div class="gateway-context-preview">' + esc(contextPreview) + '</div>' : '') +
+  '</div>';
+}
+
+function gatewayDirectRenderSummaries(payload) {
+  var rows = Array.isArray(payload.recalled_moment_debug) ? payload.recalled_moment_debug : [];
+  return rows.map(function(row) {
+    var r = row.direct_render || {};
+    if (!r.shape) return '';
+    var label = row.bucket_name || row.bucket_id || row.moment_id || 'moment';
+    return label + ' -> ' + r.shape + (r.reason ? ' · ' + r.reason : '');
+  }).filter(Boolean).slice(0, 5).join(' / ');
+}
+
+function gatewayChainDebugSummaries(payload) {
+  var rows = Array.isArray(payload.diffused_moment_debug) ? payload.diffused_moment_debug : [];
+  return rows.map(function(row) {
+    var label = row.bucket_name || row.bucket_id || row.moment_id || 'moment';
+    var bits = [];
+    if (row.chain_bundle) bits.push('chain_bundle');
+    if (row.note) bits.push(row.note);
+    if (row.path && row.path.trace) bits.push(row.path.trace);
+    var temps = Array.isArray(row.temperature_context) ? row.temperature_context.map(function(item) {
+      return item.label || item.section || '';
+    }).filter(Boolean).join('+') : '';
+    if (temps) bits.push('temp ' + temps);
+    return bits.length ? label + ' -> ' + bits.join(' · ') : '';
+  }).filter(Boolean).slice(0, 5).join(' / ');
+}
+
+function gatewayContextPreview(payload) {
+  var parts = [];
+  if (payload.recalled_memory) parts.push('Recalled Memory:\\n' + clipUiText(payload.recalled_memory, 360));
+  if (payload.diffused_memory) parts.push('Diffused Memory:\\n' + clipUiText(payload.diffused_memory, 360));
+  if (payload.dream_context) parts.push('Dream Context:\\n' + clipUiText(payload.dream_context, 360));
+  if (payload.dynamic_context) parts.push('Dynamic Context:\\n' + clipUiText(payload.dynamic_context, 520));
+  return parts.join('\\n\\n');
+}
+
+function breathGateTrace(row) {
+  var layer = (row.layer_debug && row.layer_debug.layer) || (row.runtime_gate && row.runtime_gate.layer) || '';
+  var runtime = row.runtime_gate || {};
+  var related = runtime.related_injection || runtime.related_target || {};
+  var recent = runtime.recent_context || {};
+  var topic = runtime.topic_evidence || {};
+  var chips = [];
+
+  if (layer) chips.push({ text: 'layer ' + layer });
+  if (related.reason) {
+    chips.push({
+      text: 'related ' + (related.allowed ? 'yes' : 'no') + ' · ' + related.reason,
+      state: related.allowed ? 'allow' : 'block',
+    });
+  }
+  if (recent.reason) {
+    chips.push({
+      text: 'recent ' + (recent.allowed ? 'yes' : 'no') + ' · ' + recent.reason,
+      state: recent.allowed ? 'allow' : 'block',
+    });
+  }
+  if (topic.required) {
+    chips.push({
+      text: 'topic evidence ' + (topic.present ? 'yes' : 'missing'),
+      state: topic.present ? 'allow' : 'block',
+    });
+  }
+
+  if (!chips.length) return '';
+  return '<div class="score-trace">' + chips.map(function(chip) {
+    return '<span class="score-chip ' + (chip.state || '') + '">' + esc(chip.text) + '</span>';
+  }).join('') + '</div>';
+}
+
 document.getElementById('breath-query').addEventListener('keydown', function(e) {
   if (e.key === 'Enter') runBreathDebug();
 });
-
-function setConfigStatus(html) {
-  ['config-status', 'memory-config-status'].forEach(function(id) {
-    var el = document.getElementById(id);
-    if (el) el.innerHTML = html;
-  });
-}
 
 async function loadConfig() {
   try {
@@ -3392,6 +5051,8 @@ async function loadConfig() {
     document.getElementById('cfg-emb-key').value = '';
     document.getElementById('cfg-persona-enabled').value =
       (cfg.persona && cfg.persona.enabled) === false ? 'false' : 'true';
+    document.getElementById('cfg-persona-event-recording').value =
+      (cfg.persona && cfg.persona.event_recording_enabled) === false ? 'false' : 'true';
     document.getElementById('cfg-persona-model').value = (cfg.persona && cfg.persona.model) || '';
     document.getElementById('cfg-persona-url').value = (cfg.persona && cfg.persona.base_url) || '';
     document.getElementById('cfg-persona-key').placeholder =
@@ -3413,12 +5074,33 @@ async function loadConfig() {
     document.getElementById('cfg-dream-anchor').value = cfg.dream.identity_anchor_id || '';
     document.getElementById('cfg-gateway-cooldown').value = (cfg.gateway && cfg.gateway.cooldown_hours) ?? 6;
     document.getElementById('cfg-gateway-rounds').value = (cfg.gateway && cfg.gateway.skip_recent_rounds) ?? 5;
-    var recentContextBudget = (cfg.gateway && cfg.gateway.recent_context_budget) ?? 300;
-    document.getElementById('cfg-recent-context-budget').value = recentContextBudget;
-    document.getElementById('cfg-recent-context-enabled').value = recentContextBudget > 0 ? 'true' : 'false';
-    var personaContextRounds = (cfg.gateway && cfg.gateway.current_inner_state_interval_rounds) ?? 15;
-    document.getElementById('cfg-persona-context-rounds').value = personaContextRounds;
-    document.getElementById('cfg-persona-context-enabled').value = personaContextRounds > 0 ? 'true' : 'false';
+    document.getElementById('cfg-recent-context-cooldown').value =
+      (cfg.gateway && cfg.gateway.recent_context_cooldown_hours) ?? 6;
+    document.getElementById('cfg-recent-context-reentry').value =
+      (cfg.gateway && cfg.gateway.recent_context_reentry_idle_hours) ?? 24;
+    document.getElementById('cfg-recent-context-budget').value =
+      (cfg.gateway && cfg.gateway.recent_context_budget) ?? 300;
+    document.getElementById('cfg-recent-context-enabled').value =
+      ((cfg.gateway && cfg.gateway.recent_context_budget) ?? 300) > 0 ? 'true' : 'false';
+    document.getElementById('cfg-recalled-memory-budget').value =
+      (cfg.gateway && cfg.gateway.recalled_memory_budget) ?? 400;
+    document.getElementById('cfg-related-memory-budget').value =
+      (cfg.gateway && cfg.gateway.related_memory_budget) ?? 220;
+    var personaRounds = (cfg.gateway && cfg.gateway.current_inner_state_interval_rounds) ?? 15;
+    document.getElementById('cfg-persona-context-enabled').value = personaRounds > 0 ? 'true' : 'false';
+    document.getElementById('cfg-persona-context-rounds').value = personaRounds;
+    document.getElementById('cfg-direct-render-mode').value = (cfg.gateway && cfg.gateway.direct_render_mode) || 'auto';
+    document.getElementById('cfg-retrieval-mode').value = (cfg.gateway && cfg.gateway.retrieval_mode) || 'graph';
+    document.getElementById('cfg-query-resurface-enabled').value =
+      (cfg.recall && cfg.recall.query_resurface_enabled) ? 'true' : 'false';
+    var diffusion = cfg.memory_diffusion || {};
+    document.getElementById('cfg-diffusion-enabled').value = diffusion.enabled === false ? 'false' : 'true';
+    document.getElementById('cfg-diffusion-topk').value = diffusion.top_k ?? 4;
+    document.getElementById('cfg-diffusion-min').value = diffusion.min_activation ?? 0.18;
+    document.getElementById('cfg-chain-walk').value = diffusion.chain_walk_enabled ? 'true' : 'false';
+    document.getElementById('cfg-chain-hops').value = diffusion.chain_max_hops ?? 6;
+    document.getElementById('cfg-chain-confidence').value = diffusion.chain_min_confidence ?? 0.72;
+    document.getElementById('cfg-chain-frontier').value = diffusion.chain_max_frontier ?? 24;
     document.getElementById('cfg-reflection-enabled').value =
       (cfg.reflection && cfg.reflection.enabled) === false ? 'false' : 'true';
     document.getElementById('cfg-reflection-auto').value =
@@ -3445,6 +5127,13 @@ async function loadConfig() {
   } catch (e) {
     setConfigStatus('<span style="color:var(--negative)">加载失败: ' + esc(e.message) + '</span>');
   }
+}
+
+function setConfigStatus(html) {
+  ['config-status', 'memory-config-status'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.innerHTML = html;
+  });
 }
 
 async function saveConfig(persist, persistEnv) {
@@ -3493,6 +5182,9 @@ async function saveConfig(persist, persistEnv) {
       base_url: document.getElementById('cfg-emb-url').value,
     };
     candidate.persona = {
+      enabled: document.getElementById('cfg-persona-enabled').value === 'true',
+      event_recording_enabled: document.getElementById('cfg-persona-event-recording').value === 'true',
+      model: document.getElementById('cfg-persona-model').value,
       base_url: document.getElementById('cfg-persona-url').value,
     };
     candidate.dream = {
@@ -3506,8 +5198,26 @@ async function saveConfig(persist, persistEnv) {
     candidate.gateway = {
       cooldown_hours: floatValue('cfg-gateway-cooldown', 6),
       skip_recent_rounds: numberValue('cfg-gateway-rounds', 5),
+      recent_context_cooldown_hours: floatValue('cfg-recent-context-cooldown', 6),
+      recent_context_reentry_idle_hours: floatValue('cfg-recent-context-reentry', 24),
       recent_context_budget: recentContextBudget,
+      recalled_memory_budget: numberValue('cfg-recalled-memory-budget', 400),
+      related_memory_budget: numberValue('cfg-related-memory-budget', 220),
       current_inner_state_interval_rounds: personaContextRounds,
+      direct_render_mode: document.getElementById('cfg-direct-render-mode').value,
+      retrieval_mode: document.getElementById('cfg-retrieval-mode').value,
+    };
+    candidate.recall = {
+      query_resurface_enabled: document.getElementById('cfg-query-resurface-enabled').value === 'true',
+    };
+    candidate.memory_diffusion = {
+      enabled: document.getElementById('cfg-diffusion-enabled').value === 'true',
+      top_k: numberValue('cfg-diffusion-topk', 4),
+      min_activation: floatValue('cfg-diffusion-min', 0.18),
+      chain_walk_enabled: document.getElementById('cfg-chain-walk').value === 'true',
+      chain_max_hops: numberValue('cfg-chain-hops', 6),
+      chain_min_confidence: floatValue('cfg-chain-confidence', 0.72),
+      chain_max_frontier: numberValue('cfg-chain-frontier', 24),
     };
   }
 
@@ -3521,6 +5231,8 @@ async function saveConfig(persist, persistEnv) {
     'persona',
     'dream',
     'gateway',
+    'recall',
+    'memory_diffusion',
     'reflection',
   ].forEach(function(sectionName) {
     if (candidate[sectionName]) addChangedSection(body, sectionName, candidate[sectionName]);

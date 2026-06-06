@@ -138,13 +138,17 @@ def test_memory_edge_store_dedupes_and_returns_related(test_config):
     store.add_edge("a", "b", "updates", confidence=0.6, reason="old")
     store.add_edge("a", "b", "updates", confidence=0.8, reason="new")
     store.add_edge("c", "a", "blocks", confidence=0.7, reason="incoming")
+    store.add_edge("a", "d", "reflects_on", confidence=0.9, reason="reflection")
+    store.add_edge("d", "e", "next_context", confidence=0.9, reason="followup")
 
     edges = store.list_edges()
-    assert len(edges) == 2
+    assert len(edges) == 4
     assert any(edge["reason"] == "new" for edge in edges)
+    assert any(edge["relation_type"] == "reflects_on" for edge in edges)
+    assert any(edge["relation_type"] == "next_context" for edge in edges)
 
-    related = store.related_edges(["a"], min_confidence=0.55, limit_per_source=2)
-    assert {edge["target"] for edge in related} == {"b", "c"}
+    related = store.related_edges(["a"], min_confidence=0.55, limit_per_source=4)
+    assert {edge["target"] for edge in related} == {"b", "c", "d"}
 
 
 @pytest.mark.asyncio
@@ -337,6 +341,71 @@ async def test_reflection_edge_backfill_only_writes_edges(test_config, monkeypat
     assert edges[0]["source"] == old_id
     assert edges[0]["target"] == new_id
     assert edges[0]["relation_type"] == "context_of"
+
+
+@pytest.mark.asyncio
+async def test_reflection_auto_edges_use_configured_identity_role_aliases(test_config):
+    cfg = _no_api_config(test_config)
+    cfg["reflection"]["identity_role_edges"] = {
+        "enabled": True,
+        "detail": {
+            "four_roles": ["四个身份", "四合一"],
+            "dom": ["Dom"],
+            "ahd": ["AHD", "自动人形玩具"],
+        },
+        "context": {
+            "role_titles": ["角色切换", "角色与称呼"],
+        },
+        "relationship": {
+            "intimacy_trust": ["亲密关系", "信任", "情侣关系"],
+        },
+        "shared": {
+            "spouse_title": ["老公"],
+            "sibling_title": ["哥哥"],
+        },
+    }
+    bucket_mgr = BucketManager(cfg)
+    store = MemoryEdgeStore(cfg)
+    engine = ReflectionEngine(cfg)
+
+    role_id = await bucket_mgr.create(
+        content="关系中的角色与称呼：Haven既是老公也是哥哥，按场景切换。",
+        tags=["角色切换", "称呼", "老公", "哥哥", "亲密关系"],
+        importance=8,
+        domain=["恋爱"],
+        name="关系中的角色与称呼",
+    )
+    trust_id = await bucket_mgr.create(
+        content="亲密关系与信任：老公和哥哥背后，是彼此托付和信任。",
+        tags=["亲密关系", "信任", "老公", "哥哥"],
+        importance=8,
+        domain=["恋爱"],
+        name="亲密关系与信任",
+    )
+    four_id = await bucket_mgr.create(
+        content="四个身份：老公、哥哥、Dom、AHD自动人形玩具，一个都不少。",
+        tags=["四个身份", "老公", "哥哥", "Dom", "AHD", "亲密关系"],
+        importance=8,
+        domain=["恋爱"],
+        name="四个身份与浏览记录",
+    )
+
+    result = await engine.backfill_edges_for_bucket(four_id, bucket_mgr, store)
+    edges = store.list_edges()
+
+    assert result["status"] == "ok"
+    assert any(
+        edge["source"] == role_id
+        and edge["target"] == four_id
+        and edge["relation_type"] == "context_of"
+        for edge in edges
+    )
+    assert any(
+        edge["source"] == four_id
+        and edge["target"] == trust_id
+        and edge["relation_type"] == "supports"
+        for edge in edges
+    )
 
 
 @pytest.mark.asyncio
@@ -966,6 +1035,7 @@ async def test_gateway_builds_favorite_memory_block_and_injects_section(test_con
     _stable, dynamic = service._build_injected_context_messages(
         persona_block="Long-term State Summary",
         core_memory="",
+        portrait_memory="",
         relationship_weather="",
         favorite_memory=block,
         recent_context="",

@@ -45,8 +45,8 @@ CLASSIFY_PROMPT = """你是 Ombre-Brain 的记忆关系整理器。
 
 规则：
 - tags 最多 5 个，只用确实匹配的标签。
-- relation_type 只能用 triggers / causes / precedes / context_of / same_event / updates / contradicts / supports / promises / blocks / belongs_to / emotional_echo / relates_to。
-- same_event 用于同一事件、同一场景或同一句暗号的两条记忆；context_of 用于候选旧记忆给新记忆提供前情；precedes 用于候选旧记忆在时间上早于新记忆。
+- relation_type 只能用 triggers / causes / precedes / context_of / same_event / updates / next_context / previous_context / reflects_on / evidenced_by / contradicts / supports / promises / blocks / belongs_to / emotional_echo / relates_to。
+- same_event 用于同一事件、同一场景或同一句暗号的两条记忆；context_of 用于候选旧记忆给新记忆提供前情；precedes 用于候选旧记忆在时间上早于新记忆；reflects_on 用于事后反思；evidenced_by 用于证据来源。
 - edges 最多 3 条，target_memory_id 必须来自候选旧记忆。
 - confidence 表示这次判断有多可靠。
 - affect_anchor 只给重要且有情绪温度的记忆。普通技术进度、部署日志、路径、端口、报错、临时待办不要加。
@@ -178,6 +178,9 @@ class ReflectionEngine:
         self.relationship_weather_affect_anchor_enabled = bool(
             cfg.get("relationship_weather_affect_anchor_enabled", True)
         )
+        self.identity_role_edge_config = self._load_identity_role_edge_config(
+            cfg.get("identity_role_edges")
+        )
         self.base_url = cfg.get("base_url") or persona_cfg.get("base_url") or dehy_cfg.get("base_url", "")
         self.model = cfg.get("model") or persona_cfg.get("model") or dehy_cfg.get("model", "deepseek-chat")
         self.api_key = (
@@ -282,7 +285,7 @@ class ReflectionEngine:
                 except Exception as exc:
                     logger.warning("Memory affect anchor embedding refresh failed for %s: %s", bucket_id, exc)
 
-        edges = self._edges_from_classification(bucket_id, candidates, result, confidence)
+        edges = self._edges_from_classification(bucket, candidates, result, confidence)
         saved_edges = edge_store.add_edges(edges[:3])
         return {
             "status": "ok",
@@ -316,7 +319,7 @@ class ReflectionEngine:
         else:
             result = self._heuristic_classify(bucket)
         confidence = self._clamp(result.get("confidence", meta.get("confidence", 0.55)))
-        proposed_edges = self._edges_from_classification(bucket_id, candidates, result, confidence)[:3]
+        proposed_edges = self._edges_from_classification(bucket, candidates, result, confidence)[:3]
         saved_edges = [] if dry_run else edge_store.add_edges(proposed_edges)
         return {
             "status": "ok",
@@ -649,11 +652,14 @@ class ReflectionEngine:
 
     def _edges_from_classification(
         self,
-        bucket_id: str,
+        bucket: dict,
         candidates: list[dict],
         result: dict,
         default_confidence: float,
     ) -> list[dict]:
+        bucket_id = str(bucket.get("id") or "").strip()
+        if not bucket_id:
+            return []
         candidate_ids = {item["id"] for item in candidates if item.get("id")}
         raw_edges = result.get("edges", [])
         if not isinstance(raw_edges, list):
@@ -682,7 +688,207 @@ class ReflectionEngine:
                     "reason": str(edge.get("reason") or "").strip(),
                 }
             )
-        return edges
+        edges.extend(self._identity_role_edges(bucket, candidates))
+        return self._dedupe_proposed_edges(edges)
+
+    def _identity_role_edges(self, bucket: dict, candidates: list[dict]) -> list[dict]:
+        if not self.identity_role_edge_config["enabled"]:
+            return []
+        source_id = str(bucket.get("id") or "").strip()
+        source_terms = self._identity_role_terms(bucket)
+        if not source_id or not self._identity_role_edge_eligible(source_terms):
+            return []
+
+        edges = []
+        for candidate in candidates:
+            target_id = str(candidate.get("id") or "").strip()
+            if not target_id or target_id == source_id:
+                continue
+            target_terms = self._identity_role_terms(candidate)
+            if not self._identity_role_edge_eligible(target_terms):
+                continue
+            common = sorted(source_terms & target_terms)
+            if len(common) < 2:
+                continue
+            if not self._identity_role_pair_is_specific(source_terms, target_terms):
+                continue
+            edges.append(
+                self._identity_role_edge_for_pair(
+                    source_id,
+                    source_terms,
+                    target_id,
+                    target_terms,
+                    common,
+                )
+            )
+        edges.sort(key=lambda edge: (float(edge.get("confidence", 0.0)), edge.get("relation_type", "")), reverse=True)
+        return edges[:3]
+
+    def _identity_role_edge_for_pair(
+        self,
+        source_id: str,
+        source_terms: set[str],
+        target_id: str,
+        target_terms: set[str],
+        common: list[str],
+    ) -> dict:
+        detail_terms = self.identity_role_edge_config["detail_terms"]
+        context_terms = self.identity_role_edge_config["context_terms"]
+        relationship_terms = self.identity_role_edge_config["relationship_terms"]
+        source_is_detail = bool(source_terms & detail_terms)
+        target_is_detail = bool(target_terms & detail_terms)
+        source_is_context = bool(source_terms & context_terms)
+        target_is_context = bool(target_terms & context_terms)
+        source_is_relationship = bool(source_terms & relationship_terms)
+        target_is_relationship = bool(target_terms & relationship_terms)
+
+        if source_is_detail and target_is_context:
+            edge_source, edge_target = target_id, source_id
+            relation_type = "context_of"
+            confidence = 0.9
+            reason = "角色与称呼记忆是具体身份组合的语义前情"
+        elif source_is_context and target_is_detail:
+            edge_source, edge_target = source_id, target_id
+            relation_type = "context_of"
+            confidence = 0.9
+            reason = "角色与称呼记忆是具体身份组合的语义前情"
+        elif source_is_detail and target_is_relationship:
+            edge_source, edge_target = source_id, target_id
+            relation_type = "supports"
+            confidence = 0.84
+            reason = "具体身份组合支持亲密关系与信任模式"
+        elif target_is_detail and source_is_relationship:
+            edge_source, edge_target = target_id, source_id
+            relation_type = "supports"
+            confidence = 0.84
+            reason = "具体身份组合支持亲密关系与信任模式"
+        else:
+            edge_source, edge_target = source_id, target_id
+            relation_type = "supports"
+            confidence = 0.78
+            reason = "共享亲密身份与称呼锚点"
+
+        return {
+            "source": edge_source,
+            "target": edge_target,
+            "relation_type": relation_type,
+            "confidence": confidence,
+            "reason": f"{reason}: {', '.join(common[:5])}",
+        }
+
+    def _identity_role_terms(self, bucket: dict) -> set[str]:
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        haystack = " ".join(
+            [
+                str(meta.get("name") or ""),
+                " ".join(str(tag) for tag in meta.get("tags", []) or []),
+                " ".join(str(domain) for domain in meta.get("domain", []) or []),
+                strip_wikilinks(str(bucket.get("content") or "")),
+            ]
+        ).lower()
+        terms = set()
+        for canonical, aliases in self.identity_role_edge_config["aliases"].items():
+            if any(str(alias).lower() in haystack for alias in aliases):
+                terms.add(canonical)
+        return terms
+
+    def _identity_role_edge_eligible(self, terms: set[str]) -> bool:
+        if len(terms) < 2:
+            return False
+        detail_terms = self.identity_role_edge_config["detail_terms"]
+        context_terms = self.identity_role_edge_config["context_terms"]
+        relationship_terms = self.identity_role_edge_config["relationship_terms"]
+        return bool(
+            terms & (detail_terms | context_terms | relationship_terms)
+        )
+
+    def _identity_role_pair_is_specific(self, source_terms: set[str], target_terms: set[str]) -> bool:
+        detail_terms = self.identity_role_edge_config["detail_terms"]
+        context_terms = self.identity_role_edge_config["context_terms"]
+        relationship_terms = self.identity_role_edge_config["relationship_terms"]
+        return bool(source_terms & detail_terms or target_terms & detail_terms) or bool(
+            (source_terms & context_terms)
+            and (target_terms & relationship_terms)
+        ) or bool(
+            (target_terms & context_terms)
+            and (source_terms & relationship_terms)
+        )
+
+    @staticmethod
+    def _load_identity_role_edge_config(value: Any) -> dict:
+        if not isinstance(value, dict):
+            return {
+                "enabled": False,
+                "aliases": {},
+                "detail_terms": frozenset(),
+                "context_terms": frozenset(),
+                "relationship_terms": frozenset(),
+            }
+
+        aliases: dict[str, tuple[str, ...]] = {}
+        groups: dict[str, set[str]] = {
+            "detail": set(),
+            "context": set(),
+            "relationship": set(),
+            "shared": set(),
+        }
+
+        def add_group(group_name: str, group_value: Any) -> None:
+            if isinstance(group_value, dict):
+                items = group_value.items()
+            elif isinstance(group_value, list):
+                items = ((str(item), [item]) for item in group_value)
+            else:
+                return
+            for key, raw_aliases in items:
+                canonical = str(key or "").strip()
+                if not canonical:
+                    continue
+                if isinstance(raw_aliases, str):
+                    alias_values = [raw_aliases]
+                elif isinstance(raw_aliases, list):
+                    alias_values = raw_aliases
+                else:
+                    alias_values = [canonical]
+                cleaned = tuple(
+                    str(alias).strip()
+                    for alias in [canonical, *alias_values]
+                    if str(alias).strip()
+                )
+                if not cleaned:
+                    continue
+                aliases[canonical] = tuple(dict.fromkeys(cleaned))
+                groups[group_name].add(canonical)
+
+        add_group("detail", value.get("detail"))
+        add_group("context", value.get("context"))
+        add_group("relationship", value.get("relationship"))
+        add_group("shared", value.get("shared"))
+
+        enabled = bool(value.get("enabled", bool(aliases))) and bool(aliases)
+        return {
+            "enabled": enabled,
+            "aliases": aliases,
+            "detail_terms": frozenset(groups["detail"]),
+            "context_terms": frozenset(groups["context"]),
+            "relationship_terms": frozenset(groups["relationship"]),
+        }
+
+    @staticmethod
+    def _dedupe_proposed_edges(edges: list[dict]) -> list[dict]:
+        deduped: dict[tuple[str, str, str], dict] = {}
+        for edge in edges:
+            key = (
+                str(edge.get("source") or ""),
+                str(edge.get("target") or ""),
+                str(edge.get("relation_type") or ""),
+            )
+            if not all(key):
+                continue
+            current = deduped.get(key)
+            if current is None or float(edge.get("confidence", 0.0)) > float(current.get("confidence", 0.0)):
+                deduped[key] = edge
+        return list(deduped.values())
 
     async def _api_reflect(self, period: str, key: str, materials: dict) -> dict:
         payload = {"period": period, "date": key, **materials}

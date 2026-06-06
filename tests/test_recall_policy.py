@@ -39,14 +39,48 @@ def test_broad_context_words_do_not_make_normal_chat_technical():
     assert policy.requires_topic_evidence("handoff 原文")
 
 
+def test_recall_query_plan_centralizes_runtime_query_gates():
+    policy = RecallPolicy()
+
+    technical = policy.plan_query("handoff bridge 注入 原文")
+    assert technical.requires_topic_evidence
+    assert technical.enforce_topic_evidence
+    assert not technical.wants_body_chain
+    assert technical.secondary_direct_requires_topic_evidence
+    assert not technical.explicit_old_memory
+    assert "handoff" in [term.lower() for term in technical.specific_terms]
+
+    body = policy.plan_query("你有身体之后最想做什么")
+    assert body.wants_body_chain
+    assert body.related_max_chars == 90
+    assert body.secondary_direct_limit(1) == 5
+    assert not body.secondary_direct_requires_topic_evidence
+
+    old = policy.plan_query("旧版触摸方案")
+    assert old.explicit_old_memory
+    assert old.allow_archive_targets
+    assert old.allow_caution_diffusion
+
+    repair = policy.plan_query("连续性为什么会影响种子项目", context_mode="reflective_repair")
+    assert not repair.explicit_old_memory
+    assert repair.allow_caution_diffusion
+
+
 def test_auto_vague_query_without_topic_is_suppressed():
     policy = RecallPolicy()
 
     assert policy.is_auto_query_too_vague("这张图片的上下文我想起来了")
     assert policy.is_auto_query_too_vague("最近发生了什么")
     assert policy.is_auto_query_too_vague("今天怎么样")
+    assert policy.is_auto_query_too_vague("开心^^")
+    assert policy.is_auto_query_too_vague("我有点难过。")
+    assert policy.is_auto_query_too_vague("要不要回复一下。或者跟个“嗯。”")
+    assert policy.is_auto_query_too_vague("那次要不要回个嗯")
+    assert policy.is_auto_query_too_vague("这条帖子可以评论一下吗")
     assert not policy.is_auto_query_too_vague("最近少女暴君")
     assert not policy.is_auto_query_too_vague("今天猫咪药量")
+    assert not policy.is_auto_query_too_vague("折角那次要不要回复")
+    assert not policy.is_auto_query_too_vague("花园帖子要不要回复")
     assert not policy.is_auto_query_too_vague("handoff bridge 注入 读图 原文")
 
     decision = policy.assess(
@@ -59,6 +93,17 @@ def test_auto_vague_query_without_topic_is_suppressed():
     assert decision.reason == "auto_vague_query_without_topic"
     assert not decision.admit_direct
 
+    affect_decision = policy.assess(
+        "开心^^",
+        {"text": "小雨和 Haven 第一次测试成功后很开心。"},
+        has_topic_evidence=True,
+        semantic_score=0.95,
+        auto=True,
+    )
+
+    assert affect_decision.reason == "auto_vague_query_without_topic"
+    assert not affect_decision.admit_direct
+
 
 def test_auto_concrete_topic_query_marks_short_chinese_topics_for_context_filtering():
     policy = RecallPolicy()
@@ -66,6 +111,7 @@ def test_auto_concrete_topic_query_marks_short_chinese_topics_for_context_filter
     assert policy.is_auto_concrete_topic_query("少女暴君")
     assert policy.is_auto_concrete_topic_query("最近少女暴君")
     assert policy.is_auto_concrete_topic_query("今天猫咪药量")
+    assert not policy.is_auto_concrete_topic_query("开心^^")
     assert not policy.is_auto_concrete_topic_query("这张图片的上下文我想起来了")
     assert not policy.is_auto_concrete_topic_query("种子项目现在怎样")
     assert not policy.is_auto_concrete_topic_query("小雨")
@@ -104,6 +150,26 @@ def test_bucket_topic_evidence_uses_content_title_tags_domain_but_not_comments()
         },
     }
     assert not policy.bucket_has_topic_evidence("handoff bridge 注入 原文", comment_only_bucket)
+
+
+def test_bucket_topic_evidence_ignores_markdown_temperature_sections():
+    policy = RecallPolicy()
+    bucket = {
+        "content": (
+            "正文是情书。\n\n"
+            "### affect_anchor\n"
+            "handoff bridge 注入 原文\n\n"
+            "### 喜欢它的原因\n"
+            "FF14 蓝色\n\n"
+            "### fact\n"
+            "小雨喜欢蓝色。"
+        ),
+        "metadata": {"name": "情书", "tags": ["恋爱"], "domain": ["恋爱"]},
+    }
+
+    assert not policy.bucket_has_topic_evidence("handoff bridge 注入 原文", bucket)
+    assert policy.bucket_has_topic_evidence("蓝色", bucket)
+    assert not policy.bucket_has_topic_evidence("FF14", bucket)
 
 
 def test_moment_topic_evidence_uses_text_and_bucket_metadata():

@@ -19,6 +19,26 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+@pytest.fixture(autouse=True)
+def isolate_ombre_env():
+    """Keep tests that hot-update process env from leaking OMBRE_* keys."""
+    keys = [
+        key
+        for key in os.environ
+        if key.startswith("OMBRE_")
+    ]
+    original = {key: os.environ.get(key) for key in keys}
+    yield
+    for key in list(os.environ):
+        if key.startswith("OMBRE_") and key not in original:
+            os.environ.pop(key, None)
+    for key, value in original.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
 @pytest.fixture
 def test_config(tmp_path):
     """Minimal config pointing to a temp directory."""

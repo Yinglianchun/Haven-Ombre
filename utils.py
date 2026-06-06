@@ -97,6 +97,21 @@ def load_config(config_path: str = None) -> dict:
             "explicit_vector_min_score": 0.55,
             "vague_top_k": 50,
         },
+        "word_map": {
+            "enabled": False,
+            "max_terms_per_bucket": 16,
+            "edge_top_k": 10,
+            "min_term_len": 2,
+            "stopwords": [],
+            "private_terms": [],
+            "stopword_prefixes": [],
+        },
+        "identity_semantics": {
+            "enabled": False,
+            "private_config_path": "",
+            "min_confidence": 0.78,
+            "evidence_tags": ["profile_fact", "haven_favorite", "favorite_memory"],
+        },
         "moment_annotations": {
             "enabled": True,
             "max_summary_chars": 160,
@@ -162,6 +177,11 @@ def load_config(config_path: str = None) -> dict:
             "core_memory_budget": 0,
             "recent_context_budget": 300,
             "recalled_memory_budget": 400,
+            "direct_render_mode": "auto",
+            "portrait_memory_enabled": False,
+            "portrait_memory_budget": 360,
+            "portrait_memory_max_sources": 8,
+            "portrait_memory_include_anchors": True,
             "relationship_weather_budget": 220,
             "favorite_memory_budget": 0,
             "favorite_memory_max_cards": 1,
@@ -599,6 +619,39 @@ def strip_wikilinks(text: str) -> str:
 
 
 _AFFECT_ANCHOR_RE = re.compile(r"(?ims)^###\s*affect_anchor\s*$.*?(?=^###\s+|\Z)")
+_DISPLAY_TEMPERATURE_SECTION_RE = re.compile(
+    r"(?ims)^###\s*(?:affect_anchor|affect anchor|喜欢它的原因|favorite_reason|favorite reason)\s*$.*?(?=^###\s+|\Z)"
+)
+_TEMPERATURE_MEANING_LINE_RE = re.compile(r"(?m)^\s*含义[:：].*(?:\n|$)")
+_CHORD_TOKEN_RE = re.compile(
+    r"\b[A-G](?:#|b)?(?:maj|min|m|dim|aug)?\d*(?:sus\d*|add\d*|b\d+|#\d+)*(?:/[A-G](?:#|b)?)?\b"
+)
+_TEMPERATURE_MUSIC_TOKEN_RE = re.compile(r"\b(?:\d{2,3}\s*bpm|ppp|pp|mp|mf|ff|fff|p|f|add\s*\d+|sus\s*\d+)\b", re.I)
+
+
+def _looks_like_temperature_chord_line(line: str) -> bool:
+    text = str(line or "").strip()
+    if not text:
+        return False
+    if text.startswith(">"):
+        text = text[1:].strip()
+    if not text or re.search(r"[\u4e00-\u9fff]", text):
+        return False
+    if not any(marker in text for marker in ("->", "→", "|", "·")) and "bpm" not in text.lower():
+        return False
+    if not _CHORD_TOKEN_RE.search(text):
+        return False
+    remainder = _CHORD_TOKEN_RE.sub("", text)
+    remainder = _TEMPERATURE_MUSIC_TOKEN_RE.sub("", remainder)
+    remainder = re.sub(r"[-→>·|/(),.:;_\s]+", "", remainder)
+    return not remainder
+
+
+def _strip_inline_temperature_chord_segments(line: str) -> str:
+    match = re.search(r"\s>\s*(.+)$", str(line or ""))
+    if match and _looks_like_temperature_chord_line(">" + match.group(1)):
+        return str(line)[: match.start()].rstrip()
+    return line
 
 
 def strip_affect_anchor(text: str) -> str:
@@ -606,6 +659,27 @@ def strip_affect_anchor(text: str) -> str:
     if not text:
         return text
     return _AFFECT_ANCHOR_RE.sub("", str(text)).strip()
+
+
+def strip_display_temperature_sections(text: str) -> str:
+    """Remove display-only temperature sections from direct bucket rendering."""
+    if not text:
+        return text
+    return _DISPLAY_TEMPERATURE_SECTION_RE.sub("", str(text)).strip()
+
+
+def strip_temperature_meaning_lines(text: str) -> str:
+    """Remove template-like affect-anchor meaning and chord lines from rendered context."""
+    if not text:
+        return text
+    cleaned = _TEMPERATURE_MEANING_LINE_RE.sub("", str(text))
+    lines = []
+    for line in cleaned.splitlines():
+        line = _strip_inline_temperature_chord_segments(line)
+        if _looks_like_temperature_chord_line(line):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def bucket_text_for_embedding(bucket: dict) -> str:

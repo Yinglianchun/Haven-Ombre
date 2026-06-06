@@ -330,6 +330,20 @@ class BucketManager:
             post["comments"] = kwargs["comments"] if isinstance(kwargs["comments"], list) else []
         if "comment_count" in kwargs:
             post["comment_count"] = max(0, int(kwargs["comment_count"]))
+        if "active" in kwargs:
+            post["active"] = bool(kwargs["active"])
+        if "deprecated" in kwargs:
+            post["deprecated"] = bool(kwargs["deprecated"])
+        if "profile_kind" in kwargs:
+            post["profile_kind"] = str(kwargs["profile_kind"])
+        if "subject" in kwargs:
+            post["subject"] = str(kwargs["subject"])
+        if "predicate" in kwargs:
+            post["predicate"] = str(kwargs["predicate"])
+        if "object" in kwargs:
+            post["object"] = str(kwargs["object"])
+        if "evidence" in kwargs:
+            post["evidence"] = kwargs["evidence"] if isinstance(kwargs["evidence"], list) else []
 
         # --- Auto-refresh content update time and activation time ---
         # --- 自动刷新内容更新时间与激活时间 ---
@@ -978,15 +992,30 @@ class BucketManager:
         解析 Markdown 文件，返回桶的结构化数据。
         """
         try:
+            raw = Path(file_path).read_text(encoding="utf-8")
             post = frontmatter.load(file_path)
             return {
                 "id": post.get("id", Path(file_path).stem),
                 "metadata": dict(post.metadata),
                 "content": post.content,
                 "path": file_path,
+                "content_start_line": _markdown_body_start_line(raw),
             }
         except Exception as e:
             logger.warning(
                 f"Failed to load bucket file / 加载桶文件失败: {file_path}: {e}"
             )
             return None
+
+
+def _markdown_body_start_line(text: str) -> int:
+    lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if not lines or lines[0].strip() != "---":
+        return 1
+    for index, line in enumerate(lines[1:], start=2):
+        if line.strip() == "---":
+            body_start = index + 1
+            while body_start <= len(lines) and not lines[body_start - 1].strip():
+                body_start += 1
+            return max(1, body_start)
+    return 1

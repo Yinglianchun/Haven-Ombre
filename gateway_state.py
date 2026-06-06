@@ -67,6 +67,22 @@ class GatewayStateStore:
             ON injection_debug (session_id, id DESC)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recent_context_injections (
+                session_id TEXT NOT NULL,
+                round_id INTEGER NOT NULL,
+                injected_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, round_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_recent_context_lookup
+            ON recent_context_injections (session_id, injected_at DESC)
+            """
+        )
         conn.commit()
         conn.close()
 
@@ -110,6 +126,26 @@ class GatewayStateStore:
         conn.close()
         return int(row["current_round"]) if row else 0
 
+    def get_last_success_at(self, session_id: str) -> datetime | None:
+        conn = self._connect()
+        row = conn.execute(
+            """
+            SELECT completed_at
+            FROM request_rounds
+            WHERE session_id = ?
+            ORDER BY round_id DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None
+        try:
+            return datetime.fromisoformat(str(row["completed_at"]))
+        except ValueError:
+            return None
+
     def get_recent_bucket_ids(self, session_id: str, recent_rounds: int) -> set[str]:
         if recent_rounds <= 0:
             return set()
@@ -141,6 +177,45 @@ class GatewayStateStore:
             LIMIT 1
             """,
             (session_id, bucket_id),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None
+        try:
+            return datetime.fromisoformat(str(row["injected_at"]))
+        except ValueError:
+            return None
+
+    def record_recent_context_injection(
+        self,
+        session_id: str,
+        round_id: int,
+        injected_at: datetime | None = None,
+    ) -> None:
+        injected_at = injected_at or datetime.now()
+        conn = self._connect()
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO recent_context_injections
+            (session_id, round_id, injected_at)
+            VALUES (?, ?, ?)
+            """,
+            (session_id, int(round_id), injected_at.isoformat(timespec="seconds")),
+        )
+        conn.commit()
+        conn.close()
+
+    def get_last_recent_context_at(self, session_id: str) -> datetime | None:
+        conn = self._connect()
+        row = conn.execute(
+            """
+            SELECT injected_at
+            FROM recent_context_injections
+            WHERE session_id = ?
+            ORDER BY injected_at DESC
+            LIMIT 1
+            """,
+            (session_id,),
         ).fetchone()
         conn.close()
         if not row:
