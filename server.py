@@ -153,7 +153,59 @@ def _split_csv(value: str | None) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-async def _hot_update_gateway_config(gateway_body: dict) -> str | None:
+def _dashboard_env_path() -> str:
+    return os.environ.get(
+        "OMBRE_ENV_PATH",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+    )
+
+
+def _quote_env_value(value: str) -> str:
+    text = str(value or "")
+    if not text or re.search(r"\s|#|=|['\"]", text):
+        return _json_lib.dumps(text, ensure_ascii=False)
+    return text
+
+
+def _write_dashboard_env_values(updates: dict[str, str]) -> list[str]:
+    updates = {
+        str(key): str(value)
+        for key, value in (updates or {}).items()
+        if str(key or "").strip() and str(value or "")
+    }
+    if not updates:
+        return []
+
+    env_path = os.path.abspath(_dashboard_env_path())
+    os.makedirs(os.path.dirname(env_path), exist_ok=True)
+    lines = []
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+
+    remaining = dict(updates)
+    output = []
+    for line in lines:
+        match = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
+        key = match.group(1) if match else ""
+        if key in remaining:
+            output.append(f"{key}={_quote_env_value(remaining.pop(key))}")
+        else:
+            output.append(line)
+    for key, value in remaining.items():
+        output.append(f"{key}={_quote_env_value(value)}")
+
+    with open(env_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(output).rstrip() + "\n")
+
+    for key, value in updates.items():
+        os.environ[key] = value
+    return [f"env.{key}" for key in updates]
+
+
+async def _hot_update_gateway_config(gateway_payload: dict) -> str | None:
+    if not gateway_payload:
+        return None
     admin_url = os.environ.get("OMBRE_GATEWAY_ADMIN_URL", "").strip()
     token = os.environ.get("OMBRE_GATEWAY_TOKEN", "").strip()
     if not admin_url or not token:
@@ -163,7 +215,7 @@ async def _hot_update_gateway_config(gateway_body: dict) -> str | None:
             response = await client.post(
                 admin_url,
                 headers={"Authorization": f"Bearer {token}"},
-                json={"gateway": gateway_body},
+                json=gateway_payload,
             )
         if response.status_code >= 400:
             return f"gateway_hot_reload_failed:{response.status_code}"
@@ -1201,6 +1253,61 @@ async def _refresh_bucket_embedding(bucket_id: str) -> bool:
     if not bucket:
         return False
     return await embedding_engine.generate_and_store(bucket_id, bucket_text_for_embedding(bucket))
+
+
+def _bucket_delete_skip_reason(bucket: dict) -> str:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    if meta.get("protected"):
+        return "protected"
+    if meta.get("pinned"):
+        return "pinned"
+    if meta.get("anchor"):
+        return "anchor"
+    if meta.get("type") == "permanent":
+        return "permanent"
+    return ""
+
+
+def _delete_bucket_indexes(bucket_id: str) -> tuple[dict, list[str]]:
+    cleanup: dict = {}
+    errors: list[str] = []
+
+    try:
+        embedding_engine.delete_embedding(bucket_id)
+        cleanup["embedding"] = True
+    except Exception as e:
+        logger.warning("Failed to delete embedding for bucket / 删除桶向量失败: %s: %s", bucket_id, e)
+        errors.append("embedding")
+
+    try:
+        cleanup["edges"] = memory_edge_store.delete_for_bucket(bucket_id)
+    except Exception as e:
+        logger.warning("Failed to delete memory edges for bucket / 删除桶关系边失败: %s: %s", bucket_id, e)
+        errors.append("edges")
+
+    return cleanup, errors
+
+
+async def _delete_bucket_and_indexes(bucket_id: str) -> dict:
+    bucket_id = str(bucket_id or "").strip()
+    if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
+        return {"id": bucket_id, "status": "invalid", "reason": "invalid_bucket_id"}
+
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
+        return {"id": bucket_id, "status": "not_found", "reason": "not_found"}
+
+    success = await bucket_mgr.delete(bucket_id)
+    if not success:
+        return {"id": bucket_id, "status": "failed", "reason": "delete_failed"}
+
+    cleanup, errors = _delete_bucket_indexes(bucket_id)
+    return {
+        "id": bucket_id,
+        "status": "deleted",
+        "cleanup": cleanup,
+        "cleanup_errors": errors,
+    }
 
 
 def _write_semantic_search_timeout_seconds() -> float:
@@ -4123,10 +4230,12 @@ async def trace(
 
     # --- Delete mode / 删除模式 ---
     if delete:
-        success = await bucket_mgr.delete(bucket_id)
-        if success:
-            embedding_engine.delete_embedding(bucket_id)
-        return f"已遗忘记忆桶: {bucket_id}" if success else f"未找到记忆桶: {bucket_id}"
+        result = await _delete_bucket_and_indexes(bucket_id)
+        return (
+            f"已遗忘记忆桶: {bucket_id}"
+            if result.get("status") == "deleted"
+            else f"未找到记忆桶: {bucket_id}"
+        )
 
     bucket = await bucket_mgr.get(bucket_id)
     if not bucket:
@@ -4211,11 +4320,17 @@ async def pulse(include_archive: bool = False) -> str:
     except Exception as e:
         return f"获取系统状态失败: {e}"
 
+    active_count = stats["permanent_count"] + stats["dynamic_count"] + stats["feel_count"]
+    total_count = active_count + stats["archive_count"]
+    visible_count = total_count if include_archive else active_count
     status = (
         f"=== Ombre Brain 记忆系统 ===\n"
         f"固化记忆桶: {stats['permanent_count']} 个\n"
         f"动态记忆桶: {stats['dynamic_count']} 个\n"
+        f"情绪/印象桶: {stats['feel_count']} 个\n"
         f"归档记忆桶: {stats['archive_count']} 个\n"
+        f"当前显示桶: {visible_count} 个\n"
+        f"全量记忆桶: {total_count} 个\n"
         f"总存储大小: {stats['total_size_kb']:.1f} KB\n"
         f"衰减引擎: {'运行中' if decay_engine.is_running else '已停止'}\n"
     )
@@ -4731,6 +4846,7 @@ async def api_buckets(request):
                 "confidence": meta.get("confidence", 0.5),
                 "resolved": meta.get("resolved", False),
                 "pinned": meta.get("pinned", False),
+                "protected": meta.get("protected", False),
                 "anchor": meta.get("anchor", False),
                 "digested": meta.get("digested", False),
                 "period": meta.get("period"),
@@ -4746,6 +4862,69 @@ async def api_buckets(request):
         return JSONResponse(result)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/buckets/delete", methods=["POST"])
+async def api_buckets_delete(request):
+    """Bulk-delete ordinary dashboard buckets and clean their indexes."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    if body.get("confirm") != "DELETE":
+        return JSONResponse({"error": "confirmation required"}, status_code=400)
+
+    raw_ids = body.get("bucket_ids", [])
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return JSONResponse({"error": "bucket_ids must be a non-empty list"}, status_code=400)
+    if len(raw_ids) > 200:
+        return JSONResponse({"error": "too many bucket_ids"}, status_code=400)
+
+    seen: set[str] = set()
+    bucket_ids: list[str] = []
+    for raw_id in raw_ids:
+        bucket_id = str(raw_id or "").strip()
+        if bucket_id in seen:
+            continue
+        seen.add(bucket_id)
+        bucket_ids.append(bucket_id)
+
+    summary = {"deleted": 0, "skipped": 0, "not_found": 0, "invalid": 0, "failed": 0}
+    results = []
+    for bucket_id in bucket_ids:
+        if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
+            summary["invalid"] += 1
+            results.append({"id": bucket_id, "status": "invalid", "reason": "invalid_bucket_id"})
+            continue
+
+        bucket = await bucket_mgr.get(bucket_id)
+        if not bucket:
+            summary["not_found"] += 1
+            results.append({"id": bucket_id, "status": "not_found", "reason": "not_found"})
+            continue
+
+        reason = _bucket_delete_skip_reason(bucket)
+        if reason:
+            summary["skipped"] += 1
+            results.append({"id": bucket_id, "status": "skipped", "reason": reason})
+            continue
+
+        result = await _delete_bucket_and_indexes(bucket_id)
+        status = str(result.get("status") or "failed")
+        if status in summary:
+            summary[status] += 1
+        else:
+            summary["failed"] += 1
+        results.append(result)
+
+    return JSONResponse({**summary, "results": results})
 
 
 @mcp.custom_route("/api/bucket/{bucket_id}", methods=["GET"])
@@ -5111,6 +5290,7 @@ async def api_config_get(request):
     dehy = config.get("dehydration", {})
     emb = config.get("embedding", {})
     gateway_cfg = config.get("gateway", {}) if isinstance(config.get("gateway", {}), dict) else {}
+    persona_cfg = config.get("persona", {}) if isinstance(config.get("persona", {}), dict) else {}
     dream_cfg = config.get("dream", {}) if isinstance(config.get("dream", {}), dict) else {}
     reflection_cfg = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
     return JSONResponse({
@@ -5132,11 +5312,22 @@ async def api_config_get(request):
         "gateway": {
             "cooldown_hours": gateway_cfg.get("cooldown_hours", 6),
             "skip_recent_rounds": gateway_cfg.get("skip_recent_rounds", 5),
+            "recent_context_budget": gateway_cfg.get("recent_context_budget", 300),
+            "current_inner_state_interval_rounds": gateway_cfg.get("current_inner_state_interval_rounds", 15),
+        },
+        "persona": {
+            "enabled": bool(getattr(persona_engine, "enabled", persona_cfg.get("enabled", True))),
+            "model": getattr(persona_engine, "model", persona_cfg.get("model", "")),
+            "base_url": getattr(persona_engine, "base_url", persona_cfg.get("base_url", "")),
+            "api_key_masked": _mask_key(getattr(persona_engine, "api_key", "") or persona_cfg.get("api_key", "")),
+            "api_ready": bool(getattr(persona_engine, "api_key", "") or persona_cfg.get("api_key", "")),
         },
         "dream": {
             "enabled": dream_engine.enabled,
             "auto_enabled": dream_engine.auto_enabled,
             "surface_enabled": dream_engine.surface_enabled,
+            "inject_enabled": _bool_value(dream_cfg.get("inject_enabled"), False),
+            "retain_after_inject": _bool_value(dream_cfg.get("retain_after_inject"), False),
             "model": dream_engine.model,
             "base_url": dream_engine.base_url,
             "api_key_masked": _mask_key(dream_engine.api_key),
@@ -5151,6 +5342,18 @@ async def api_config_get(request):
             "identity_anchor_id": dream_cfg.get("identity_anchor_id", ""),
         },
         "reflection": {
+            "enabled": bool(
+                reflection_cfg.get(
+                    "enabled",
+                    getattr(reflection_engine, "enabled", True),
+                )
+            ),
+            "auto_enabled": bool(
+                reflection_cfg.get(
+                    "auto_enabled",
+                    getattr(reflection_engine, "auto_enabled", True),
+                )
+            ),
             "daily_enabled": bool(
                 reflection_cfg.get(
                     "daily_enabled",
@@ -5169,6 +5372,10 @@ async def api_config_get(request):
                     getattr(reflection_engine, "relationship_weather_affect_anchor_enabled", True),
                 )
             ),
+            "model": getattr(reflection_engine, "model", reflection_cfg.get("model", "")),
+            "base_url": getattr(reflection_engine, "base_url", reflection_cfg.get("base_url", "")),
+            "api_key_masked": _mask_key(getattr(reflection_engine, "api_key", "") or reflection_cfg.get("api_key", "")),
+            "api_ready": bool(getattr(reflection_engine, "api_key", "") or reflection_cfg.get("api_key", "")),
         },
         "merge_threshold": config.get("merge_threshold", 75),
         "transport": config.get("transport", "stdio"),
@@ -5181,7 +5388,7 @@ async def api_config_update(request):
     """Hot-update runtime config. Optionally persist to config.yaml."""
     from starlette.responses import JSONResponse
     import yaml
-    global dream_engine
+    global dream_engine, persona_engine, reflection_engine
     err = _require_dashboard_auth(request)
     if err:
         return err
@@ -5191,6 +5398,7 @@ async def api_config_update(request):
         return JSONResponse({"error": "invalid JSON"}, status_code=400)
 
     updated = []
+    env_updates: dict[str, str] = {}
 
     # --- Dehydration config ---
     if "dehydration" in body:
@@ -5202,6 +5410,7 @@ async def api_config_update(request):
                 updated.append(f"dehydration.{key}")
         if "api_key" in d and d["api_key"]:
             dehy["api_key"] = d["api_key"]
+            env_updates["OMBRE_API_KEY"] = str(d["api_key"])
             updated.append("dehydration.api_key")
         # Hot-reload dehydrator
         dehydrator.model = dehy.get("model", "deepseek-chat")
@@ -5229,6 +5438,7 @@ async def api_config_update(request):
             updated.append("embedding.base_url")
         if "api_key" in e and e["api_key"]:
             emb["api_key"] = e["api_key"]
+            env_updates["OMBRE_EMBEDDING_API_KEY"] = str(e["api_key"])
             updated.append("embedding.api_key")
 
         # Hot-reload embedding client; falls back to dehydration key/base_url when unset.
@@ -5256,7 +5466,7 @@ async def api_config_update(request):
         updated.append("merge_threshold")
 
     # --- Gateway memory surfacing config ---
-    gateway_hot_update_body = None
+    gateway_hot_update_payload = {}
     if "gateway" in body:
         g = body["gateway"]
         gateway_cfg = config.setdefault("gateway", {})
@@ -5269,19 +5479,74 @@ async def api_config_update(request):
             gateway_cfg["skip_recent_rounds"] = max(0, int(g["skip_recent_rounds"]))
             gateway_hot_update_body["skip_recent_rounds"] = gateway_cfg["skip_recent_rounds"]
             updated.append("gateway.skip_recent_rounds")
-        hot_update_status = await _hot_update_gateway_config(gateway_hot_update_body)
-        if hot_update_status:
-            updated.append(hot_update_status)
+        if "recent_context_budget" in g:
+            gateway_cfg["recent_context_budget"] = max(0, int(g["recent_context_budget"]))
+            gateway_hot_update_body["recent_context_budget"] = gateway_cfg["recent_context_budget"]
+            updated.append("gateway.recent_context_budget")
+        if "current_inner_state_interval_rounds" in g:
+            gateway_cfg["current_inner_state_interval_rounds"] = max(0, int(g["current_inner_state_interval_rounds"]))
+            gateway_hot_update_body["current_inner_state_interval_rounds"] = gateway_cfg["current_inner_state_interval_rounds"]
+            updated.append("gateway.current_inner_state_interval_rounds")
+        if gateway_hot_update_body:
+            gateway_hot_update_payload["gateway"] = gateway_hot_update_body
+
+    # --- Persona state config ---
+    if "persona" in body:
+        p = body["persona"]
+        persona_cfg = config.setdefault("persona", {})
+        persona_gateway_payload = {}
+        if "enabled" in p:
+            persona_cfg["enabled"] = bool(p["enabled"])
+            persona_gateway_payload["enabled"] = persona_cfg["enabled"]
+            updated.append("persona.enabled")
+        for key in ("model", "base_url"):
+            if key in p:
+                persona_cfg[key] = str(p[key] or "").strip()
+                persona_gateway_payload[key] = persona_cfg[key]
+                updated.append(f"persona.{key}")
+        if "api_key" in p and p["api_key"]:
+            persona_cfg["api_key"] = str(p["api_key"])
+            os.environ["OMBRE_PERSONA_API_KEY"] = persona_cfg["api_key"]
+            env_updates["OMBRE_PERSONA_API_KEY"] = persona_cfg["api_key"]
+            persona_gateway_payload["api_key"] = persona_cfg["api_key"]
+            updated.append("persona.api_key")
+        if "base_url" in persona_gateway_payload and persona_gateway_payload["base_url"]:
+            os.environ["OMBRE_PERSONA_BASE_URL"] = persona_gateway_payload["base_url"]
+        if "model" in persona_gateway_payload and persona_gateway_payload["model"]:
+            os.environ["OMBRE_PERSONA_MODEL"] = persona_gateway_payload["model"]
+        if persona_gateway_payload:
+            persona_engine = PersonaStateEngine(config)
+            gateway_hot_update_payload["persona"] = persona_gateway_payload
 
     # --- Reflection config ---
     if "reflection" in body:
         r = body["reflection"]
         reflection_cfg = config.setdefault("reflection", {})
-        for key in ("daily_enabled", "memory_affect_anchor_enabled", "relationship_weather_affect_anchor_enabled"):
+        for key in (
+            "enabled",
+            "auto_enabled",
+            "daily_enabled",
+            "memory_affect_anchor_enabled",
+            "relationship_weather_affect_anchor_enabled",
+        ):
             if key in r:
                 reflection_cfg[key] = bool(r[key])
                 setattr(reflection_engine, key, reflection_cfg[key])
                 updated.append(f"reflection.{key}")
+        for key in ("model", "base_url"):
+            if key in r:
+                reflection_cfg[key] = str(r[key] or "").strip()
+                updated.append(f"reflection.{key}")
+        if "api_key" in r and r["api_key"]:
+            reflection_cfg["api_key"] = str(r["api_key"])
+            os.environ["OMBRE_REFLECTION_API_KEY"] = reflection_cfg["api_key"]
+            env_updates["OMBRE_REFLECTION_API_KEY"] = reflection_cfg["api_key"]
+            updated.append("reflection.api_key")
+        if "base_url" in r and reflection_cfg.get("base_url"):
+            os.environ["OMBRE_REFLECTION_BASE_URL"] = reflection_cfg["base_url"]
+        if "model" in r and reflection_cfg.get("model"):
+            os.environ["OMBRE_REFLECTION_MODEL"] = reflection_cfg["model"]
+        reflection_engine = ReflectionEngine(config)
 
     # --- Dream config ---
     if "dream" in body:
@@ -5291,6 +5556,8 @@ async def api_config_update(request):
             "enabled",
             "auto_enabled",
             "surface_enabled",
+            "inject_enabled",
+            "retain_after_inject",
             "model",
             "base_url",
             "temperature",
@@ -5305,10 +5572,26 @@ async def api_config_update(request):
             if key in d:
                 dream_cfg[key] = d[key]
                 updated.append(f"dream.{key}")
+        dream_gateway_payload = {}
+        for key in ("enabled", "surface_enabled", "inject_enabled", "retain_after_inject"):
+            if key in d:
+                dream_gateway_payload[key] = dream_cfg[key]
+        if dream_gateway_payload:
+            gateway_hot_update_payload["dream"] = dream_gateway_payload
         if "api_key" in d and d["api_key"]:
-            dream_cfg["api_key"] = d["api_key"]
+            dream_cfg["api_key"] = str(d["api_key"])
+            os.environ["OMBRE_DREAM_API_KEY"] = dream_cfg["api_key"]
+            env_updates["OMBRE_DREAM_API_KEY"] = dream_cfg["api_key"]
             updated.append("dream.api_key")
+        if "base_url" in d and dream_cfg.get("base_url"):
+            os.environ["OMBRE_DREAM_BASE_URL"] = str(dream_cfg["base_url"])
+        if "model" in d and dream_cfg.get("model"):
+            os.environ["OMBRE_DREAM_MODEL"] = str(dream_cfg["model"])
         dream_engine = DreamEngine(config)
+
+    hot_update_status = await _hot_update_gateway_config(gateway_hot_update_payload)
+    if hot_update_status:
+        updated.append(hot_update_status)
 
     # --- Persist to config.yaml if requested ---
     if body.get("persist", False):
@@ -5345,12 +5628,37 @@ async def api_config_update(request):
                     sc_gateway["cooldown_hours"] = max(0.0, float(body["gateway"]["cooldown_hours"]))
                 if "skip_recent_rounds" in body["gateway"]:
                     sc_gateway["skip_recent_rounds"] = max(0, int(body["gateway"]["skip_recent_rounds"]))
+                if "recent_context_budget" in body["gateway"]:
+                    sc_gateway["recent_context_budget"] = max(0, int(body["gateway"]["recent_context_budget"]))
+                if "current_inner_state_interval_rounds" in body["gateway"]:
+                    sc_gateway["current_inner_state_interval_rounds"] = max(
+                        0, int(body["gateway"]["current_inner_state_interval_rounds"])
+                    )
+
+            if "persona" in body:
+                sc_persona = save_config.setdefault("persona", {})
+                if "enabled" in body["persona"]:
+                    sc_persona["enabled"] = bool(body["persona"]["enabled"])
+                for key in ("model", "base_url"):
+                    if key in body["persona"]:
+                        sc_persona[key] = str(body["persona"][key] or "").strip()
+                # Never persist api_key to yaml (use env var)
 
             if "reflection" in body:
                 sc_reflection = save_config.setdefault("reflection", {})
-                for key in ("daily_enabled", "memory_affect_anchor_enabled", "relationship_weather_affect_anchor_enabled"):
+                for key in (
+                    "enabled",
+                    "auto_enabled",
+                    "daily_enabled",
+                    "memory_affect_anchor_enabled",
+                    "relationship_weather_affect_anchor_enabled",
+                ):
                     if key in body["reflection"]:
                         sc_reflection[key] = bool(body["reflection"][key])
+                for key in ("model", "base_url"):
+                    if key in body["reflection"]:
+                        sc_reflection[key] = str(body["reflection"][key] or "").strip()
+                # Never persist api_key to yaml (use env var)
 
             if "dream" in body:
                 sc_dream = save_config.setdefault("dream", {})
@@ -5358,6 +5666,8 @@ async def api_config_update(request):
                     "enabled",
                     "auto_enabled",
                     "surface_enabled",
+                    "inject_enabled",
+                    "retain_after_inject",
                     "model",
                     "base_url",
                     "temperature",
@@ -5382,7 +5692,7 @@ async def api_config_update(request):
             save_config = _apply_dashboard_config(save_config)
 
             with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(save_config, f, default_flow_style=False, allow_unicode=True)
+                yaml.dump(save_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
             updated.append("persisted_to_yaml")
             if os.path.exists(runtime_config_path):
                 runtime_config = {}
@@ -5391,7 +5701,7 @@ async def api_config_update(request):
                 runtime_config = _apply_dashboard_config(runtime_config)
                 os.makedirs(os.path.dirname(runtime_config_path), exist_ok=True)
                 with open(runtime_config_path, "w", encoding="utf-8") as f:
-                    yaml.dump(runtime_config, f, default_flow_style=False, allow_unicode=True)
+                    yaml.dump(runtime_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
                 updated.append("runtime_yaml_synced")
         except Exception as e:
             try:
@@ -5402,7 +5712,7 @@ async def api_config_update(request):
                 runtime_config = _apply_dashboard_config(runtime_config)
                 os.makedirs(os.path.dirname(runtime_config_path), exist_ok=True)
                 with open(runtime_config_path, "w", encoding="utf-8") as f:
-                    yaml.dump(runtime_config, f, default_flow_style=False, allow_unicode=True)
+                    yaml.dump(runtime_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
                 updated.append("persisted_to_runtime_yaml")
                 updated.append(f"config_yaml_unwritable:{type(e).__name__}")
             except Exception as fallback_e:
@@ -5410,6 +5720,18 @@ async def api_config_update(request):
                     {"error": f"persist failed: {e}; runtime persist failed: {fallback_e}", "updated": updated},
                     status_code=500,
                 )
+
+    if body.get("persist_env", False):
+        try:
+            env_updated = _write_dashboard_env_values(env_updates)
+            if env_updated:
+                updated.extend(env_updated)
+                updated.append("persisted_to_env")
+        except Exception as e:
+            return JSONResponse(
+                {"error": f"env persist failed: {e}", "updated": updated},
+                status_code=500,
+            )
 
     return JSONResponse({"updated": updated, "ok": True})
 
@@ -5607,10 +5929,9 @@ async def api_import_review(request):
             elif action == "noise":
                 await bucket_mgr.update(bid, resolved=True, importance=1)
             elif action == "delete":
-                deleted = await bucket_mgr.delete(bid)
-                if not deleted:
-                    raise ValueError("bucket not found")
-                embedding_engine.delete_embedding(bid)
+                result = await _delete_bucket_and_indexes(bid)
+                if result.get("status") != "deleted":
+                    raise ValueError(result.get("reason") or "bucket not found")
             applied += 1
         except Exception as e:
             logger.warning(f"Review action failed for {bid}: {e}")

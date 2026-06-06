@@ -433,6 +433,8 @@ dream:
   enabled: true
   auto_enabled: true
   surface_enabled: true
+  inject_enabled: false             # true lets Gateway quietly inject one resonant dream as Dream Context
+  retain_after_inject: false        # true keeps the dream record after Gateway injection while marking it surfaced
   # DeepSeek official OpenAI-compatible endpoint.
   base_url: "https://api.deepseek.com"
   model: "deepseek-v4-flash"

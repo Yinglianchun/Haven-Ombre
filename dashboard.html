@@ -151,6 +151,54 @@
     box-shadow: inset 3px 3px 6px rgba(0,0,0,0.2), inset -2px -2px 4px rgba(255,255,255,0.05);
   }
 
+  .bucket-tools {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: -10px 0 18px;
+    flex-wrap: wrap;
+  }
+  .bucket-tools button {
+    min-height: 34px;
+    padding: 7px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+  }
+  .bucket-tools button:hover {
+    border-color: var(--border-strong);
+    color: var(--accent);
+  }
+  .bucket-tools button:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+  .bucket-tools .danger {
+    color: var(--negative);
+    border-color: rgba(139, 74, 74, 0.36);
+  }
+  .bucket-tools .danger:hover {
+    color: #6F3333;
+    border-color: rgba(139, 74, 74, 0.58);
+  }
+  .bucket-tools .bulk-hidden { display: none; }
+  .bucket-bulk-status {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .bucket-bulk-message {
+    min-height: 20px;
+    margin: -10px 0 14px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .bucket-bulk-message.error { color: var(--negative); }
+  .bucket-bulk-message.ok { color: var(--positive); }
+
   .bucket-list { display: flex; flex-direction: column; gap: 8px; }
   .bucket-row {
     display: grid;
@@ -165,6 +213,27 @@
     background: var(--surface);
     border: 1px solid transparent;
     box-shadow: 4px 4px 10px var(--shadow-dark-subtle), -4px -4px 10px var(--shadow-light);
+  }
+  .bucket-row.bulk {
+    grid-template-columns: 28px 32px 200px 100px 80px 60px 100px 1fr;
+  }
+  .bucket-row.selected {
+    border-color: rgba(47, 79, 79, 0.45);
+    background: rgba(47, 79, 79, 0.08);
+  }
+  .bucket-select {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+  }
+  .bucket-select input {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent);
+  }
+  .bucket-select input:disabled {
+    cursor: not-allowed;
   }
   .bucket-row:hover {
     border-color: var(--border);
@@ -1265,6 +1334,12 @@
       gap: 8px;
       padding: 12px 16px;
     }
+    .bucket-row.bulk {
+      grid-template-columns: 24px 28px 1fr 60px;
+    }
+    .bucket-tools button {
+      flex: 1 1 auto;
+    }
     .bucket-row .domain,
     .bucket-row .emotion,
     .bucket-row .time,
@@ -1306,11 +1381,20 @@
   <div class="tab" data-tab="persona">Persona</div>
   <div class="tab" data-tab="network">记忆网络</div>
   <div class="tab" data-tab="config">配置</div>
+  <div class="tab" data-tab="memory-config">记忆浮现</div>
   <div class="tab" data-tab="import">导入</div>
 </div>
 
 <div class="content" id="list-view">
   <div class="filters" id="filters"></div>
+  <div class="bucket-tools" id="bucket-bulk-toolbar">
+    <button type="button" id="bucket-bulk-toggle" onclick="toggleBucketBulkMode()">批量选择</button>
+    <button type="button" class="bulk-hidden" data-bulk-action="select-current" onclick="selectCurrentBuckets()">全选当前筛选</button>
+    <button type="button" class="bulk-hidden" data-bulk-action="clear" onclick="clearBucketSelection()">清空</button>
+    <button type="button" class="bulk-hidden danger" data-bulk-action="delete" onclick="deleteSelectedBuckets()">删除选中</button>
+    <span class="bucket-bulk-status bulk-hidden" id="bucket-bulk-status">未选择</span>
+  </div>
+  <div class="bucket-bulk-message" id="bucket-bulk-message"></div>
   <div class="bucket-list" id="bucket-list">
     <div class="loading">加载中…</div>
   </div>
@@ -1511,7 +1595,34 @@
     </div>
 
     <div class="config-section">
+      <h3>Persona State</h3>
+      <div class="config-row">
+        <label>启用</label>
+        <select id="cfg-persona-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后 Gateway 不再注入 Persona 状态，也不再做回复后的 Persona 更新</div>
+      <div class="config-row">
+        <label>Model</label>
+        <input type="text" id="cfg-persona-model" placeholder="deepseek-chat" />
+      </div>
+      <div class="config-row">
+        <label>Base URL</label>
+        <input type="text" id="cfg-persona-url" placeholder="https://api.deepseek.com/v1" />
+      </div>
+      <div class="config-row">
+        <label>API Key</label>
+        <input type="password" id="cfg-persona-key" placeholder="当前: 加载中…" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">留空不改；点击“保存密钥到 .env”后重启仍保留</div>
+    </div>
+
+    <div class="config-section">
       <h3>夜梦 Dream</h3>
+      <div class="config-row">
+        <label>做梦引擎</label>
+        <select id="cfg-dream-engine-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">总开关；关闭后不生成新梦，也不做梦境浮现</div>
       <div class="config-row">
         <label>后台做梦</label>
         <select id="cfg-dream-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
@@ -1520,6 +1631,16 @@
         <label>自动浮现</label>
         <select id="cfg-dream-surface"><option value="true">开启</option><option value="false">关闭</option></select>
       </div>
+      <div class="config-row">
+        <label>Gateway 注入</label>
+        <select id="cfg-dream-inject"><option value="false">关闭</option><option value="true">开启</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">开启后 Gateway 可能把一次共振梦境作为 Dream Context 给模型静默参考</div>
+      <div class="config-row">
+        <label>注入后保留</label>
+        <select id="cfg-dream-retain"><option value="false">关闭</option><option value="true">开启</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">开启后梦境注入仍只发生一次，但原梦文件会保留在梦境记录里</div>
       <div class="config-row">
         <label>Model</label>
         <input type="text" id="cfg-dream-model" placeholder="deepseek-v4-flash" />
@@ -1532,7 +1653,7 @@
         <label>API Key</label>
         <input type="password" id="cfg-dream-key" placeholder="当前: 加载中…" />
       </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">留空不改。不会持久化到 yaml（请用 OMBRE_DREAM_API_KEY）</div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">留空不改；点击“保存密钥到 .env”后重启仍保留</div>
       <div class="config-row">
         <label>几点做梦</label>
         <input type="number" id="cfg-dream-hour" min="0" max="23" />
@@ -1561,21 +1682,17 @@
     </div>
 
     <div class="config-section">
-      <h3>记忆浮现</h3>
-      <div class="config-row">
-        <label>冷却时间</label>
-        <input type="number" id="cfg-gateway-cooldown" min="0" max="168" step="0.5" />
-      </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 6，就是同一条记忆浮现后，6 小时内降低再次出现的概率</div>
-      <div class="config-row">
-        <label>冷却轮数</label>
-        <input type="number" id="cfg-gateway-rounds" min="0" max="50" />
-      </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 5，就是最近 5 轮浮现过的记忆会优先避开</div>
-    </div>
-
-    <div class="config-section">
       <h3>记忆关系整理</h3>
+      <div class="config-row">
+        <label>整理引擎</label>
+        <select id="cfg-reflection-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">总开关；关闭后不再做关系整理、日印象和写入打标</div>
+      <div class="config-row">
+        <label>自动整理</label>
+        <select id="cfg-reflection-auto"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">关闭后只保留手动触发</div>
       <div class="config-row">
         <label>日印象</label>
         <select id="cfg-reflection-daily"><option value="true">开启</option><option value="false">关闭</option></select>
@@ -1591,6 +1708,19 @@
         <select id="cfg-reflection-weather-anchor"><option value="true">开启</option><option value="false">关闭</option></select>
       </div>
       <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">控制日印象/关系天气正文里的 affect_anchor</div>
+      <div class="config-row">
+        <label>Model</label>
+        <input type="text" id="cfg-reflection-model" placeholder="留空复用 Persona/脱水模型" />
+      </div>
+      <div class="config-row">
+        <label>Base URL</label>
+        <input type="text" id="cfg-reflection-url" placeholder="留空复用 Persona/脱水地址" />
+      </div>
+      <div class="config-row">
+        <label>API Key</label>
+        <input type="password" id="cfg-reflection-key" placeholder="当前: 加载中…" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">留空不改；点击“保存密钥到 .env”后重启仍保留</div>
     </div>
 
     <div class="config-section">
@@ -1605,6 +1735,7 @@
     <div style="display:flex;gap:12px;margin-top:8px;">
       <button class="btn-primary" onclick="saveConfig(false)">应用（仅运行时）</button>
       <button class="btn-secondary" onclick="saveConfig(true)">应用并写入 config.yaml</button>
+      <button class="btn-secondary" onclick="saveConfig(true, true)">应用并保存密钥到 .env</button>
     </div>
     <div id="config-status" style="margin-top:16px;font-size:13px;"></div>
 
@@ -1612,6 +1743,51 @@
       <h3>系统信息</h3>
       <div id="config-readonly" style="font-size:13px;color:var(--text-dim);line-height:1.8;">加载中…</div>
     </div>
+  </div>
+</div>
+
+<div class="content" id="memory-config-view" style="display:none">
+  <div style="max-width:640px;margin:0 auto;">
+    <div class="config-section">
+      <h3>记忆浮现</h3>
+      <div class="config-row">
+        <label>最近记忆</label>
+        <select id="cfg-recent-context-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">控制 Gateway 是否自动注入 Recent Context；关闭后直命中记忆不受影响</div>
+      <div class="config-row">
+        <label>最近记忆预算</label>
+        <input type="number" id="cfg-recent-context-budget" min="0" max="2000" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 300；设 0 等同关闭最近记忆自动注入</div>
+      <div class="config-row">
+        <label>Persona提示</label>
+        <select id="cfg-persona-context-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">控制 Gateway 是否按轮次注入 Persona State 提示；关闭后仍会后台更新 Persona</div>
+      <div class="config-row">
+        <label>Persona轮数</label>
+        <input type="number" id="cfg-persona-context-rounds" min="0" max="200" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 15；设 0 等同关闭 Persona 提示注入</div>
+      <div class="config-row">
+        <label>冷却时间</label>
+        <input type="number" id="cfg-gateway-cooldown" min="0" max="168" step="0.5" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 6，就是同一条记忆浮现后，6 小时内降低再次出现的概率</div>
+      <div class="config-row">
+        <label>冷却轮数</label>
+        <input type="number" id="cfg-gateway-rounds" min="0" max="50" />
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 5，就是最近 5 轮浮现过的记忆会优先避开</div>
+    </div>
+
+    <div style="display:flex;gap:12px;margin-top:8px;">
+      <button class="btn-primary" onclick="saveConfig(false)">应用（仅运行时）</button>
+      <button class="btn-secondary" onclick="saveConfig(true)">应用并写入 config.yaml</button>
+      <button class="btn-secondary" onclick="saveConfig(true, true)">应用并保存密钥到 .env</button>
+    </div>
+    <div id="memory-config-status" style="margin-top:16px;font-size:13px;"></div>
   </div>
 </div>
 
@@ -1642,11 +1818,15 @@
 const PATH_PREFIX = location.pathname.replace(/\/dashboard\/?$/, '');
 const BASE = location.origin + PATH_PREFIX;
 let allBuckets = [];
+let renderedBuckets = [];
 let currentFilter = 'all';
+let bucketBulkMode = false;
+let selectedBucketIds = new Set();
 let dashboardCommentAuthor = 'Rain';
 let dashboardAiAuthor = 'Haven';
 let reflectionSelectedDate = formatLocalDate(new Date());
 let reflectionCurrentMonth = monthStart(new Date());
+let configSnapshot = null;
 
 function authUrl(path) {
   return path.startsWith('http') ? path : BASE + path;
@@ -1676,7 +1856,7 @@ function showAuthOverlay(setupNeeded) {
 }
 
 function clearAuthSensitiveFields(password) {
-  ['auth-login-pwd', 'auth-setup-pwd', 'auth-setup-pwd2', 'cfg-dream-key'].forEach(function(id) {
+  ['auth-login-pwd', 'auth-setup-pwd', 'auth-setup-pwd2', 'cfg-dehy-key', 'cfg-emb-key', 'cfg-persona-key', 'cfg-reflection-key', 'cfg-dream-key'].forEach(function(id) {
     var input = document.getElementById(id);
     if (input) input.value = '';
   });
@@ -1759,12 +1939,14 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.getElementById('persona-view').style.display = target === 'persona' ? '' : 'none';
     document.getElementById('network-view').style.display = target === 'network' ? '' : 'none';
     document.getElementById('config-view').style.display = target === 'config' ? '' : 'none';
+    document.getElementById('memory-config-view').style.display = target === 'memory-config' ? '' : 'none';
     document.getElementById('import-view').style.display = target === 'import' ? '' : 'none';
     if (target === 'reflection') renderReflectionReview();
     if (target === 'dreams') loadDreams();
     if (target === 'persona') loadPersona();
     if (target === 'network') loadNetwork();
     if (target === 'config') loadConfig();
+    if (target === 'memory-config') loadConfig();
     if (target === 'import') { pollImportStatus(); loadImportResults(); }
   });
 });
@@ -1775,7 +1957,7 @@ document.getElementById('search-input').addEventListener('input', (e) => {
   const q = e.target.value.trim();
   searchTimer = setTimeout(() => {
     if (q) searchBuckets(q);
-    else renderBuckets(allBuckets);
+    else renderBuckets(filterBuckets(allBuckets));
   }, 300);
 });
 
@@ -1786,7 +1968,12 @@ async function loadBuckets() {
     allBuckets = await res.json();
     updateStats();
     buildFilters();
-    renderBuckets(allBuckets);
+    selectedBucketIds.forEach(function(id) {
+      if (!allBuckets.some(function(bucket) { return String(bucket.id || '') === id; })) {
+        selectedBucketIds.delete(id);
+      }
+    });
+    renderBuckets(filterBuckets(allBuckets));
     if (getActiveTab() === 'reflection') renderReflectionReview();
     if (getActiveTab() === 'dreams') loadDreams();
   } catch (e) {
@@ -2056,18 +2243,166 @@ function filterBuckets(buckets) {
   return buckets;
 }
 
+function bucketBulkDeleteBlockReason(bucket) {
+  if (bucket.protected) return 'protected';
+  if (bucket.pinned) return 'pinned';
+  if (bucket.anchor) return 'anchor';
+  if (bucket.type === 'permanent') return 'permanent';
+  return '';
+}
+
+function bucketBulkReasonText(reason) {
+  if (reason === 'protected') return '受保护记忆不能批量删除';
+  if (reason === 'pinned') return '钉选记忆不能批量删除';
+  if (reason === 'anchor') return '长期锚点不能批量删除';
+  if (reason === 'permanent') return '永久记忆不能批量删除';
+  return '';
+}
+
+function bucketById(id) {
+  id = String(id || '');
+  return allBuckets.find(function(bucket) { return String(bucket.id || '') === id; });
+}
+
+function setBucketBulkMessage(message, tone) {
+  var el = document.getElementById('bucket-bulk-message');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.remove('ok', 'error');
+  if (tone) el.classList.add(tone);
+}
+
+function updateBucketBulkToolbar() {
+  var toggle = document.getElementById('bucket-bulk-toggle');
+  var status = document.getElementById('bucket-bulk-status');
+  var toolbar = document.getElementById('bucket-bulk-toolbar');
+  if (!toggle || !status || !toolbar) return;
+  toggle.textContent = bucketBulkMode ? '退出批量' : '批量选择';
+  toolbar.querySelectorAll('.bulk-hidden').forEach(function(el) {
+    el.style.display = bucketBulkMode ? (el.tagName === 'SPAN' ? 'inline' : 'inline-flex') : 'none';
+  });
+  var selected = selectedBucketIds.size;
+  var selectable = renderedBuckets.filter(function(bucket) {
+    return !bucketBulkDeleteBlockReason(bucket);
+  }).length;
+  status.textContent = selected ? '已选 ' + selected + ' 个' : '未选择';
+  var selectBtn = toolbar.querySelector('[data-bulk-action="select-current"]');
+  var clearBtn = toolbar.querySelector('[data-bulk-action="clear"]');
+  var deleteBtn = toolbar.querySelector('[data-bulk-action="delete"]');
+  if (selectBtn) selectBtn.disabled = !selectable;
+  if (clearBtn) clearBtn.disabled = !selected;
+  if (deleteBtn) deleteBtn.disabled = !selected;
+}
+
+function toggleBucketBulkMode() {
+  bucketBulkMode = !bucketBulkMode;
+  if (!bucketBulkMode) {
+    selectedBucketIds.clear();
+    setBucketBulkMessage('');
+  }
+  renderBuckets(renderedBuckets.length ? renderedBuckets : filterBuckets(allBuckets));
+}
+
+function toggleBucketSelection(id) {
+  id = String(id || '');
+  var bucket = bucketById(id);
+  if (!bucket) return;
+  var reason = bucketBulkDeleteBlockReason(bucket);
+  if (reason) {
+    setBucketBulkMessage(bucketBulkReasonText(reason), 'error');
+    return;
+  }
+  if (selectedBucketIds.has(id)) selectedBucketIds.delete(id);
+  else selectedBucketIds.add(id);
+  setBucketBulkMessage('');
+  renderBuckets(renderedBuckets);
+}
+
+function setBucketSelection(id, checked) {
+  id = String(id || '');
+  var bucket = bucketById(id);
+  if (!bucket || bucketBulkDeleteBlockReason(bucket)) return;
+  if (checked) selectedBucketIds.add(id);
+  else selectedBucketIds.delete(id);
+  setBucketBulkMessage('');
+  renderBuckets(renderedBuckets);
+}
+
+function selectCurrentBuckets() {
+  var added = 0;
+  renderedBuckets.forEach(function(bucket) {
+    var id = String(bucket.id || '');
+    if (id && !bucketBulkDeleteBlockReason(bucket) && !selectedBucketIds.has(id)) {
+      selectedBucketIds.add(id);
+      added += 1;
+    }
+  });
+  setBucketBulkMessage(added ? '已选择当前筛选里的普通记忆桶。' : '当前筛选没有可批量删除的记忆桶。', added ? 'ok' : '');
+  renderBuckets(renderedBuckets);
+}
+
+function clearBucketSelection() {
+  selectedBucketIds.clear();
+  setBucketBulkMessage('');
+  renderBuckets(renderedBuckets);
+}
+
+async function deleteSelectedBuckets() {
+  var ids = Array.from(selectedBucketIds);
+  if (!ids.length) return;
+  var selectedBuckets = ids.map(bucketById).filter(Boolean);
+  var names = selectedBuckets.slice(0, 5).map(function(bucket) {
+    return '· ' + (bucket.name || bucket.id);
+  }).join('\n');
+  var extra = ids.length > 5 ? '\n...' : '';
+  if (!confirm('准备删除 ' + ids.length + ' 个普通记忆桶：\n' + names + extra + '\n\n会写 tombstone 并清理索引。')) return;
+  var token = prompt('输入 DELETE 确认删除 ' + ids.length + ' 个记忆桶');
+  if (token !== 'DELETE') {
+    setBucketBulkMessage('已取消删除。', '');
+    return;
+  }
+  try {
+    var res = await authFetch(BASE + '/api/buckets/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ bucket_ids: ids, confirm: 'DELETE' })
+    });
+    if (!res) return;
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || '删除失败');
+    selectedBucketIds.clear();
+    await loadBuckets();
+    setBucketBulkMessage('已删除 ' + data.deleted + ' 个，跳过 ' + data.skipped + ' 个，未找到 ' + data.not_found + ' 个。', data.deleted ? 'ok' : '');
+  } catch (e) {
+    setBucketBulkMessage('删除失败: ' + e.message, 'error');
+  }
+}
+
 function renderBuckets(buckets) {
   var list = document.getElementById('bucket-list');
+  renderedBuckets = (buckets || []).slice();
+  updateBucketBulkToolbar();
   if (!buckets.length) {
     list.innerHTML = '<div class="loading">没有记忆桶</div>';
     return;
   }
   list.innerHTML = buckets.map(function(b) {
+    var id = String(b.id || '');
     var icon = b.anchor ? '⚓' : b.pinned ? '📌' : b.type === 'feel' ? '🫧' : b.digested ? '🌿' : b.resolved ? '💤' : '💭';
     var vPos = Math.round(b.valence * 100);
     var modelV = b.model_valence != null ? ' → V' + b.model_valence.toFixed(1) : '';
     var timeAgo = formatTimeAgo(b.last_active || b.created);
-    return '<div class="bucket-row" onclick="showDetail(\'' + jsString(b.id) + '\')">' +
+    var blockReason = bucketBulkDeleteBlockReason(b);
+    var checked = selectedBucketIds.has(id);
+    var rowClass = 'bucket-row' + (bucketBulkMode ? ' bulk' : '') + (checked ? ' selected' : '');
+    var rowClick = bucketBulkMode ? 'toggleBucketSelection(\'' + jsString(id) + '\')' : 'showDetail(\'' + jsString(id) + '\')';
+    var selectHtml = bucketBulkMode
+      ? '<label class="bucket-select" title="' + escAttr(blockReason ? bucketBulkReasonText(blockReason) : '选择') + '" onclick="event.stopPropagation()">' +
+          '<input type="checkbox" ' + (checked ? 'checked ' : '') + (blockReason ? 'disabled ' : '') + 'onchange="setBucketSelection(\'' + jsString(id) + '\', this.checked)" />' +
+        '</label>'
+      : '';
+    return '<div class="' + rowClass + '" onclick="' + rowClick + '">' +
+      selectHtml +
       '<span class="icon">' + icon + '</span>' +
       '<span class="name" title="' + esc(b.name) + '">' + esc(b.name) + '</span>' +
       '<span class="domain">' + esc((b.domain || []).join(', ')) + '</span>' +
@@ -3031,11 +3366,19 @@ document.getElementById('breath-query').addEventListener('keydown', function(e) 
   if (e.key === 'Enter') runBreathDebug();
 });
 
+function setConfigStatus(html) {
+  ['config-status', 'memory-config-status'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.innerHTML = html;
+  });
+}
+
 async function loadConfig() {
   try {
     var res = await authFetch(BASE + '/api/config');
     if (!res) return;
     var cfg = await res.json();
+    configSnapshot = JSON.parse(JSON.stringify(cfg || {}));
     document.getElementById('cfg-dehy-model').value = cfg.dehydration.model || '';
     document.getElementById('cfg-dehy-url').value = cfg.dehydration.base_url || '';
     document.getElementById('cfg-dehy-key').placeholder = '当前: ' + (cfg.dehydration.api_key_masked || '未设置');
@@ -3047,8 +3390,18 @@ async function loadConfig() {
     document.getElementById('cfg-emb-url').value = cfg.embedding.base_url || '';
     document.getElementById('cfg-emb-key').placeholder = '当前: ' + (cfg.embedding.api_key_masked || (cfg.embedding.has_own_api_key ? '***' : '复用脱水 API'));
     document.getElementById('cfg-emb-key').value = '';
+    document.getElementById('cfg-persona-enabled').value =
+      (cfg.persona && cfg.persona.enabled) === false ? 'false' : 'true';
+    document.getElementById('cfg-persona-model').value = (cfg.persona && cfg.persona.model) || '';
+    document.getElementById('cfg-persona-url').value = (cfg.persona && cfg.persona.base_url) || '';
+    document.getElementById('cfg-persona-key').placeholder =
+      '当前: ' + ((cfg.persona && cfg.persona.api_key_masked) || ((cfg.persona && cfg.persona.api_ready) ? '***' : '未设置'));
+    document.getElementById('cfg-persona-key').value = '';
+    document.getElementById('cfg-dream-engine-enabled').value = cfg.dream.enabled ? 'true' : 'false';
     document.getElementById('cfg-dream-enabled').value = cfg.dream.auto_enabled ? 'true' : 'false';
     document.getElementById('cfg-dream-surface').value = cfg.dream.surface_enabled ? 'true' : 'false';
+    document.getElementById('cfg-dream-inject').value = cfg.dream.inject_enabled ? 'true' : 'false';
+    document.getElementById('cfg-dream-retain').value = cfg.dream.retain_after_inject ? 'true' : 'false';
     document.getElementById('cfg-dream-model').value = cfg.dream.model || '';
     document.getElementById('cfg-dream-url').value = cfg.dream.base_url || '';
     document.getElementById('cfg-dream-key').placeholder = '当前: ' + (cfg.dream.api_key_masked || (cfg.dream.api_ready ? '***' : '未设置'));
@@ -3060,25 +3413,45 @@ async function loadConfig() {
     document.getElementById('cfg-dream-anchor').value = cfg.dream.identity_anchor_id || '';
     document.getElementById('cfg-gateway-cooldown').value = (cfg.gateway && cfg.gateway.cooldown_hours) ?? 6;
     document.getElementById('cfg-gateway-rounds').value = (cfg.gateway && cfg.gateway.skip_recent_rounds) ?? 5;
+    var recentContextBudget = (cfg.gateway && cfg.gateway.recent_context_budget) ?? 300;
+    document.getElementById('cfg-recent-context-budget').value = recentContextBudget;
+    document.getElementById('cfg-recent-context-enabled').value = recentContextBudget > 0 ? 'true' : 'false';
+    var personaContextRounds = (cfg.gateway && cfg.gateway.current_inner_state_interval_rounds) ?? 15;
+    document.getElementById('cfg-persona-context-rounds').value = personaContextRounds;
+    document.getElementById('cfg-persona-context-enabled').value = personaContextRounds > 0 ? 'true' : 'false';
+    document.getElementById('cfg-reflection-enabled').value =
+      (cfg.reflection && cfg.reflection.enabled) === false ? 'false' : 'true';
+    document.getElementById('cfg-reflection-auto').value =
+      (cfg.reflection && cfg.reflection.auto_enabled) === false ? 'false' : 'true';
     document.getElementById('cfg-reflection-daily').value =
       (cfg.reflection && cfg.reflection.daily_enabled) === false ? 'false' : 'true';
     document.getElementById('cfg-reflection-memory-anchor').value =
       (cfg.reflection && cfg.reflection.memory_affect_anchor_enabled) === false ? 'false' : 'true';
     document.getElementById('cfg-reflection-weather-anchor').value =
       (cfg.reflection && cfg.reflection.relationship_weather_affect_anchor_enabled) === false ? 'false' : 'true';
+    document.getElementById('cfg-reflection-model').value = (cfg.reflection && cfg.reflection.model) || '';
+    document.getElementById('cfg-reflection-url').value = (cfg.reflection && cfg.reflection.base_url) || '';
+    document.getElementById('cfg-reflection-key').placeholder =
+      '当前: ' + ((cfg.reflection && cfg.reflection.api_key_masked) || ((cfg.reflection && cfg.reflection.api_ready) ? '***' : '未设置'));
+    document.getElementById('cfg-reflection-key').value = '';
     document.getElementById('cfg-merge').value = cfg.merge_threshold ?? 75;
     document.getElementById('config-readonly').innerHTML =
       'Transport: <strong>' + esc(cfg.transport) + '</strong><br>' +
       'Buckets dir: <strong>' + esc(cfg.buckets_dir) + '</strong><br>' +
+      'Persona API: <strong>' + ((cfg.persona && cfg.persona.api_ready) ? '已设置' : '未设置') + '</strong><br>' +
+      '日印象 API: <strong>' + ((cfg.reflection && cfg.reflection.api_ready) ? '已设置' : '未设置') + '</strong><br>' +
       'Dream API: <strong>' + (cfg.dream.api_ready ? '已设置' : '未设置') + '</strong><br>' +
       'Embedding effective URL: <strong>' + esc(cfg.embedding.effective_base_url || '未设置') + '</strong>';
   } catch (e) {
-    document.getElementById('config-status').innerHTML =
-      '<span style="color:var(--negative)">加载失败: ' + esc(e.message) + '</span>';
+    setConfigStatus('<span style="color:var(--negative)">加载失败: ' + esc(e.message) + '</span>');
   }
 }
 
-async function saveConfig(persist) {
+async function saveConfig(persist, persistEnv) {
+  if (!configSnapshot) {
+    setConfigStatus('<span style="color:var(--negative)">配置还没加载完成，请先刷新配置页</span>');
+    return;
+  }
   function numberValue(id, fallback) {
     var n = parseInt(document.getElementById(id).value, 10);
     return Number.isFinite(n) ? n : fallback;
@@ -3087,50 +3460,97 @@ async function saveConfig(persist) {
     var n = parseFloat(document.getElementById(id).value);
     return Number.isFinite(n) ? n : fallback;
   }
+  function sameConfigValue(left, right) {
+    if (left === right) return true;
+    if (left === '' && (right === undefined || right === null)) return true;
+    if (typeof left === 'number' && typeof right === 'number') return Math.abs(left - right) < 0.000001;
+    return JSON.stringify(left) === JSON.stringify(right);
+  }
+  function addChangedSection(target, sectionName, candidate) {
+    var original = (configSnapshot && configSnapshot[sectionName]) || {};
+    var changed = {};
+    Object.keys(candidate).forEach(function(key) {
+      if (!sameConfigValue(candidate[key], original[key])) changed[key] = candidate[key];
+    });
+    if (Object.keys(changed).length) target[sectionName] = changed;
+  }
 
-  var body = {
-    dehydration: {
-      model: document.getElementById('cfg-dehy-model').value,
+  var recentContextEnabled = document.getElementById('cfg-recent-context-enabled').value === 'true';
+  var recentContextBudget = recentContextEnabled ? numberValue('cfg-recent-context-budget', 300) : 0;
+  if (recentContextEnabled && recentContextBudget <= 0) recentContextBudget = 300;
+  var personaContextEnabled = document.getElementById('cfg-persona-context-enabled').value === 'true';
+  var personaContextRounds = personaContextEnabled ? numberValue('cfg-persona-context-rounds', 15) : 0;
+  if (personaContextEnabled && personaContextRounds <= 0) personaContextRounds = 15;
+
+  var activeTab = document.querySelector('.tab.active');
+  var activeTarget = activeTab ? activeTab.dataset.tab : '';
+  var candidate = {};
+  if (activeTarget === 'config') {
+    candidate.dehydration = {
       base_url: document.getElementById('cfg-dehy-url').value,
-      max_tokens: parseInt(document.getElementById('cfg-dehy-maxtokens').value) || 1024,
-      temperature: floatValue('cfg-dehy-temp', 0.1),
-    },
-    embedding: {
-      enabled: document.getElementById('cfg-emb-enabled').value === 'true',
-      model: document.getElementById('cfg-emb-model').value,
+    };
+    candidate.embedding = {
       base_url: document.getElementById('cfg-emb-url').value,
-    },
-    dream: {
-      auto_enabled: document.getElementById('cfg-dream-enabled').value === 'true',
-      surface_enabled: document.getElementById('cfg-dream-surface').value === 'true',
-      model: document.getElementById('cfg-dream-model').value,
+    };
+    candidate.persona = {
+      base_url: document.getElementById('cfg-persona-url').value,
+    };
+    candidate.dream = {
       base_url: document.getElementById('cfg-dream-url').value,
-      daily_hour: numberValue('cfg-dream-hour', 3),
-      daily_probability: floatValue('cfg-dream-prob', 0.4),
-      min_material_count: numberValue('cfg-dream-min', 5),
-      material_window_hours: numberValue('cfg-dream-window', 48),
-      identity_anchor_id: document.getElementById('cfg-dream-anchor').value,
-    },
-    gateway: {
+    };
+    candidate.reflection = {
+      base_url: document.getElementById('cfg-reflection-url').value,
+    };
+  }
+  if (activeTarget === 'memory-config') {
+    candidate.gateway = {
       cooldown_hours: floatValue('cfg-gateway-cooldown', 6),
       skip_recent_rounds: numberValue('cfg-gateway-rounds', 5),
-    },
-    reflection: {
-      daily_enabled: document.getElementById('cfg-reflection-daily').value === 'true',
-      memory_affect_anchor_enabled: document.getElementById('cfg-reflection-memory-anchor').value === 'true',
-      relationship_weather_affect_anchor_enabled: document.getElementById('cfg-reflection-weather-anchor').value === 'true',
-    },
-    merge_threshold: numberValue('cfg-merge', 75),
-    persist: persist,
-  };
-  var keyVal = document.getElementById('cfg-dehy-key').value;
-  if (keyVal) body.dehydration.api_key = keyVal;
-  var embKeyVal = document.getElementById('cfg-emb-key').value;
-  if (embKeyVal) body.embedding.api_key = embKeyVal;
-  var dreamKeyVal = document.getElementById('cfg-dream-key').value;
-  if (dreamKeyVal) body.dream.api_key = dreamKeyVal;
+      recent_context_budget: recentContextBudget,
+      current_inner_state_interval_rounds: personaContextRounds,
+    };
+  }
 
-  var status = document.getElementById('config-status');
+  var body = {
+    persist: persist,
+    persist_env: !!persistEnv,
+  };
+  [
+    'dehydration',
+    'embedding',
+    'persona',
+    'dream',
+    'gateway',
+    'reflection',
+  ].forEach(function(sectionName) {
+    if (candidate[sectionName]) addChangedSection(body, sectionName, candidate[sectionName]);
+  });
+
+  var keyVal = document.getElementById('cfg-dehy-key').value;
+  if (keyVal) {
+    if (!body.dehydration) body.dehydration = {};
+    body.dehydration.api_key = keyVal;
+  }
+  var embKeyVal = document.getElementById('cfg-emb-key').value;
+  if (embKeyVal) {
+    if (!body.embedding) body.embedding = {};
+    body.embedding.api_key = embKeyVal;
+  }
+  var personaKeyVal = document.getElementById('cfg-persona-key').value;
+  if (personaKeyVal) {
+    if (!body.persona) body.persona = {};
+    body.persona.api_key = personaKeyVal;
+  }
+  var reflectionKeyVal = document.getElementById('cfg-reflection-key').value;
+  if (reflectionKeyVal) {
+    if (!body.reflection) body.reflection = {};
+    body.reflection.api_key = reflectionKeyVal;
+  }
+  var dreamKeyVal = document.getElementById('cfg-dream-key').value;
+  if (dreamKeyVal) {
+    if (!body.dream) body.dream = {};
+    body.dream.api_key = dreamKeyVal;
+  }
   try {
     var res = await authFetch(BASE + '/api/config', {
       method: 'POST',
@@ -3140,13 +3560,13 @@ async function saveConfig(persist) {
     if (!res) return;
     var result = await res.json();
     if (result.ok) {
-      status.innerHTML = '<span style="color:var(--positive)">✓ 已更新: ' + esc((result.updated || []).join(', ')) + '</span>';
+      setConfigStatus('<span style="color:var(--positive)">✓ 已更新: ' + esc((result.updated || []).join(', ')) + '</span>');
       loadConfig();
     } else {
-      status.innerHTML = '<span style="color:var(--negative)">✗ ' + esc(result.error || '未知错误') + '</span>';
+      setConfigStatus('<span style="color:var(--negative)">✗ ' + esc(result.error || '未知错误') + '</span>');
     }
   } catch (e) {
-    status.innerHTML = '<span style="color:var(--negative)">✗ 请求失败: ' + esc(e.message) + '</span>';
+    setConfigStatus('<span style="color:var(--negative)">✗ 请求失败: ' + esc(e.message) + '</span>');
   }
 }
 

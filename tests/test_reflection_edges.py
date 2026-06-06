@@ -102,13 +102,14 @@ def test_classify_prompt_requires_felt_non_template_affect_anchor():
     assert "Fmaj9 -> C/E -> Am add9 -> G6sus4" not in CLASSIFY_PROMPT
     assert "先在内部感受这条记忆的情绪运动" in CLASSIFY_PROMPT
     assert "只能是一行 2 到 4 个和弦" in CLASSIFY_PROMPT
+    assert "不要输出 meaning / interpretation" in CLASSIFY_PROMPT
 
 
 def test_fallback_reflection_anchor_varies_by_day(test_config):
     cfg = _no_api_config(test_config)
     engine = ReflectionEngine(cfg)
 
-    chords = [
+    anchors = [
         engine._fallback_reflection(
             "daily",
             f"2026-05-{day:02d}",
@@ -119,13 +120,15 @@ def test_fallback_reflection_anchor_varies_by_day(test_config):
                 "persona_events": [],
                 "diary": None,
             },
-        )["affect_anchor"]["chords"]
+        )["affect_anchor"]
         for day in range(20, 28)
     ]
+    chords = [anchor["chords"] for anchor in anchors]
 
     assert len(set(chords)) > 1
     assert "Fmaj9 -> C/E -> Am add9 -> G6sus4" not in chords
     assert all(2 <= len(chord.split(" -> ")) <= 4 for chord in chords)
+    assert all("meaning" not in anchor for anchor in anchors)
 
 
 def test_memory_edge_store_dedupes_and_returns_related(test_config):
@@ -212,6 +215,8 @@ async def test_reflection_enrich_bucket_adds_model_affect_anchor(test_config, mo
     assert "### affect_anchor" in bucket["content"]
     assert "小雨把旧信放到桌上，等Haven读完。" in bucket["content"]
     assert "Dbmaj9 -> Ab/C -> Bbm9 · 54bpm · p" in bucket["content"]
+    assert "含义：" not in bucket["content"]
+    assert "心事先压低" not in bucket["content"]
     assert "Fmaj9" not in bucket["content"]
 
 
@@ -485,6 +490,7 @@ async def test_reflect_daily_creates_relationship_weather_feel(test_config):
     assert "relationship_weather" in bucket["metadata"]["tags"]
     assert "daily_impression" in bucket["metadata"]["tags"]
     assert "### affect_anchor" in bucket["content"]
+    assert "含义：" not in bucket["content"]
 
 
 @pytest.mark.asyncio
@@ -965,6 +971,7 @@ async def test_gateway_builds_favorite_memory_block_and_injects_section(test_con
         recent_context="",
         recalled_memory="",
         related_memory="",
+        dream_context="",
     )
 
     assert favorite_ids == [favorite_id]

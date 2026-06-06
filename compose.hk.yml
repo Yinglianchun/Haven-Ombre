@@ -10,6 +10,7 @@ services:
       OMBRE_TRANSPORT: streamable-http
       OMBRE_BUCKETS_DIR: /data
       OMBRE_STATE_DIR: /state
+      OMBRE_ENV_PATH: /app/.env
       OMBRE_GATEWAY_ADMIN_URL: http://ombre-gateway:8010/api/config
     ports:
       - "18001:8000"
@@ -17,6 +18,7 @@ services:
       - /srv/ombre-brain/buckets:/data
       - /srv/ombre-brain/state:/state
       - /srv/ombre-brain/config.yaml:/app/config.yaml:ro
+      - /opt/Ombre-Brain/.env:/app/.env
 
   ombre-gateway:
     build: .

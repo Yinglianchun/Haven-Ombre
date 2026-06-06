@@ -737,10 +737,30 @@ class DreamEngine:
         embedding_engine=None,
         now: datetime | None = None,
     ) -> str | None:
+        result = await self.surface_with_status(
+            query=query,
+            valence=valence,
+            arousal=arousal,
+            is_session_start=is_session_start,
+            embedding_engine=embedding_engine,
+            now=now,
+        )
+        return str(result.get("text") or "") or None
+
+    async def surface_with_status(
+        self,
+        query: str = "",
+        valence: float = -1,
+        arousal: float = -1,
+        is_session_start: bool = False,
+        embedding_engine=None,
+        now: datetime | None = None,
+        retain_after_surface: bool = False,
+    ) -> dict:
         if not self.enabled or not self.surface_enabled:
-            return None
+            return {"status": "skipped", "reason": "disabled"}
         if not self._eligible_context(query, valence, arousal, is_session_start):
-            return None
+            return {"status": "skipped", "reason": "ineligible_context"}
         now_local = self._now(now)
         pending = [
             record
@@ -749,7 +769,7 @@ class DreamEngine:
             and (now_local - record.generated_at.astimezone(self.tz)).total_seconds() / 3600 >= self.min_surface_age_hours
         ]
         if not pending:
-            return None
+            return {"status": "skipped", "reason": "no_pending_dream"}
         query_embedding = await self._query_embedding(query, embedding_engine)
         evaluated = []
         for record in pending:
@@ -787,11 +807,11 @@ class DreamEngine:
                 fd = os.open(str(claim_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 os.close(fd)
             except FileExistsError:
-                return None
+                return {"status": "skipped", "reason": "already_claimed"}
             surfaced_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
             try:
                 if not record.path.exists():
-                    return None
+                    return {"status": "skipped", "reason": "record_missing"}
                 surfaced_record = self._write_record(
                     {**record.metadata, "surfaced": True, "surfaced_at": surfaced_at},
                     record.body,
@@ -805,8 +825,17 @@ class DreamEngine:
                     },
                 )
                 text = self._format_surface(surfaced_record)
-                self._delete_record(surfaced_record, "surfaced_one_shot", embedding_engine)
-                return text
+                if not retain_after_surface:
+                    self._delete_record(surfaced_record, "surfaced_one_shot", embedding_engine)
+                return {
+                    "status": "injected",
+                    "reason": "resonant",
+                    "retained": bool(retain_after_surface),
+                    "text": text,
+                    "dream_id": surfaced_record.dream_id,
+                    "generated_at": surfaced_record.metadata.get("generated_at"),
+                    "surfaced_at": surfaced_at,
+                }
             finally:
                 try:
                     claim_path.unlink(missing_ok=True)
@@ -816,7 +845,7 @@ class DreamEngine:
         for record in self.list_records():
             if not record.surfaced and int(record.metadata.get("surface_attempts", 0)) >= self.max_surface_attempts:
                 self._delete_record(record, f"unsurfaced_after_{self.max_surface_attempts}_attempts", embedding_engine)
-        return None
+        return {"status": "skipped", "reason": "no_resonance"}
 
     def dashboard_records(self, limit: int = 30) -> list[dict]:
         entries: dict[str, dict] = {}

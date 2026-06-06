@@ -391,3 +391,52 @@ async def test_surface_formats_dream_and_removes_body_from_live_storage(test_con
     assert "右手食指指尖有湿气" in surfaced
     assert not record.path.exists()
     assert "右手食指指尖有湿气" not in str(payload)
+
+
+@pytest.mark.asyncio
+async def test_surface_can_retain_record_after_gateway_injection(test_config):
+    cfg = _dream_config(test_config, min_surface_age_hours=0, surface_threshold=0.6)
+    engine = DreamEngine(cfg)
+    generated_at = datetime(2026, 5, 25, 3, 30, tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(ZoneInfo("UTC"))
+    record = engine._write_record(
+        {
+            "dream_id": "dream_retained",
+            "generated_at": generated_at.isoformat(timespec="seconds"),
+            "local_date": "2026-05-25",
+            "ai_name": "Haven",
+            "dream_model": "deepseek-v4-flash",
+            "core_affect": {"valence": 0.5, "arousal": 0.4},
+            "recall_cues": ["熟悉空间忽然陌生", "夜里想起未说完的话"],
+            "source_bucket_ids": ["a", "b", "c", "d", "e"],
+            "identity_anchor_id": "identity-anchor",
+            "material_count": 5,
+            "surfaced": False,
+            "surfaced_at": None,
+            "surface_attempts": 0,
+        },
+        "我走进一条很窄的走廊，右手食指指尖有湿气。",
+    )
+
+    result = await engine.surface_with_status(
+        valence=0.5,
+        arousal=0.4,
+        embedding_engine=None,
+        now=datetime(2026, 5, 25, 8, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+        retain_after_surface=True,
+    )
+    retained = engine._read_record(record.path)
+    second = await engine.surface_with_status(
+        valence=0.5,
+        arousal=0.4,
+        embedding_engine=None,
+        now=datetime(2026, 5, 25, 8, 5, tzinfo=ZoneInfo("Asia/Shanghai")),
+        retain_after_surface=True,
+    )
+
+    assert result["status"] == "injected"
+    assert result["retained"] is True
+    assert record.path.exists()
+    assert retained.surfaced is True
+    assert retained.metadata["surfaced_at"]
+    assert "右手食指指尖有湿气" in retained.body
+    assert second == {"status": "skipped", "reason": "no_pending_dream"}

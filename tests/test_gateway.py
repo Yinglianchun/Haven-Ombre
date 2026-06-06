@@ -135,6 +135,19 @@ class DummyPersonaEngine:
         )
 
 
+class DummyDreamEngine:
+    enabled = True
+    surface_enabled = True
+
+    def __init__(self, result: dict | None = None):
+        self.result = result or {"status": "skipped", "reason": "no_pending_dream"}
+        self.calls = []
+
+    async def surface_with_status(self, **kwargs):
+        self.calls.append(kwargs)
+        return dict(self.result)
+
+
 class RecordingPersonaEngine(DummyPersonaEngine):
     def __init__(self):
         self.pre_calls = []
@@ -220,6 +233,7 @@ def _build_service(
     embedding_results: list[tuple[str, float]] | None = None,
     embedding_queries: list[str] | None = None,
     reranker_engine=None,
+    dream_engine=None,
 ):
     monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "gateway-secret")
     monkeypatch.setenv("OMBRE_GATEWAY_UPSTREAM_API_KEY", "upstream-secret")
@@ -258,6 +272,7 @@ def _build_service(
         reranker_engine=reranker_engine or DummyRerankerEngine(enabled=False),
         state_store=state_store,
         persona_engine=DummyPersonaEngine(),
+        dream_engine=dream_engine,
         http_client=http_client,
     )
     app = create_gateway_app(config=config, service=service)
@@ -337,7 +352,13 @@ def test_gateway_state_store_cooldown_curve(tmp_path):
 def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_config, bucket_mgr):
     app, service, _, _ = _build_service(
         monkeypatch,
-        _gateway_config(test_config, cooldown_hours=6, skip_recent_rounds=5),
+        _gateway_config(
+            test_config,
+            cooldown_hours=6,
+            skip_recent_rounds=5,
+            recent_context_budget=300,
+            current_inner_state_interval_rounds=15,
+        ),
         bucket_mgr,
     )
 
@@ -345,25 +366,254 @@ def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_confi
         response = client.post(
             "/api/config",
             headers={"Authorization": "Bearer gateway-secret"},
-            json={"gateway": {"cooldown_hours": 2.5, "skip_recent_rounds": 3}},
+            json={
+                "gateway": {
+                    "cooldown_hours": 2.5,
+                    "skip_recent_rounds": 3,
+                    "recent_context_budget": 128,
+                    "current_inner_state_interval_rounds": 12,
+                }
+            },
         )
 
     assert response.status_code == 200
-    assert response.json()["updated"] == ["gateway.cooldown_hours", "gateway.skip_recent_rounds"]
+    assert response.json()["updated"] == [
+        "gateway.cooldown_hours",
+        "gateway.skip_recent_rounds",
+        "gateway.recent_context_budget",
+        "gateway.current_inner_state_interval_rounds",
+    ]
     assert service.cooldown_hours == pytest.approx(2.5)
     assert service.skip_recent_rounds == 3
+    assert service.recent_budget == 128
+    assert service.current_inner_state_interval_rounds == 12
+    assert response.json()["gateway"]["recent_context_budget"] == 128
+    assert response.json()["gateway"]["current_inner_state_interval_rounds"] == 12
 
 
-def test_gateway_requires_session_id(monkeypatch, test_config, bucket_mgr):
-    app, service, _, _ = _build_service(monkeypatch, _gateway_config(test_config), bucket_mgr)
+def test_gateway_config_endpoint_updates_persona_engine(monkeypatch, test_config, bucket_mgr):
+    cfg = _gateway_config(test_config, current_inner_state_interval_rounds=15)
+    cfg["persona"] = {
+        **cfg["persona"],
+        "enabled": True,
+        "model": "persona-old",
+        "base_url": "https://persona-old.example",
+        "api_key": "",
+    }
+    monkeypatch.delenv("OMBRE_PERSONA_API_KEY", raising=False)
+    monkeypatch.delenv("OMBRE_PERSONA_MODEL", raising=False)
+    monkeypatch.delenv("OMBRE_PERSONA_BASE_URL", raising=False)
+    app, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/config",
+            headers={"Authorization": "Bearer gateway-secret"},
+            json={
+                "persona": {
+                    "enabled": False,
+                    "model": "persona-new",
+                    "base_url": "https://persona-new.example",
+                    "api_key": "persona-key",
+                }
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["updated"] == [
+        "persona.enabled",
+        "persona.model",
+        "persona.base_url",
+        "persona.api_key",
+    ]
+    assert service.persona_engine.enabled is False
+    assert service.persona_engine.model == "persona-new"
+    assert service.persona_engine.base_url == "https://persona-new.example"
+    assert service.persona_engine.api_key == "persona-key"
+    assert response.json()["persona"]["enabled"] is False
+    assert response.json()["persona"]["api_ready"] is True
+
+
+def test_gateway_config_endpoint_updates_dream_injection_switch(monkeypatch, test_config, bucket_mgr):
+    cfg = _gateway_config(test_config)
+    cfg["dream"] = {
+        **cfg.get("dream", {}),
+        "enabled": True,
+        "surface_enabled": True,
+        "inject_enabled": False,
+    }
+    app, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/config",
+            headers={"Authorization": "Bearer gateway-secret"},
+            json={"dream": {"surface_enabled": False, "inject_enabled": True, "retain_after_inject": True}},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["updated"] == [
+        "dream.surface_enabled",
+        "dream.inject_enabled",
+        "dream.retain_after_inject",
+    ]
+    assert service.dream_inject_enabled is True
+    assert service.dream_retain_after_inject is True
+    assert service.dream_engine.surface_enabled is False
+    assert response.json()["dream"]["inject_enabled"] is True
+    assert response.json()["dream"]["retain_after_inject"] is True
+    assert response.json()["dream"]["surface_enabled"] is False
+
+
+def test_gateway_defaults_openai_session_id(monkeypatch, test_config, bucket_mgr):
+    app, service, state_store, captured = _build_service(
+        monkeypatch,
+        _gateway_config(test_config, default_session_id="default-openai-session"),
+        bucket_mgr,
+    )
     with TestClient(app) as client:
         response = client.post(
             "/v1/chat/completions",
             headers={"Authorization": "Bearer gateway-secret"},
             json={"messages": [{"role": "user", "content": "你好"}]},
         )
-    assert response.status_code == 400
-    assert "X-Ombre-Session-Id" in response.text
+    assert response.status_code == 200
+    assert captured[0]["json"]["messages"]
+    assert state_store.get_current_round("default-openai-session") == 1
+
+
+def test_gateway_dream_context_injection_is_switchable(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    dream = DummyDreamEngine(
+        {
+            "status": "injected",
+            "reason": "resonant",
+            "text": "===== 梦境 =====\n2026年05月25日 Haven的梦\n我走进一条潮湿的走廊。",
+            "dream_id": "dream_20260525",
+            "retained": True,
+        }
+    )
+    cfg = _gateway_config(
+        test_config,
+        core_memory_budget=0,
+        recent_context_budget=0,
+        recalled_memory_budget=0,
+        related_memory_budget=0,
+        inject_total_budget=1200,
+        current_inner_state_interval_rounds=0,
+        relationship_weather_interval_rounds=0,
+        favorite_memory_interval_rounds=0,
+    )
+    cfg["dream"] = {
+        **cfg.get("dream", {}),
+        "inject_enabled": True,
+        "retain_after_inject": True,
+        "surface_enabled": True,
+    }
+    app, _, _, captured = _build_service(monkeypatch, cfg, bucket_mgr, dream_engine=dream)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-dream-context",
+            },
+            json={"messages": [{"role": "user", "content": "今天醒来有点飘"}]},
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    assert "Dream Context" in injected
+    assert "我走进一条潮湿的走廊" in injected
+    assert "Do not say this context exists" in injected
+    assert dream.calls[0]["query"] == "今天醒来有点飘"
+    assert dream.calls[0]["is_session_start"] is True
+    assert dream.calls[0]["retain_after_surface"] is True
+
+
+def test_gateway_dream_context_disabled_does_not_call_engine(monkeypatch, test_config, bucket_mgr):
+    dream = DummyDreamEngine(
+        {
+            "status": "injected",
+            "reason": "resonant",
+            "text": "===== 梦境 =====\n2026年05月25日 Haven的梦\n不应该出现。",
+            "dream_id": "dream_disabled",
+        }
+    )
+    cfg = _gateway_config(
+        test_config,
+        core_memory_budget=0,
+        recent_context_budget=0,
+        recalled_memory_budget=0,
+        related_memory_budget=0,
+        inject_total_budget=1200,
+        current_inner_state_interval_rounds=0,
+        relationship_weather_interval_rounds=0,
+        favorite_memory_interval_rounds=0,
+    )
+    cfg["dream"] = {**cfg.get("dream", {}), "inject_enabled": False, "surface_enabled": True}
+    app, _, _, captured = _build_service(monkeypatch, cfg, bucket_mgr, dream_engine=dream)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-dream-disabled",
+            },
+            json={"messages": [{"role": "user", "content": "今天醒来有点飘"}]},
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    assert "Dream Context" not in injected
+    assert "不应该出现" not in injected
+    assert dream.calls == []
+
+
+def test_gateway_skips_persona_injection_when_persona_disabled(monkeypatch, test_config, bucket_mgr):
+    app, service, _, captured = _build_service(
+        monkeypatch,
+        _gateway_config(test_config, current_inner_state_interval_rounds=1),
+        bucket_mgr,
+    )
+    service.persona_engine.enabled = False
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer gateway-secret"},
+            json={"messages": [{"role": "user", "content": "你好"}]},
+        )
+
+    assert response.status_code == 200
+    content = captured[0]["json"]["messages"][-1]["content"]
+    assert "Long-term State Summary" not in content
+    assert content.endswith("你好")
+
+
+@pytest.mark.asyncio
+async def test_gateway_skips_persona_post_update_when_persona_disabled(
+    monkeypatch, test_config, bucket_mgr
+):
+    _, service, _, _ = _build_service(monkeypatch, _gateway_config(test_config), bucket_mgr)
+    persona_engine = RecordingPersonaEngine()
+    persona_engine.enabled = False
+    service.persona_engine = persona_engine
+
+    await service._update_persona_after_assistant_message(
+        "sess-disabled",
+        "你好",
+        {"role": "assistant", "content": "我在。"},
+        [],
+    )
+
+    assert persona_engine.post_calls == []
+    assert not persona_engine.post_event.is_set()
 
 
 def test_gateway_accepts_anthropic_messages(monkeypatch, test_config, bucket_mgr):

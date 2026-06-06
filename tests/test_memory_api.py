@@ -139,6 +139,35 @@ async def finish_blocking_embedding(embedding_engine: BlockingEmbeddingEngine):
 
 
 @pytest.mark.asyncio
+async def test_pulse_reports_feel_count_and_display_total(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    await bucket_mgr.create(content="固化记忆", name="固化", bucket_type="permanent")
+    await bucket_mgr.create(content="动态记忆", name="动态", bucket_type="dynamic")
+    feel_id = await bucket_mgr.create(content="一条 whisper", name="whisper", bucket_type="feel")
+    archived_id = await bucket_mgr.create(content="旧动态", name="旧动态", bucket_type="dynamic")
+    await bucket_mgr.archive(archived_id)
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+
+    result = await server.pulse()
+
+    assert "固化记忆桶: 1 个" in result
+    assert "动态记忆桶: 1 个" in result
+    assert "情绪/印象桶: 1 个" in result
+    assert "归档记忆桶: 1 个" in result
+    assert "当前显示桶: 3 个" in result
+    assert "全量记忆桶: 4 个" in result
+    assert f"bucket_id:{feel_id}" in result
+    assert f"bucket_id:{archived_id}" not in result
+
+    result_with_archive = await server.pulse(include_archive=True)
+
+    assert "当前显示桶: 4 个" in result_with_archive
+    assert f"bucket_id:{archived_id}" in result_with_archive
+
+
+@pytest.mark.asyncio
 async def test_create_memory_api_requires_write_token(monkeypatch, bucket_mgr):
     import server
 
@@ -1073,10 +1102,12 @@ async def test_import_review_delete_writes_tombstone_and_clears_embedding(
     monkeypatch, bucket_mgr, test_config
 ):
     import server
+    from memory_edges import MemoryEdgeStore
 
     bucket_id = await bucket_mgr.create(content="导入后复核删除。", name="复核删除")
     monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
     monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(server, "memory_edge_store", MemoryEdgeStore(test_config))
     embedding_engine = CapturingEmbeddingEngine()
     monkeypatch.setattr(server, "embedding_engine", embedding_engine)
 
@@ -1094,11 +1125,64 @@ async def test_import_review_delete_writes_tombstone_and_clears_embedding(
 
 
 @pytest.mark.asyncio
+async def test_dashboard_bulk_delete_skips_protected_and_cleans_indexes(
+    monkeypatch, bucket_mgr, test_config
+):
+    import server
+    from memory_edges import MemoryEdgeStore
+
+    regular_id = await bucket_mgr.create(
+        content="这条普通记忆准备用来批量删除。",
+        name="普通删除目标",
+    )
+    pinned_id = await bucket_mgr.create(
+        content="这条钉选记忆不能被批量删除。",
+        name="钉选保留目标",
+        pinned=True,
+        bucket_type="permanent",
+    )
+
+    edge_store = MemoryEdgeStore(test_config)
+    edge_store.add_edge(regular_id, pinned_id, "context_of", 0.9, "test edge")
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(server, "memory_edge_store", edge_store)
+    embedding_engine = CapturingEmbeddingEngine()
+    monkeypatch.setattr(server, "embedding_engine", embedding_engine)
+
+    response = await server.api_buckets_delete(
+        DummyRequest({
+            "bucket_ids": [regular_id, pinned_id, "missing_bucket"],
+            "confirm": "DELETE",
+        })
+    )
+    payload = json.loads(response.body)
+    tombstone_path = os.path.join(test_config["buckets_dir"], ".tombstones", f"{regular_id}.json")
+
+    assert response.status_code == 200
+    assert payload["deleted"] == 1
+    assert payload["skipped"] == 1
+    assert payload["not_found"] == 1
+    assert payload["results"][1]["status"] == "skipped"
+    assert payload["results"][1]["reason"] == "pinned"
+    assert await bucket_mgr.get(regular_id) is None
+    assert await bucket_mgr.get(pinned_id) is not None
+    assert os.path.exists(tombstone_path)
+    assert embedding_engine.deleted == [regular_id]
+    assert not [
+        edge for edge in edge_store.list_edges()
+        if edge["source"] == regular_id or edge["target"] == regular_id
+    ]
+
+
+@pytest.mark.asyncio
 async def test_breath_summary_includes_bucket_comments(monkeypatch, bucket_mgr, decay_eng):
     import server
 
+    user_display_name = server._identity()["user_display_name"]
     bucket_id = await bucket_mgr.create(
-        content="小雨把这段旧事留下。",
+        content=f"{user_display_name}把这段旧事留下。",
         name="带年轮浮现",
         domain=["恋爱"],
     )
@@ -1116,7 +1200,7 @@ async def test_breath_summary_includes_bucket_comments(monkeypatch, bucket_mgr, 
     result = await server.breath(max_results=1, include_core=False, include_related=False)
 
     assert f"[bucket_id:{bucket_id}]" in result
-    assert "小雨把这段旧事留下" in result
+    assert f"{user_display_name}把这段旧事留下" in result
     assert "后来再看，这里多了一圈新的年轮" in result
 
 
@@ -1394,6 +1478,8 @@ async def test_config_get_reports_effective_dream_engine_values(monkeypatch):
                 "enabled": False,
                 "auto_enabled": True,
                 "surface_enabled": False,
+                "inject_enabled": True,
+                "retain_after_inject": True,
                 "model": "config-model",
                 "base_url": "https://config.example",
             },
@@ -1418,9 +1504,66 @@ async def test_config_get_reports_effective_dream_engine_values(monkeypatch):
     assert payload["dream"]["enabled"] is True
     assert payload["dream"]["auto_enabled"] is False
     assert payload["dream"]["surface_enabled"] is True
+    assert payload["dream"]["inject_enabled"] is True
+    assert payload["dream"]["retain_after_inject"] is True
     assert payload["dream"]["model"] == "env-model"
     assert payload["dream"]["base_url"] == "https://env.example"
     assert payload["dream"]["api_key_masked"] == "env-...cret"
+
+
+@pytest.mark.asyncio
+async def test_config_get_reports_persona_and_reflection_api_values(monkeypatch):
+    import server
+
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(
+        server,
+        "config",
+        {
+            **server.config,
+            "reflection": {
+                **server.config.get("reflection", {}),
+                "auto_enabled": False,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        server,
+        "persona_engine",
+        SimpleNamespace(
+            enabled=False,
+            model="persona-model",
+            base_url="https://persona.example",
+            api_key="persona-secret",
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "reflection_engine",
+        SimpleNamespace(
+            enabled=True,
+            auto_enabled=False,
+            daily_enabled=True,
+            memory_affect_anchor_enabled=True,
+            relationship_weather_affect_anchor_enabled=False,
+            model="reflection-model",
+            base_url="https://reflection.example",
+            api_key="reflection-secret",
+        ),
+    )
+
+    response = await server.api_config_get(DummyRequest())
+    payload = json.loads(response.body)
+
+    assert payload["persona"]["enabled"] is False
+    assert payload["persona"]["model"] == "persona-model"
+    assert payload["persona"]["base_url"] == "https://persona.example"
+    assert payload["persona"]["api_key_masked"] == "pers...cret"
+    assert payload["reflection"]["enabled"] is True
+    assert payload["reflection"]["auto_enabled"] is False
+    assert payload["reflection"]["model"] == "reflection-model"
+    assert payload["reflection"]["base_url"] == "https://reflection.example"
+    assert payload["reflection"]["api_key_masked"] == "refl...cret"
 
 
 @pytest.mark.asyncio
@@ -1450,6 +1593,127 @@ async def test_config_get_reports_reflection_affect_anchor_switches(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_config_get_reports_gateway_memory_surfacing_switches(monkeypatch):
+    import server
+
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(
+        server,
+        "config",
+        {
+            **server.config,
+            "gateway": {
+                "cooldown_hours": 7,
+                "skip_recent_rounds": 4,
+                "recent_context_budget": 0,
+                "current_inner_state_interval_rounds": 15,
+            },
+        },
+    )
+
+    response = await server.api_config_get(DummyRequest())
+    payload = json.loads(response.body)
+
+    assert payload["gateway"]["cooldown_hours"] == 7
+    assert payload["gateway"]["skip_recent_rounds"] == 4
+    assert payload["gateway"]["recent_context_budget"] == 0
+    assert payload["gateway"]["current_inner_state_interval_rounds"] == 15
+
+
+@pytest.mark.asyncio
+async def test_config_update_persists_llm_keys_to_env_file(monkeypatch, test_config, tmp_path):
+    import server
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("OMBRE_API_KEY=old\nUNCHANGED=value\n", encoding="utf-8")
+    cfg = {
+        **test_config,
+        "persona": {
+            **test_config["persona"],
+            "enabled": True,
+            "model": "old-persona",
+            "base_url": "https://old-persona.example",
+        },
+        "reflection": {
+            **test_config.get("reflection", {}),
+            "enabled": True,
+            "auto_enabled": True,
+            "model": "old-reflection",
+            "base_url": "https://old-reflection.example",
+        },
+        "dream": {
+            **test_config.get("dream", {}),
+            "enabled": True,
+            "auto_enabled": True,
+            "model": "old-dream",
+            "base_url": "https://old-dream.example",
+        },
+    }
+    hot_update_calls = []
+
+    async def fake_hot_update(body):
+        hot_update_calls.append(body)
+        return "gateway_hot_reloaded"
+
+    monkeypatch.setenv("OMBRE_ENV_PATH", str(env_path))
+    for key in (
+        "OMBRE_API_KEY",
+        "OMBRE_EMBEDDING_API_KEY",
+        "OMBRE_PERSONA_API_KEY",
+        "OMBRE_REFLECTION_API_KEY",
+        "OMBRE_DREAM_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(server, "config", cfg)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(server, "_hot_update_gateway_config", fake_hot_update)
+
+    response = await server.api_config_update(
+        DummyRequest(
+            {
+                "dehydration": {"api_key": "dehy new"},
+                "embedding": {"api_key": "emb-new"},
+                "persona": {
+                    "enabled": False,
+                    "model": "persona-new",
+                    "base_url": "https://persona-new.example",
+                    "api_key": "persona-new-key",
+                },
+                "reflection": {
+                    "enabled": False,
+                    "auto_enabled": False,
+                    "model": "reflection-new",
+                    "base_url": "https://reflection-new.example",
+                    "api_key": "reflection-new-key",
+                },
+                "dream": {
+                    "enabled": False,
+                    "model": "dream-new",
+                    "base_url": "https://dream-new.example",
+                    "api_key": "dream-new-key",
+                },
+                "persist_env": True,
+            }
+        )
+    )
+    payload = json.loads(response.body)
+    env_text = env_path.read_text(encoding="utf-8")
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert "persisted_to_env" in payload["updated"]
+    assert "OMBRE_API_KEY=\"dehy new\"" in env_text
+    assert "OMBRE_EMBEDDING_API_KEY=emb-new" in env_text
+    assert "OMBRE_PERSONA_API_KEY=persona-new-key" in env_text
+    assert "OMBRE_REFLECTION_API_KEY=reflection-new-key" in env_text
+    assert "OMBRE_DREAM_API_KEY=dream-new-key" in env_text
+    assert "UNCHANGED=value" in env_text
+    assert os.environ["OMBRE_PERSONA_API_KEY"] == "persona-new-key"
+    assert hot_update_calls[-1]["persona"]["enabled"] is False
+    assert hot_update_calls[-1]["persona"]["api_key"] == "persona-new-key"
+
+
+@pytest.mark.asyncio
 async def test_config_persist_syncs_existing_runtime_yaml(monkeypatch, test_config, tmp_path):
     import server
 
@@ -1457,15 +1721,17 @@ async def test_config_persist_syncs_existing_runtime_yaml(monkeypatch, test_conf
     runtime_path = tmp_path / "state" / "config.runtime.yaml"
     runtime_path.parent.mkdir(exist_ok=True)
     config_path.write_text(
+        "persona:\n  enabled: true\n  model: persona-old\n  base_url: https://persona-old.example\n"
         "dream:\n  model: yaml-old\n"
-        "gateway:\n  cooldown_hours: 48\n  skip_recent_rounds: 9\n"
-        "reflection:\n  memory_affect_anchor_enabled: true\n",
+        "gateway:\n  cooldown_hours: 48\n  skip_recent_rounds: 9\n  recent_context_budget: 42\n  current_inner_state_interval_rounds: 8\n"
+        "reflection:\n  enabled: true\n  auto_enabled: true\n  model: reflection-old\n  base_url: https://reflection-old.example\n  memory_affect_anchor_enabled: true\n",
         encoding="utf-8",
     )
     runtime_path.write_text(
+        "persona:\n  enabled: true\n  model: persona-runtime-old\n  base_url: https://persona-runtime-old.example\n"
         "dream:\n  model: runtime-old\n"
-        "gateway:\n  cooldown_hours: 48\n  skip_recent_rounds: 9\n"
-        "reflection:\n  daily_enabled: false\n  memory_affect_anchor_enabled: true\n",
+        "gateway:\n  cooldown_hours: 48\n  skip_recent_rounds: 9\n  recent_context_budget: 42\n  current_inner_state_interval_rounds: 8\n"
+        "reflection:\n  enabled: true\n  auto_enabled: true\n  model: reflection-runtime-old\n  base_url: https://reflection-runtime-old.example\n  daily_enabled: false\n  memory_affect_anchor_enabled: true\n",
         encoding="utf-8",
     )
     cfg = {
@@ -1475,27 +1741,50 @@ async def test_config_persist_syncs_existing_runtime_yaml(monkeypatch, test_conf
             "enabled": True,
             "auto_enabled": True,
             "surface_enabled": True,
+            "inject_enabled": False,
+            "retain_after_inject": False,
             "model": "runtime-old",
             "base_url": "https://api.deepseek.com",
+        },
+        "persona": {
+            **test_config["persona"],
+            "enabled": True,
+            "model": "persona-runtime-old",
+            "base_url": "https://persona-runtime-old.example",
         },
         "gateway": {
             **test_config["gateway"],
             "cooldown_hours": 48,
             "skip_recent_rounds": 9,
+            "recent_context_budget": 42,
+            "current_inner_state_interval_rounds": 8,
         },
         "reflection": {
+            **test_config.get("reflection", {}),
+            "enabled": True,
+            "auto_enabled": True,
             "daily_enabled": False,
             "memory_affect_anchor_enabled": True,
             "relationship_weather_affect_anchor_enabled": False,
+            "model": "reflection-runtime-old",
+            "base_url": "https://reflection-runtime-old.example",
         },
     }
     reflection_engine = SimpleNamespace(
+        enabled=True,
+        auto_enabled=True,
         daily_enabled=False,
         memory_affect_anchor_enabled=True,
         relationship_weather_affect_anchor_enabled=False,
+        model="reflection-runtime-old",
+        base_url="https://reflection-runtime-old.example",
+        api_key="",
     )
 
-    async def fake_hot_update(_body):
+    hot_update_bodies = []
+
+    async def fake_hot_update(body):
+        hot_update_bodies.append(body)
         return "gateway_hot_reloaded"
 
     monkeypatch.setenv("OMBRE_CONFIG_PATH", str(config_path))
@@ -1508,12 +1797,31 @@ async def test_config_persist_syncs_existing_runtime_yaml(monkeypatch, test_conf
     response = await server.api_config_update(
         DummyRequest(
             {
-                "dream": {"auto_enabled": False, "model": "dream-new"},
-                "gateway": {"cooldown_hours": 6, "skip_recent_rounds": 5},
+                "persona": {
+                    "enabled": False,
+                    "model": "persona-new",
+                    "base_url": "https://persona-new.example",
+                },
+                "dream": {
+                    "auto_enabled": False,
+                    "inject_enabled": True,
+                    "retain_after_inject": True,
+                    "model": "dream-new",
+                },
+                "gateway": {
+                    "cooldown_hours": 6,
+                    "skip_recent_rounds": 5,
+                    "recent_context_budget": 300,
+                    "current_inner_state_interval_rounds": 15,
+                },
                 "reflection": {
+                    "enabled": False,
+                    "auto_enabled": False,
                     "daily_enabled": True,
                     "memory_affect_anchor_enabled": False,
                     "relationship_weather_affect_anchor_enabled": True,
+                    "model": "reflection-new",
+                    "base_url": "https://reflection-new.example",
                 },
                 "persist": True,
             }
@@ -1525,16 +1833,121 @@ async def test_config_persist_syncs_existing_runtime_yaml(monkeypatch, test_conf
     assert response.status_code == 200
     assert payload["ok"] is True
     assert "runtime_yaml_synced" in payload["updated"]
+    assert runtime_config["persona"]["enabled"] is False
+    assert runtime_config["persona"]["model"] == "persona-new"
+    assert runtime_config["persona"]["base_url"] == "https://persona-new.example"
     assert runtime_config["dream"]["model"] == "dream-new"
     assert runtime_config["dream"]["auto_enabled"] is False
+    assert runtime_config["dream"]["inject_enabled"] is True
+    assert runtime_config["dream"]["retain_after_inject"] is True
     assert runtime_config["gateway"]["cooldown_hours"] == 6
     assert runtime_config["gateway"]["skip_recent_rounds"] == 5
+    assert runtime_config["gateway"]["recent_context_budget"] == 300
+    assert runtime_config["gateway"]["current_inner_state_interval_rounds"] == 15
+    assert hot_update_bodies == [
+        {
+            "gateway": {
+                "cooldown_hours": 6,
+                "skip_recent_rounds": 5,
+                "recent_context_budget": 300,
+                "current_inner_state_interval_rounds": 15,
+            },
+            "persona": {
+                "enabled": False,
+                "model": "persona-new",
+                "base_url": "https://persona-new.example",
+            },
+            "dream": {
+                "inject_enabled": True,
+                "retain_after_inject": True,
+            },
+        }
+    ]
+    assert "gateway_hot_reloaded" in payload["updated"]
     assert runtime_config["reflection"]["daily_enabled"] is True
+    assert runtime_config["reflection"]["enabled"] is False
+    assert runtime_config["reflection"]["auto_enabled"] is False
     assert runtime_config["reflection"]["memory_affect_anchor_enabled"] is False
     assert runtime_config["reflection"]["relationship_weather_affect_anchor_enabled"] is True
+    assert runtime_config["reflection"]["model"] == "reflection-new"
+    assert runtime_config["reflection"]["base_url"] == "https://reflection-new.example"
     assert reflection_engine.daily_enabled is True
     assert reflection_engine.memory_affect_anchor_enabled is False
     assert reflection_engine.relationship_weather_affect_anchor_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_config_persist_without_persona_body_preserves_minimal_persona_yaml(
+    monkeypatch,
+    test_config,
+    tmp_path,
+):
+    import server
+
+    config_path = tmp_path / "config.yaml"
+    runtime_path = tmp_path / "state" / "config.runtime.yaml"
+    runtime_path.parent.mkdir(exist_ok=True)
+    minimal_persona = {"enabled": True, "profile_id": "lili_gege_main"}
+    config_path.write_text(
+        "persona:\n  enabled: true\n  profile_id: lili_gege_main\n"
+        "gateway:\n  cooldown_hours: 48\n",
+        encoding="utf-8",
+    )
+    runtime_path.write_text(
+        "persona:\n  enabled: true\n  profile_id: lili_gege_main\n"
+        "gateway:\n  cooldown_hours: 48\n",
+        encoding="utf-8",
+    )
+
+    cfg = {
+        **test_config,
+        "_runtime_config_path": str(runtime_path),
+        "persona": {
+            **test_config["persona"],
+            "profile_id": "lili_gege_main",
+            "model": "deepseek-v4-flash",
+            "base_url": "https://api.deepseek.com/v1",
+            "thinking_mode": "disabled",
+        },
+        "gateway": {
+            **test_config.get("gateway", {}),
+            "cooldown_hours": 48,
+        },
+    }
+    hot_update_calls = []
+
+    async def fake_hot_update(body):
+        hot_update_calls.append(dict(body or {}))
+        return "gateway_hot_reloaded"
+
+    monkeypatch.setenv("OMBRE_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(server, "config", cfg)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(server, "_hot_update_gateway_config", fake_hot_update)
+
+    response = await server.api_config_update(
+        DummyRequest(
+            {
+                "gateway": {"cooldown_hours": 6},
+                "persist": True,
+            }
+        )
+    )
+    payload = json.loads(response.body)
+    saved_text = config_path.read_text(encoding="utf-8")
+    runtime_text = runtime_path.read_text(encoding="utf-8")
+    saved_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    runtime_config = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert saved_text.index("persona:") < saved_text.index("gateway:")
+    assert runtime_text.index("persona:") < runtime_text.index("gateway:")
+    assert saved_config["persona"] == minimal_persona
+    assert runtime_config["persona"] == minimal_persona
+    assert "persona" not in hot_update_calls[-1]
+    assert saved_config["gateway"]["cooldown_hours"] == 6
+    assert runtime_config["gateway"]["cooldown_hours"] == 6
 
 
 def test_chatgpt_oauth_provider_issues_single_use_codes():
