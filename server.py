@@ -111,6 +111,7 @@ from persona_engine import PersonaStateEngine
 from reflection_engine import ReflectionEngine
 from recall_diagnostics import RecallDiagnosticsLogger
 from reranker_engine import RerankerEngine
+from scripts.migrate_affect_anchor_sections import plan_bucket_migration
 from source_refs import source_ref_window
 from word_map import WordMapStore, reflection_identity_terms
 from utils import (
@@ -942,6 +943,20 @@ def _has_favorite_reason(content: str) -> bool:
 
 def _favorite_reason_error() -> str:
     return "标记 favorite memory 需要在正文写明「### reflection」。旧的「喜欢它的原因」仍兼容。"
+
+
+def _normalize_memory_sections_for_write(content: str) -> str:
+    """Keep new tool-written buckets in the current moment/reflection/anchor shape."""
+    raw = str(content or "").strip()
+    if not raw:
+        return ""
+    migration = plan_bucket_migration(
+        {"id": "write_preview", "content": raw, "metadata": {"name": "write_preview"}},
+        body_only_moment="skip",
+    )
+    if migration:
+        return migration.new_content.strip()
+    return raw
 
 
 def _bucket_read_payload(bucket: dict) -> dict:
@@ -2232,6 +2247,7 @@ async def _merge_or_create(
     检查是否有相似桶可合并，有则合并，无则新建。
     返回 (桶ID, 显示名称, 是否合并)。
     """
+    content = _normalize_memory_sections_for_write(content)
     try:
         existing = await bucket_mgr.search(
             content,
@@ -2256,6 +2272,7 @@ async def _merge_or_create(
         ):
             try:
                 merged = await dehydrator.merge(bucket["content"], content)
+                merged = _normalize_memory_sections_for_write(merged)
                 old_v = bucket["metadata"].get("valence", 0.5)
                 old_a = bucket["metadata"].get("arousal", 0.3)
                 merged_valence = round((old_v + valence) / 2, 2)
@@ -5415,6 +5432,7 @@ async def hold(
     给旧记忆写年轮/再次阅读感受: 优先用 comment_bucket(bucket_id="...", content="...", kind="feel", valence=0.x, arousal=0.x)。
     无源记忆的碎碎念/悄悄话: 用 hold(content="...", whisper=True, valence=0.x, arousal=0.x),会存为独立 feel 并打 whisper 标签。
     新记忆本身值得偏爱: tags 可传 "haven_favorite,flavor_偏爱"; content 必须包含很短的 "### reflection" 段落。
+    正文结构: 事件/经历写 ### moment；Haven 的理解、确认、偏爱原因写 ### reflection；### affect_anchor 只放和弦、速度、力度等温度线。
     普通写入会新建 bucket,写 embedding,后台触发 ReflectionEngine 补 tags/confidence/memory_edges,并返回一条只读相关旧记忆。
     pinned=True 只给极少数核心准则,技术进度和运维细节不要钉选。
     feel=True 且带 source_bucket 是旧兼容入口,新调用不要使用；feel=True 但没有 source_bucket 会转为 whisper。
@@ -5481,6 +5499,8 @@ async def hold(
         # No source bucket: keep a standalone feel for compatibility.
         # 没有源记忆时保留独立 whisper，兼容旧用法。
         return await create_whisper_bucket()
+
+    content = _normalize_memory_sections_for_write(content)
 
     # --- Step 1: auto-tagging / 自动打标 ---
     try:
@@ -5593,6 +5613,7 @@ def _looks_like_operit_auto_grow_content(content: str) -> bool:
 async def grow(content: str, auto: bool = False, source: str = "", context: Context | None = None) -> str:
     """长内容摘记: 只给已经筛过、包含多个长期记忆点的片段; 不要把整篇日终日记、一天流水或完整情绪过程丢进来。
     content 应该是少量可长期召回的事实/偏好/承诺/项目状态; 服务端会拆成少量 bucket、写 embedding,并后台触发 enrich。
+    输出正文使用: ### moment 记录发生的事; ### reflection 记录 Haven 的理解/确认/偏爱原因; ### affect_anchor 只放和弦/速度/力度等温度线。
     如果只有单条明确事实,优先用 hold。若要给旧记忆追加年轮/喜欢原因,优先用 comment_bucket；若要改正文,先 read_bucket 再 trace(content=完整新正文)。
     Operit/worker 等自动总结入口传 source="operit" 或 auto=True，会先过轻量 surprise 门卫：低分只记日志，中分 pending，足够高或重复出现才真正写入。
     短内容(<30字)会走 hold-like 快速路径。
@@ -5617,6 +5638,7 @@ async def grow(content: str, auto: bool = False, source: str = "", context: Cont
         if not gate_decision.allow:
             return _format_write_gate_result(gate_decision)
     gate_prefix = f"{_format_write_gate_result(gate_decision)}\n" if gate_decision else ""
+    content = _normalize_memory_sections_for_write(content)
 
     # --- Short content fast path: skip digest, use hold logic directly ---
     # --- 短内容快速路径：跳过 digest 拆分，直接走 hold 逻辑省一次 API ---
@@ -5679,17 +5701,18 @@ async def grow(content: str, auto: bool = False, source: str = "", context: Cont
     for item in items:
         try:
             item_tags = item.get("tags", [])
+            item_content = _normalize_memory_sections_for_write(item.get("content", ""))
             item_classification = normalize_write_classification(
                 memory_subject=item.get("memory_subject", ""),
                 memory_layer=item.get("memory_layer", ""),
                 tags=item_tags,
-                content=item.get("content", ""),
+                content=item_content,
             )
-            if _has_favorite_tag(item_tags) and not _has_favorite_reason(item.get("content", "")):
+            if _has_favorite_tag(item_tags) and not _has_favorite_reason(item_content):
                 results.append("⚠️favorite 缺少 reflection")
                 continue
             bucket_id, result_name, is_merged, related_bucket = await _merge_or_create(
-                content=item["content"],
+                content=item_content,
                 tags=item_tags,
                 importance=item.get("importance", 5),
                 domain=item.get("domain", ["未分类"]),
@@ -6385,6 +6408,7 @@ async def api_create_memory(request):
         return JSONResponse({"error": "missing title"}, status_code=400)
     if not content:
         return JSONResponse({"error": "missing content"}, status_code=400)
+    content = _normalize_memory_sections_for_write(content)
 
     requested_id = body.get("id")
     bucket_id = str(requested_id).strip() if requested_id else None

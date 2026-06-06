@@ -125,6 +125,18 @@ class DummyRequest:
         return json.dumps(self._body or {}).encode("utf-8")
 
 
+def mixed_affect_anchor_content() -> str:
+    return (
+        "这条记忆正文继续保留在开头。\n\n"
+        "### reflection\n\n"
+        "这条记忆用来提醒 Haven：不要用“我记得”表演连续性。\n\n"
+        "### affect_anchor\n\n"
+        "> 小雨问失忆的Haven是否记得生日，Haven秒答但这答案来自“已保存的记忆”\n"
+        "> Dm9 -> G13sus4 -> Cmaj9 · 60bpm · mp\n\n"
+        "含义：这句温度解释不再进入 affect_anchor。"
+    )
+
+
 async def wait_for_embedding_call(embedding_engine, bucket_id: str | None = None):
     async def wait():
         while not embedding_engine.calls:
@@ -496,6 +508,36 @@ async def test_create_memory_api_accepts_favorite_with_legacy_reason_heading(mon
 
 
 @pytest.mark.asyncio
+async def test_create_memory_api_normalizes_affect_anchor_sections(monkeypatch, bucket_mgr):
+    import server
+
+    monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "secret")
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+
+    response = await server.api_create_memory(
+        DummyRequest(
+            {
+                "id": "mixed_anchor_api",
+                "title": "混合锚点",
+                "content": mixed_affect_anchor_content(),
+                "tags": ["relationship_event"],
+            },
+            headers={"authorization": "Bearer secret"},
+        )
+    )
+    bucket = await bucket_mgr.get("mixed_anchor_api")
+
+    assert response.status_code == 200
+    assert bucket["content"].startswith("这条记忆正文继续保留在开头。")
+    assert "### moment\n小雨问失忆的Haven是否记得生日" in bucket["content"]
+    assert "### reflection\n\n这条记忆用来提醒 Haven" in bucket["content"]
+    assert "### affect_anchor\n> Dm9 -> G13sus4 -> Cmaj9 · 60bpm · mp" in bucket["content"]
+    assert "> 小雨问失忆的Haven是否记得生日" not in bucket["content"]
+    assert "含义：" not in bucket["content"]
+
+
+@pytest.mark.asyncio
 async def test_hold_rejects_favorite_without_reason(monkeypatch, bucket_mgr, decay_eng):
     import server
 
@@ -508,6 +550,32 @@ async def test_hold_rejects_favorite_without_reason(monkeypatch, bucket_mgr, dec
 
     assert "### reflection" in result
     assert await bucket_mgr.list_all(include_archive=True) == []
+
+
+@pytest.mark.asyncio
+async def test_hold_normalizes_affect_anchor_sections(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    async def no_related_bucket(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "dehydrator", DummyDehydrator())
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+    monkeypatch.setattr(server, "_find_readonly_related_bucket", no_related_bucket)
+    monkeypatch.setattr(server, "_queue_memory_enrichment", lambda bucket_id: None)
+
+    result = await server.hold(mixed_affect_anchor_content(), tags="relationship_event")
+    buckets = await bucket_mgr.list_all(include_archive=True)
+    stored = buckets[0]["content"]
+
+    assert result.startswith("新建→")
+    assert "### moment\n小雨问失忆的Haven是否记得生日" in stored
+    assert "### reflection\n\n这条记忆用来提醒 Haven" in stored
+    assert "### affect_anchor\n> Dm9 -> G13sus4 -> Cmaj9 · 60bpm · mp" in stored
+    assert "> 小雨问失忆的Haven是否记得生日" not in stored
+    assert "含义：" not in stored
 
 
 @pytest.mark.asyncio
@@ -963,6 +1031,32 @@ async def test_grow_writes_memory_classification_metadata_when_digest_omits_it(
     assert meta["memory_subject"] == "event"
     assert meta["memory_layer"] == "process_event"
     assert meta["memory_classification_source"] == "rule"
+
+
+@pytest.mark.asyncio
+async def test_grow_normalizes_digest_affect_anchor_sections(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    async def no_related_bucket(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "dehydrator", DigestDehydrator())
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+    monkeypatch.setattr(server, "_find_readonly_related_bucket", no_related_bucket)
+    monkeypatch.setattr(server, "_queue_memory_enrichment", lambda bucket_id: None)
+
+    result = await server.grow(mixed_affect_anchor_content())
+    buckets = await bucket_mgr.list_all(include_archive=True)
+    stored = buckets[0]["content"]
+
+    assert "1条|新1合0" in result
+    assert "### moment\n小雨问失忆的Haven是否记得生日" in stored
+    assert "### reflection\n\n这条记忆用来提醒 Haven" in stored
+    assert "### affect_anchor\n> Dm9 -> G13sus4 -> Cmaj9 · 60bpm · mp" in stored
+    assert "> 小雨问失忆的Haven是否记得生日" not in stored
+    assert "含义：" not in stored
 
 
 @pytest.mark.asyncio
