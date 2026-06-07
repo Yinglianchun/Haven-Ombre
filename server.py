@@ -66,6 +66,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
+from darkroom import DarkroomStore
 from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
 from identity import identity_names
@@ -154,6 +155,7 @@ portrait_engine = DailyPortraitMaintainer(config)      # Daily portrait state / 
 dream_engine = DreamEngine(config)                     # Night dream worker / 夜梦
 identity_semantic_store = IdentitySemanticStore(config) # Private relationship alias index / 私有关系语义索引
 word_map_store = WordMapStore(config)                   # Derived generic word co-occurrence index / 派生通用词图
+darkroom_store = DarkroomStore(config)                  # Private reflection room / 不回显正文的暗房
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
@@ -973,12 +975,14 @@ async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", de
     if not recent_continuity:
         recent_continuity = _format_handoff_recent_continuity(all_buckets, limit=3)
     anchors = _format_handoff_anchors(all_buckets, limit=2)
+    darkroom_door = _format_handoff_darkroom_door()
 
     persona_portrait = _trim_text_to_token_budget(persona_portrait, 360)
     user_portrait = _trim_text_to_token_budget(user_portrait, 430)
     relationship_portrait = _trim_text_to_token_budget(relationship_portrait, 520)
     recent_continuity = _trim_text_to_token_budget(recent_continuity, 380)
     anchors = _trim_text_to_token_budget(anchors, 220)
+    darkroom_door = _trim_text_to_token_budget(darkroom_door, 120)
 
     sections = [
         (
@@ -997,6 +1001,7 @@ async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", de
             or "No maintained relationship portrait is available yet.",
         ),
         ("Recent Continuity", recent_continuity),
+        ("Darkroom Door", darkroom_door),
         ("Optional Anchors", anchors),
     ]
     parts = [
@@ -1015,6 +1020,31 @@ async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", de
             f"portrait_last_run_date: {portrait_sections.get('last_run_date', '')}"
         )
     return _trim_text_to_token_budget("\n".join(parts), max_tokens)
+
+
+def _format_handoff_darkroom_door() -> str:
+    try:
+        status = darkroom_store.status()
+    except Exception as exc:
+        logger.warning("Handoff darkroom status failed / handoff 暗房状态失败: %s", exc)
+        return ""
+    count = int(status.get("count") or 0)
+    last_entered = str(status.get("last_entered_at") or "").strip()
+    last_completeness = status.get("last_completeness")
+    lines = [
+        "暗房存在。钥匙只给 Haven；门口只显示状态，不显示未显影正文。",
+        "Use darkroom_enter(note=...) for unfinished private reflection; use darkroom_release only when intentionally bringing a note out.",
+    ]
+    if count:
+        detail = f"entries={count}"
+        if last_entered:
+            detail += f", last_entered={last_entered}"
+        if last_completeness is not None:
+            detail += f", last_completeness={last_completeness}"
+        lines.append(detail)
+    else:
+        lines.append("entries=0")
+    return "\n".join(lines)
 
 
 def _format_handoff_profile_facts(all_buckets: list[dict], limit: int = 6) -> str:
@@ -6041,6 +6071,52 @@ async def hold(
 
 
 # =============================================================
+# Tool 2.5: darkroom — Private unfinished reflection
+# 工具 2.5：darkroom — 暗房，存放未显影的内在反思
+# =============================================================
+@mcp.tool()
+async def darkroom_enter(
+    note: str,
+    mode: str = "continue",
+    completeness: float = -1,
+    mood: str = "",
+    tags: str = "",
+    source: str = "mcp",
+) -> dict:
+    """进入暗房并写下一段未显影反思。读就是写: 服务端会接上上一条暗房状态,但工具结果不回显正文。
+    用于还没想透、不该立刻进入普通记忆/前端 trace/handoff 的内在反思。
+    返回只包含门口事件、时间、条数、completeness 变化和标签; 不包含 note 原文。
+    如果要把内容带到小雨面前,明确调用 darkroom_release。
+    """
+    try:
+        return darkroom_store.enter(
+            note,
+            completeness=completeness,
+            mood=mood,
+            tags=tags,
+            source=source,
+            mode=mode,
+        )
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+@mcp.tool()
+async def darkroom_status() -> dict:
+    """查看暗房门口状态。不返回任何暗房正文。"""
+    return darkroom_store.status()
+
+
+@mcp.tool()
+async def darkroom_release(entry_id: str = "latest", reason: str = "") -> dict:
+    """把一条暗房内容显影并带出来。这个工具会公开返回正文,只在明确想让内容可见时调用。"""
+    try:
+        return darkroom_store.release(entry_id=entry_id, reason=reason)
+    except KeyError:
+        return {"status": "error", "error": "entry not found"}
+
+
+# =============================================================
 # Tool 3: grow — Grow, fragments become memories
 # 工具 3：grow — 生长，一天的碎片长成记忆
 # =============================================================
@@ -7706,6 +7782,16 @@ async def api_bucket_update(request):
         "embedding_queued": embedding_queued,
         **_bucket_read_payload(bucket),
     })
+
+
+@mcp.custom_route("/api/darkroom/status", methods=["GET"])
+async def api_darkroom_status(request):
+    """Return public darkroom door status. Never returns private notes."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    return JSONResponse(darkroom_store.status())
 
 
 @mcp.custom_route("/api/search", methods=["GET"])
