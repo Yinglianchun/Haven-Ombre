@@ -772,6 +772,11 @@ class BucketManager:
         计算文本维度的相关性得分。
         """
         meta = bucket.get("metadata", {})
+        searchable_content = strip_affect_anchor(strip_wikilinks(str(bucket.get("content", ""))))[:1000]
+
+        short_cjk_query = self._short_cjk_topic_query(query)
+        if short_cjk_query:
+            return self._calc_short_cjk_topic_score(short_cjk_query, meta, searchable_content)
 
         name_score = fuzz.partial_ratio(query, meta.get("name", "")) * 3
         domain_score = (
@@ -788,10 +793,41 @@ class BucketManager:
             )
             * 2
         )
-        searchable_content = strip_affect_anchor(strip_wikilinks(str(bucket.get("content", ""))))[:1000]
         content_score = fuzz.partial_ratio(query, searchable_content) * self.content_weight
 
         return (name_score + domain_score + tag_score + content_score) / (100 * (3 + 2.5 + 2 + self.content_weight))
+
+    @staticmethod
+    def _short_cjk_topic_query(query: str) -> str:
+        compact = re.sub(
+            r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+",
+            "",
+            str(query or ""),
+        )
+        if re.fullmatch(r"[\u4e00-\u9fff]{1,3}", compact):
+            return compact
+        return ""
+
+    def _calc_short_cjk_topic_score(self, query: str, meta: dict, searchable_content: str) -> float:
+        def exact(value: object) -> int:
+            return 100 if query in str(value or "") else 0
+
+        name_score = exact(meta.get("name")) * 3
+        domain_score = max((exact(d) for d in meta.get("domain", []) or []), default=0) * 2.5
+        tag_score = max((exact(tag) for tag in meta.get("tags", []) or []), default=0) * 2
+        content_score = exact(searchable_content) * self.content_weight
+        weighted = name_score + domain_score + tag_score + content_score
+        if weighted <= 0:
+            return 0.0
+
+        score = weighted / (100 * (3 + 2.5 + 2 + self.content_weight))
+        if content_score:
+            score = max(score, 0.36)
+        if domain_score or tag_score:
+            score = max(score, 0.45)
+        if name_score:
+            score = max(score, 0.50)
+        return min(1.0, score)
 
     # ---------------------------------------------------------
     # Emotion resonance sub-score:

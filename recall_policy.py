@@ -71,6 +71,22 @@ WEAK_RECALL_TOPIC_TERMS = frozenset(
         "topic",
     }
 )
+GENERIC_RECALL_CONTEXT_TERMS = frozenset(
+    {
+        "ai_name",
+        "assistant",
+        "display_name",
+        "human_name",
+        "user",
+        "user_alias",
+        "user_aliases",
+        "user_display_name",
+        "user_name",
+        "username",
+        "对方",
+        "用户",
+    }
+)
 OLD_OR_RESOLVED_QUERY_MARKERS = frozenset(
     {
         "冲突",
@@ -487,6 +503,9 @@ class RecallPolicy:
         self.ai_reaction_names = self._normalize_reaction_names(
             ai_reaction_names if ai_reaction_names is not None else [identity_names().get("ai_name")]
         )
+        self.recall_context_terms = self._normalize_recall_context_terms(
+            [*self.options.context_terms, *GENERIC_RECALL_CONTEXT_TERMS]
+        )
 
     def requires_topic_evidence(self, query: str) -> bool:
         return query_has_explicit_entity_marker(query) or query_has_technical_recall_marker(query)
@@ -664,6 +683,23 @@ class RecallPolicy:
                 names.add(key)
         return names
 
+    @staticmethod
+    def _normalize_recall_context_terms(values) -> set[str]:
+        terms: set[str] = set()
+        for value in values or []:
+            key = re.sub(r"\s+", " ", str(value or "").strip().lower())
+            if key:
+                terms.add(key)
+            compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", key)
+            if compact:
+                terms.add(compact)
+        return terms
+
+    def _is_recall_context_term(self, term: str) -> bool:
+        key = re.sub(r"\s+", " ", str(term or "").strip().lower())
+        compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", key)
+        return key in self.recall_context_terms or compact in self.recall_context_terms
+
     def _is_probe_only_query(self, query: str) -> bool:
         text = str(query or "").strip().lower()
         if not text:
@@ -801,6 +837,8 @@ class RecallPolicy:
             if key in seen:
                 continue
             if key in WEAK_RECALL_TOPIC_TERMS:
+                continue
+            if self._is_recall_context_term(cleaned):
                 continue
             if re.fullmatch(r"[a-z0-9_.:-]+", key) and len(key) < 3 and not re.fullmatch(r"\d+(?:\.\d+)+", key):
                 continue

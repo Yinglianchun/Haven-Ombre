@@ -1,3 +1,4 @@
+from memory_relevance import memory_relevance_options_from_config
 from recall_policy import RecallPolicy
 
 
@@ -169,6 +170,30 @@ def test_topic_evidence_terms_are_filtered_once_in_policy():
 
     assert policy.specific_query_terms("FF14 进度 偏好") == ["FF14"]
     assert policy.specific_query_terms("v2.0 状态") == ["v2.0"]
+
+
+def test_identity_aliases_are_not_recall_topic_evidence():
+    options = memory_relevance_options_from_config(
+        {
+            "identity": {
+                "ai_name": "Lapis",
+                "user_name": "Nina",
+                "user_display_name": "妮娜",
+                "user_aliases": ["主人", "她"],
+            }
+        }
+    )
+    policy = RecallPolicy(options=options, ai_reaction_names=["Lapis"])
+
+    assert policy.specific_query_terms("Nina 妮娜 Lapis user username 主人") == []
+    assert policy.specific_query_terms("Nina FF14 进度") == ["FF14"]
+    assert not policy.bucket_has_topic_evidence(
+        "Nina",
+        {
+            "content": "Nina 和 Lapis 的日常记录。",
+            "metadata": {"name": "妮娜画像", "tags": ["主人"], "domain": ["关系"]},
+        },
+    )
 
 
 def test_bucket_topic_evidence_uses_content_title_tags_domain_but_not_comments():

@@ -293,6 +293,30 @@ class TestSearchScoring:
 
         assert bucket_mgr._calc_topic_score("UNIQUE_YEAR_RING_TOKEN", bucket) == 0
 
+    def test_short_cjk_topic_score_requires_exact_substring(self, bucket_mgr):
+        bucket = {
+            "content": "小雨和 Haven 的日常记忆。",
+            "metadata": {
+                "name": "小雨与Haven的爱",
+                "domain": ["恋爱"],
+                "tags": [],
+            },
+        }
+
+        assert bucket_mgr._calc_topic_score("小狗", bucket) == 0
+
+    def test_short_cjk_body_exact_match_keeps_single_character_recall(self, bucket_mgr):
+        bucket = {
+            "content": "这里记录了忠犬设定和角色称呼。",
+            "metadata": {
+                "name": "少女暴君与成男艳后",
+                "domain": ["恋爱"],
+                "tags": [],
+            },
+        }
+
+        assert bucket_mgr._calc_topic_score("犬", bucket) >= 0.36
+
     @pytest.mark.asyncio
     async def test_resolved_bucket_penalized_in_normalized(self, populated_env):
         """Resolved buckets get ×0.3 in normalized score (breath-debug logic)."""
