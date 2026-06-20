@@ -6420,6 +6420,29 @@ def test_gateway_query_planner_skips_operational_task_without_recall(
     )
 
 
+def test_moment_graph_signature_includes_explicit_edges():
+    buckets = [
+        {
+            "id": "a",
+            "content": "source",
+            "metadata": {"name": "A", "type": "dynamic"},
+        },
+        {
+            "id": "b",
+            "content": "target",
+            "metadata": {"name": "B", "type": "dynamic"},
+        },
+    ]
+
+    without_edge = GatewayService._moment_graph_signature(buckets, [])
+    with_edge = GatewayService._moment_graph_signature(
+        buckets,
+        [{"source": "a", "target": "b", "relation_type": "relates_to", "confidence": 0.8}],
+    )
+
+    assert without_edge != with_edge
+
+
 def test_gateway_query_planner_falls_back_when_emotional_reason_model_is_empty(
     monkeypatch,
     test_config,

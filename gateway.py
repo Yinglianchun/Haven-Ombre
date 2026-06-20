@@ -6135,7 +6135,8 @@ class GatewayService:
         all_buckets: list[dict],
     ) -> tuple[list[dict], dict[str, list[dict]], list[dict]]:
         recallable_buckets = [bucket for bucket in all_buckets if not is_self_anchor_bucket(bucket)]
-        signature = self._moment_graph_signature(recallable_buckets)
+        bucket_edges = self.memory_edge_store.list_edges()
+        signature = self._moment_graph_signature(recallable_buckets, bucket_edges)
         if (
             signature
             and signature == self._moment_graph_cache_signature
@@ -6146,14 +6147,14 @@ class GatewayService:
         moments = self._recallable_moments(self.memory_moment_store.list_all())
         grouped = self._moments_by_bucket(moments)
         edges = self.memory_moment_store.list_edges()
-        edges.extend(self._bucket_edges_as_moment_edges(self.memory_edge_store.list_edges(), grouped))
+        edges.extend(self._bucket_edges_as_moment_edges(bucket_edges, grouped))
         value = (moments, grouped, edges)
         self._moment_graph_cache_signature = signature
         self._moment_graph_cache_value = value
         return value
 
     @staticmethod
-    def _moment_graph_signature(buckets: list[dict]) -> str:
+    def _moment_graph_signature(buckets: list[dict], bucket_edges: list[dict] | None = None) -> str:
         digest = hashlib.sha1()
         for bucket in sorted(buckets or [], key=lambda item: str(item.get("id") or "")):
             meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
@@ -6180,6 +6181,23 @@ class GatewayService:
                 "id": bucket.get("id"),
                 "content": bucket.get("content"),
                 "metadata": structural_meta,
+            }
+            digest.update(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8"))
+            digest.update(b"\n")
+        for edge in sorted(
+            bucket_edges or [],
+            key=lambda item: (
+                str(item.get("source") or item.get("source_memory_id") or ""),
+                str(item.get("target") or item.get("target_memory_id") or ""),
+                str(item.get("relation_type") or item.get("type") or ""),
+            ),
+        ):
+            payload = {
+                "source": edge.get("source") or edge.get("source_memory_id"),
+                "target": edge.get("target") or edge.get("target_memory_id"),
+                "relation_type": edge.get("relation_type") or edge.get("type"),
+                "confidence": edge.get("confidence"),
+                "reason": edge.get("reason"),
             }
             digest.update(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8"))
             digest.update(b"\n")
