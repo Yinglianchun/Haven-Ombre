@@ -23,6 +23,7 @@ DEFAULT_FACET_ALIASES = {
     ),
     "intimacy": (
         "intimacy",
+        "亲密",
     ),
     "embodiment": (
         "embodiment",
@@ -185,6 +186,10 @@ DEFAULT_CONFLICTS = {
     "communication_action": ("hardware_protocol",),
 }
 CAREER_GENERIC_DIRECT_TERMS = frozenset({"工作"})
+_FACETS_FOR_TEXT_CACHE: dict[tuple[int, str], tuple[tuple[str, float], ...]] = {}
+_FACETS_FOR_TEXT_CACHE_MAX = 512
+_CONTENT_TERMS_CACHE: dict[tuple[int, str], tuple[str, ...]] = {}
+_CONTENT_TERMS_CACHE_MAX = 512
 
 TECHNICAL_RECALL_STRONG_TERMS = frozenset(
     {
@@ -463,10 +468,19 @@ def facets_for_text(
     options: MemoryRelevanceOptions | None = None,
 ) -> dict[str, float]:
     options = options or memory_relevance_options_from_config()
-    return _facet_scores(
+    raw_text = str(text or "")
+    cache_key = (id(options), raw_text)
+    cached = _FACETS_FOR_TEXT_CACHE.get(cache_key)
+    if cached is not None:
+        return dict(cached)
+    scores = _facet_scores(
         (("text", str(text or ""), 1.0),),
         options,
     )
+    if len(_FACETS_FOR_TEXT_CACHE) >= _FACETS_FOR_TEXT_CACHE_MAX:
+        _FACETS_FOR_TEXT_CACHE.clear()
+    _FACETS_FOR_TEXT_CACHE[cache_key] = tuple(scores.items())
+    return scores
 
 
 def facets_for_node(
@@ -545,6 +559,11 @@ def content_terms_for_query(
     options: MemoryRelevanceOptions | None = None,
 ) -> list[str]:
     options = options or memory_relevance_options_from_config()
+    raw_query = str(query or "")
+    cache_key = (id(options), raw_query)
+    cached = _CONTENT_TERMS_CACHE.get(cache_key)
+    if cached is not None:
+        return list(cached)
     focus = recall_focus_query(query, options)
     topic = recall_topic_query(query, options)
     terms: list[str] = []
@@ -561,7 +580,11 @@ def content_terms_for_query(
         for term in terms
         if not _is_context_term(term, options.context_terms)
     ]
-    return _unique(content_terms or terms)
+    result = _unique(content_terms or terms)
+    if len(_CONTENT_TERMS_CACHE) >= _CONTENT_TERMS_CACHE_MAX:
+        _CONTENT_TERMS_CACHE.clear()
+    _CONTENT_TERMS_CACHE[cache_key] = tuple(result)
+    return result
 
 
 def emotional_recall_plan(

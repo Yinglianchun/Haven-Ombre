@@ -67,6 +67,7 @@ class DummyPersonaEngine:
         assistant_response: str,
         recalled_memory_ids: list[str] | None = None,
         tool_summary: str = "",
+        recent_conversation_turns: list[dict] | None = None,
     ) -> dict:
         return self.get_current_state(session_id)
 

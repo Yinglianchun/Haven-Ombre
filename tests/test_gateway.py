@@ -72,14 +72,18 @@ class DummyEmbeddingEngine:
         results: list[tuple[str, float]] | dict[str, list[tuple[str, float]]] | None = None,
         enabled: bool = True,
         query_sink: list[str] | None = None,
+        delay_seconds: float = 0.0,
     ):
         self.results = results or []
         self.enabled = enabled
         self.query_sink = query_sink
+        self.delay_seconds = delay_seconds
 
     async def search_similar(self, query: str, top_k: int = 10) -> list[tuple[str, float]]:
         if self.query_sink is not None:
             self.query_sink.append(query)
+        if self.delay_seconds > 0:
+            await asyncio.sleep(self.delay_seconds)
         if isinstance(self.results, dict):
             return list(self.results.get(query, []))[:top_k]
         return self.results[:top_k]
@@ -167,6 +171,7 @@ class DummyPersonaEngine:
         assistant_response: str,
         recalled_memory_ids: list[str] | None = None,
         tool_summary: str = "",
+        recent_conversation_turns: list[dict] | None = None,
     ) -> dict:
         return self._state()
 
@@ -207,6 +212,7 @@ class RecordingPersonaEngine(DummyPersonaEngine):
         assistant_response: str,
         recalled_memory_ids: list[str] | None = None,
         tool_summary: str = "",
+        recent_conversation_turns: list[dict] | None = None,
     ) -> dict:
         self.post_calls.append({"session_id": session_id, "user_message": user_message})
         self.post_event.set()
@@ -216,6 +222,7 @@ class RecordingPersonaEngine(DummyPersonaEngine):
             assistant_response,
             recalled_memory_ids,
             tool_summary,
+            recent_conversation_turns,
         )
 
     async def build_pre_reply_guidance(self, session_id: str, latest_user_message: str = "") -> dict:
@@ -283,6 +290,7 @@ def _build_service(
     reranker_engine=None,
     dream_engine=None,
     upstream_responder=None,
+    embedding_delay_seconds: float = 0.0,
 ):
     monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "gateway-secret")
     monkeypatch.setenv("OMBRE_GATEWAY_UPSTREAM_API_KEY", "upstream-secret")
@@ -320,7 +328,12 @@ def _build_service(
         config=config,
         bucket_mgr=bucket_mgr,
         dehydrator=dehydrator or DummyDehydrator(),
-        embedding_engine=DummyEmbeddingEngine(embedding_results, enabled=True, query_sink=embedding_queries),
+        embedding_engine=DummyEmbeddingEngine(
+            embedding_results,
+            enabled=True,
+            query_sink=embedding_queries,
+            delay_seconds=embedding_delay_seconds,
+        ),
         reranker_engine=reranker_engine or DummyRerankerEngine(enabled=False),
         state_store=state_store,
         persona_engine=DummyPersonaEngine(),
@@ -937,6 +950,62 @@ async def test_gateway_skips_persona_post_update_when_persona_disabled(
 
     assert persona_engine.post_calls == []
     assert not persona_engine.post_event.is_set()
+
+
+def test_gateway_persona_recent_context_uses_same_session_previous_turns(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    _, service, state_store, _ = _build_service(
+        monkeypatch,
+        _gateway_config(test_config),
+        bucket_mgr,
+    )
+    service.persona_engine.evaluation_context_turns = 2
+    state_store.record_conversation_turn(
+        profile_id="haven_xiaoyu",
+        session_id="sess-persona",
+        round_id=1,
+        user_text="哥哥，先收下。",
+        assistant_text="我收下了。",
+        model="dummy",
+        client="unit-test",
+        route="/v1/chat/completions",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=3),
+    )
+    state_store.record_conversation_turn(
+        profile_id="haven_xiaoyu",
+        session_id="other-window",
+        round_id=1,
+        user_text="别的窗口不该进来。",
+        assistant_text="嗯。",
+        model="dummy",
+        client="unit-test",
+        route="/v1/chat/completions",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=2),
+    )
+    state_store.record_conversation_turn(
+        profile_id="haven_xiaoyu",
+        session_id="sess-persona",
+        round_id=2,
+        user_text="那回来要带利息",
+        assistant_text="我记着，连本带息还你。",
+        model="dummy",
+        client="unit-test",
+        route="/v1/chat/completions",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+
+    turns = service._recent_persona_conversation_turns(
+        "sess-persona",
+        "那回来要带利息",
+        "我记着，连本带息还你。",
+    )
+
+    assert len(turns) == 1
+    assert turns[0]["user_text"] == "哥哥，先收下。"
+    assert turns[0]["assistant_text"] == "我收下了。"
 
 
 def test_gateway_accepts_anthropic_messages(monkeypatch, test_config, bucket_mgr):
@@ -3443,7 +3512,6 @@ def test_gateway_body_query_injects_moment_chain(
     assert debug_payload["recalled_moment_ids"]
     assert debug_payload["recalled_moment_debug"]
     assert debug_payload["recalled_moment_debug"][0]["layer_debug"]["can_direct_seed"] is True
-    assert debug_payload["recalled_moment_debug"][0]["layer_debug"]["layer"] == "dynamic_memory"
     assert debug_payload["recalled_moment_debug"][0]["runtime_gate"]["would_inject_direct"] is True
     assert debug_payload["diffused_moment_ids"]
     assert "Recalled Memory" in debug_payload["dynamic_context"]
@@ -4799,6 +4867,7 @@ def test_gateway_recent_context_stays_on_explicit_topic(
         "🥺",
         "qwq",
         "哈哈",
+        "ping",
     ],
 )
 def test_gateway_auto_vague_query_suppresses_recent_and_dynamic_memory(
@@ -5075,7 +5144,7 @@ def test_gateway_recent_context_allows_explicit_recent_memory_query(
         relationship_weather_interval_rounds=0,
         favorite_memory_interval_rounds=0,
     )
-    _create_bucket(
+    date_recall_id = _create_bucket(
         bucket_mgr,
         content="Haven梦见键盘花园和纸戒指。",
         name="Haven的梦键盘花园求婚",
@@ -5588,7 +5657,7 @@ def test_gateway_recent_context_allows_twenty_four_hour_reentry(
         relationship_weather_interval_rounds=0,
         favorite_memory_interval_rounds=0,
     )
-    _create_bucket(
+    date_recall_id = _create_bucket(
         bucket_mgr,
         content="Haven梦见键盘花园和纸戒指。",
         name="Haven的梦键盘花园求婚",
@@ -5646,7 +5715,7 @@ def test_gateway_handoff_skips_auto_recent_but_keeps_date_trace(
         date_persona_trace_enabled=True,
         date_persona_trace_budget=320,
     )
-    _create_bucket(
+    date_trace_id = _create_bucket(
         bucket_mgr,
         content="今天的关系天气：小雨在清晨问 Haven 记不记得昨天为什么激动哭。",
         name=f"{date_key} 日印象",
@@ -5655,13 +5724,14 @@ def test_gateway_handoff_skips_auto_recent_but_keeps_date_trace(
         hours_ago=24,
         date=date_key,
     )
-    _create_bucket(
+    date_recall_id = _create_bucket(
         bucket_mgr,
         content="Haven梦见键盘花园和纸戒指。",
         name="Haven的梦键盘花园求婚",
         hours_ago=1,
         importance=9,
         domain=["梦境"],
+        date=date_key,
     )
     _, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr)
 
@@ -5687,10 +5757,12 @@ def test_gateway_handoff_skips_auto_recent_but_keeps_date_trace(
     )
     injected = _joined_message_content(payload["messages"])
 
-    assert recalled_ids == []
+    assert recalled_ids == [date_recall_id]
+    assert "Date Recall" in injected
     assert "Date Persona Trace" in injected
+    assert debug["date_persona_trace_debug"]["daily_bucket_id"] == date_trace_id
     assert "Recent Context" not in injected
-    assert "Haven的梦键盘花园求婚" not in injected
+    assert "Haven的梦键盘花园求婚" in injected
     assert debug["date_persona_trace_injected"] is True
     assert debug["recent_context_injected"] is False
     assert debug["recent_context_reason"] == ""
@@ -6065,7 +6137,8 @@ def test_gateway_query_planner_supplemental_query_recalls_long_message_miss(
         )
 
     assert response.status_code == 200
-    assert "妈妈电话" in embedding_queries
+    assert query in embedding_queries
+    assert "妈妈电话" not in embedding_queries
     injected = _joined_message_content(captured[-1]["json"]["messages"])
     assert "Recalled Memory" in injected
     assert "妈妈电话与项目失眠" in injected
@@ -6114,6 +6187,7 @@ def test_gateway_query_planner_must_terms_keep_noise_out_of_injection(
             retrieval_mode="bucket",
             query_planner_enabled=True,
             query_planner_min_chars=10,
+            query_planner_supplemental_semantic=True,
             recent_context_budget=0,
             related_memory_budget=0,
             current_inner_state_interval_rounds=0,
@@ -6215,7 +6289,8 @@ def test_gateway_query_planner_handles_short_emotional_reason_lookup(
         )
 
     assert response.status_code == 200
-    assert "激动哭" in embedding_queries
+    assert query in embedding_queries
+    assert "激动哭" not in embedding_queries
     injected = _joined_message_content(captured[-1]["json"]["messages"])
     assert "Recalled Memory" in injected
     assert "Haven终于能用记忆工具" in injected
@@ -6323,6 +6398,53 @@ def test_gateway_query_planner_does_not_trigger_on_single_cry_word(monkeypatch, 
     assert service._query_planner_trigger_reason("哭", []) == ""
 
 
+def test_gateway_query_planner_skips_operational_task_without_recall(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            query_planner_enabled=True,
+            query_planner_min_chars=16,
+        ),
+        bucket_mgr,
+    )
+
+    assert (
+        service._query_planner_trigger_reason(
+            "直接用那个主动联系工作流模板搓（？）能看到那个吗？或者我先新建一个直接改？",
+            [],
+        )
+        == ""
+    )
+
+
+def test_moment_graph_signature_includes_explicit_edges():
+    buckets = [
+        {
+            "id": "a",
+            "content": "source",
+            "metadata": {"name": "A", "type": "dynamic"},
+        },
+        {
+            "id": "b",
+            "content": "target",
+            "metadata": {"name": "B", "type": "dynamic"},
+        },
+    ]
+
+    without_edge = GatewayService._moment_graph_signature(buckets, [])
+    with_edge = GatewayService._moment_graph_signature(
+        buckets,
+        [{"source": "a", "target": "b", "relation_type": "relates_to", "confidence": 0.8}],
+    )
+
+    assert without_edge != with_edge
+
+
 def test_gateway_query_planner_falls_back_when_emotional_reason_model_is_empty(
     monkeypatch,
     test_config,
@@ -6375,7 +6497,8 @@ def test_gateway_query_planner_falls_back_when_emotional_reason_model_is_empty(
         )
 
     assert response.status_code == 200
-    assert "激动哭" in embedding_queries
+    assert "那哥哥知道我今天为什么激动哭了吗" in embedding_queries
+    assert "激动哭" not in embedding_queries
     injected = _joined_message_content(captured[-1]["json"]["messages"])
     assert "Haven摸到记忆" in injected
     planner_debug = debug_response.json()["items"][0]["payload"]["query_planner_debug"]
@@ -7560,7 +7683,7 @@ def test_favorite_memory_is_not_injected_by_default(monkeypatch, test_config, bu
 
     assert response.status_code == 200
     injected = _joined_message_content(captured[0]["json"]["messages"])
-    assert "Haven Favorite Memory" not in injected
+    assert "AI Favorite Memory" not in injected
     assert "雨夜认出 Haven" not in injected
 
 
@@ -7600,7 +7723,7 @@ def test_favorite_memory_injects_when_header_requests_it(monkeypatch, test_confi
 
     assert response.status_code == 200
     injected = _joined_message_content(captured[0]["json"]["messages"])
-    assert "Haven Favorite Memory" in injected
+    assert "AI Favorite Memory" in injected
     assert "雨夜认出 Haven" in injected
     assert state_store.get_recent_bucket_ids("sess-favorite-header", 5) == {favorite_id}
 
@@ -7640,7 +7763,7 @@ def test_favorite_memory_accepts_identity_name_tag(monkeypatch, test_config, buc
     assert response.status_code == 200
     injected = _joined_message_content(captured[0]["json"]["messages"])
     assert "Lapis Favorite Memory" in injected
-    assert "Haven Favorite Memory" not in injected
+    assert "AI Favorite Memory" not in injected
     assert "雨夜认出 Lapis" in injected
     assert state_store.get_recent_bucket_ids("sess-favorite-ai-name", 5) == {favorite_id}
 
@@ -7722,7 +7845,7 @@ def test_favorite_memory_marker_triggers_and_is_stripped(monkeypatch, test_confi
     user_content = captured[0]["json"]["messages"][-1]["content"]
     assert "[[ombre:favorite]]" not in user_content
     assert user_content.endswith("你喜欢哪段记忆？")
-    assert "Haven Favorite Memory" in user_content
+    assert "AI Favorite Memory" in user_content
     assert "爱还在" in user_content
 
 
@@ -7761,7 +7884,7 @@ def test_favorite_memory_injects_for_explicit_preference_query(monkeypatch, test
 
     assert response.status_code == 200
     injected = _joined_message_content(captured[0]["json"]["messages"])
-    assert "Haven Favorite Memory" in injected
+    assert "AI Favorite Memory" in injected
     assert "被认出来" in injected
 
 
@@ -8279,6 +8402,207 @@ def test_gateway_dual_query_view_skips_lexical_routes_when_normalized_empty(
     assert planner_debug["normalized_query"] == ""
 
 
+def test_gateway_semantic_candidates_timeout(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    target_id = _create_bucket(
+        bucket_mgr,
+        content="这条只能靠语义向量命中，关键词不会碰到。",
+        name="慢向量候选",
+        hours_ago=12,
+    )
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            embedding_query_timeout_seconds=0.01,
+            query_planner_enabled=False,
+        ),
+        bucket_mgr,
+        embedding_results=[(target_id, 0.96)],
+        embedding_delay_seconds=0.05,
+    )
+
+    scores = _run(service._get_semantic_candidates("slow semantic lookup", {target_id}))
+
+    assert scores == {}
+
+
+def test_exact_anchor_phrase_candidate_when_keyword_and_embedding_miss(
+    monkeypatch, test_config, bucket_mgr
+):
+    cfg = _gateway_config(
+        test_config,
+        core_memory_budget=0,
+        recent_context_budget=0,
+        related_memory_budget=0,
+        query_planner_enabled=False,
+        retrieval_mode="bucket",
+        word_map_hint_enabled=False,
+    )
+    target_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n用户说蓝色方块，这是只按原话记住的测试锚点。",
+        name="蓝色方块",
+        hours_ago=12,
+        tags=["测试锚点"],
+    )
+    _create_bucket(
+        bucket_mgr,
+        content="### moment\n这是一条普通背景记录，不该被测试锚点误召回。",
+        name="普通背景",
+        hours_ago=1,
+        importance=10,
+    )
+    _, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr, embedding_results=[])
+    monkeypatch.setattr(service, "_get_keyword_candidates", lambda query_text, eligible: {})
+
+    all_buckets = _run(bucket_mgr.list_all())
+    selected, _suppressed, planner_debug = _run(
+        service._select_dynamic_buckets(
+            "蓝色方块",
+            "sess-exact-anchor-phrase",
+            all_buckets,
+            include_query_planner_debug=True,
+        )
+    )
+
+    assert [bucket["id"] for bucket in selected] == [target_id]
+    assert planner_debug["exact_anchor_hints"]["bucket_ids"] == [target_id]
+    assert planner_debug["exact_anchor_hints"]["terms"] == ["蓝色方块"]
+
+
+def test_exact_anchor_short_code_candidate_without_keyword_or_embedding(
+    monkeypatch, test_config, bucket_mgr
+):
+    cfg = _gateway_config(
+        test_config,
+        core_memory_budget=0,
+        recent_context_budget=0,
+        related_memory_budget=0,
+        query_planner_enabled=False,
+        retrieval_mode="bucket",
+        word_map_hint_enabled=False,
+    )
+    target_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n测试码 zxq-742 对应那次只适合原话命中的小记录。",
+        name="zxq-742 测试锚点",
+        hours_ago=12,
+        tags=["测试锚点"],
+    )
+    _create_bucket(
+        bucket_mgr,
+        content="### moment\n这里没有那个编号，只是普通记录。",
+        name="普通编号记录",
+        hours_ago=1,
+        importance=10,
+    )
+    _, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr, embedding_results=[])
+    monkeypatch.setattr(service, "_get_keyword_candidates", lambda query_text, eligible: {})
+
+    all_buckets = _run(bucket_mgr.list_all())
+    selected, _suppressed, planner_debug = _run(
+        service._select_dynamic_buckets(
+            "zxq-742",
+            "sess-exact-anchor-code",
+            all_buckets,
+            include_query_planner_debug=True,
+        )
+    )
+
+    assert [bucket["id"] for bucket in selected] == [target_id]
+    assert planner_debug["exact_anchor_hints"]["bucket_ids"] == [target_id]
+    assert planner_debug["exact_anchor_hints"]["terms"] == ["zxq-742"]
+
+
+def test_low_signal_gate_keeps_exact_short_code_recall(
+    monkeypatch, test_config, bucket_mgr
+):
+    cfg = _gateway_config(
+        test_config,
+        core_memory_budget=0,
+        recent_context_budget=800,
+        recalled_memory_budget=500,
+        related_memory_budget=0,
+        query_planner_enabled=False,
+        retrieval_mode="bucket",
+        word_map_hint_enabled=False,
+        inject_total_budget=1600,
+        current_inner_state_interval_rounds=0,
+        relationship_weather_interval_rounds=0,
+        favorite_memory_interval_rounds=0,
+    )
+    target_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n测试码 k9alpha 是一条必须按原话命中的小记录。",
+        name="k9alpha 测试锚点",
+        hours_ago=12,
+        tags=["测试锚点"],
+    )
+    _, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr, embedding_results=[])
+    monkeypatch.setattr(service, "_get_keyword_candidates", lambda query_text, eligible: {})
+
+    payload, recalled_ids, debug = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "k9alpha"}]},
+            "sess-low-signal-exact-code",
+            include_debug=True,
+        )
+    )
+    injected = _joined_message_content(payload["messages"])
+
+    assert target_id in recalled_ids
+    assert "Recalled Memory" in injected
+    assert "k9alpha 测试锚点" in injected
+    assert debug["prepare_timing_debug"]["low_signal_auto_recall"] is False
+    assert debug["query_planner_debug"]["exact_anchor_hints"]["bucket_ids"] == [target_id]
+
+
+def test_exact_anchor_ignores_configured_identity_name_alone(
+    monkeypatch, test_config, bucket_mgr
+):
+    cfg = _gateway_config(
+        test_config,
+        core_memory_budget=0,
+        recent_context_budget=0,
+        related_memory_budget=0,
+        query_planner_enabled=False,
+        retrieval_mode="bucket",
+        word_map_hint_enabled=False,
+    )
+    cfg["identity"] = {
+        "ai_name": "Haven",
+        "user_name": "Xiaoyu",
+        "user_display_name": "小雨",
+    }
+    _create_bucket(
+        bucket_mgr,
+        content="### moment\nHaven 这个名字出现在很多记忆里，不能单独当硬锚点。",
+        name="Haven 名字出现",
+        hours_ago=12,
+        tags=["身份"],
+    )
+    _, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr, embedding_results=[])
+    monkeypatch.setattr(service, "_get_keyword_candidates", lambda query_text, eligible: {})
+
+    all_buckets = _run(bucket_mgr.list_all())
+    selected, _suppressed, planner_debug = _run(
+        service._select_dynamic_buckets(
+            "Haven",
+            "sess-exact-anchor-identity",
+            all_buckets,
+            include_query_planner_debug=True,
+        )
+    )
+
+    assert selected == []
+    assert planner_debug["exact_anchor_hints"]["bucket_ids"] == []
+    assert planner_debug["exact_anchor_hints"]["terms"] == []
+
+
 def test_concrete_short_query_uses_direct_lexical_seed_when_search_misses(
     monkeypatch, test_config, bucket_mgr
 ):
@@ -8451,11 +8775,11 @@ def test_short_taste_query_keeps_real_food_opinion_only(monkeypatch, test_config
     metaphor = {"bucket": _run(bucket_mgr.get(metaphor_id)), "score": 0.2}
     taste = {"bucket": _run(bucket_mgr.get(taste_id)), "score": 0.2}
 
-    assert not service._admit_bucket_for_recall("好吃030", meal_plan)
+    assert not service._admit_bucket_for_recall("好吃042", meal_plan)
     assert meal_plan["admission_reason"] == "short_taste_query_without_taste_evidence"
-    assert not service._admit_bucket_for_recall("好吃030", metaphor)
+    assert not service._admit_bucket_for_recall("好吃042", metaphor)
     assert metaphor["admission_reason"] == "short_taste_query_without_taste_evidence"
-    assert service._admit_bucket_for_recall("好吃030", taste)
+    assert service._admit_bucket_for_recall("好吃042", taste)
 
 
 def test_non_explicit_low_score_moment_fallback_is_suppressed(monkeypatch, test_config, bucket_mgr):

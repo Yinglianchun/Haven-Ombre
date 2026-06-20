@@ -572,7 +572,15 @@ def direct_candidate_satisfies_anchor_plan(node: dict, plan: QueryAnchorPlan) ->
     if not plan.must_groups:
         return True
     text = _candidate_anchor_text(node)
-    return any(_anchor_group_matches(text, group) for group in plan.must_groups)
+    return any(
+        _anchor_group_matches(text, group)
+        or (
+            plan.route == "emotional_reason"
+            and _candidate_has_reason_context(node)
+            and _anchor_group_terms_present(text, group)
+        )
+        for group in plan.must_groups
+    )
 
 
 def _emotional_must_groups(emotional_plan: Any) -> tuple[tuple[str, ...], ...]:
@@ -683,6 +691,39 @@ def _anchor_group_matches(text: str, group: tuple[str, ...]) -> bool:
         if end - start <= ANCHOR_MUST_GROUP_MAX_SPAN:
             return True
     return False
+
+
+def _anchor_group_terms_present(text: str, group: tuple[str, ...]) -> bool:
+    compact_text = _compact_anchor_term(text)
+    if not compact_text:
+        return False
+    keys = [_compact_anchor_term(term) for term in group if _compact_anchor_term(term)]
+    return bool(keys) and all(key in compact_text for key in keys)
+
+
+def _candidate_has_reason_context(node: dict) -> bool:
+    if not isinstance(node, dict):
+        return False
+    meta = node.get("metadata", {}) if isinstance(node.get("metadata"), dict) else {}
+    tags = " ".join(str(item).lower() for item in (meta.get("tags") or meta.get("bucket_tags") or []))
+    section = str(node.get("section") or "").strip().lower()
+    text = " ".join(
+        [
+            str(node.get("content") or ""),
+            str(node.get("text") or ""),
+            str(meta.get("bucket_name") or ""),
+            str(meta.get("name") or ""),
+        ]
+    ).lower()
+    return (
+        section in {"reflection", "favorite_reason"}
+        or "favorite" in tags
+        or "### reflection" in text
+        or "favorite_reason" in text
+        or "favorite reason" in text
+        or "喜欢它的原因" in text
+        or "喜欢的原因" in text
+    )
 
 
 def _anchor_term_positions(text: str, term: str) -> list[tuple[int, int]]:

@@ -133,7 +133,7 @@ def test_auto_vague_query_without_topic_is_suppressed():
     assert policy.is_auto_query_too_vague("嗯～")
     assert policy.is_auto_query_too_vague("你会想到什么")
     assert policy.is_auto_query_too_vague("试一下handoff😽")
-    assert not policy.is_auto_query_too_vague("好吃030")
+    assert not policy.is_auto_query_too_vague("好吃042")
     assert not policy.is_auto_query_too_vague("最近蓝鲸档案")
     assert not policy.is_auto_query_too_vague("今天猫咪药量")
     assert not policy.is_auto_query_too_vague("今天为什么激动哭")
@@ -184,16 +184,16 @@ def test_short_taste_query_requires_real_taste_evidence():
         "metadata": {"name": "饭店踩雷", "tags": ["餐厅"], "domain": ["日常"]},
     }
 
-    assert not policy.bucket_has_topic_evidence("好吃030", meal_plan)
-    assert not policy.bucket_has_topic_evidence("好吃030", metaphor)
-    assert policy.bucket_has_topic_evidence("好吃030", taste)
+    assert not policy.bucket_has_topic_evidence("好吃042", meal_plan)
+    assert not policy.bucket_has_topic_evidence("好吃042", metaphor)
+    assert policy.bucket_has_topic_evidence("好吃042", taste)
     assert policy.bucket_has_topic_evidence("难吃", bad_taste)
 
-    decision = policy.assess("好吃030", meal_plan, auto=True)
+    decision = policy.assess("好吃042", meal_plan, auto=True)
     assert decision.reason == "short_taste_query_without_taste_evidence"
     assert not decision.admit_direct
 
-    good_decision = policy.assess("好吃030", taste, auto=True)
+    good_decision = policy.assess("好吃042", taste, auto=True)
     assert good_decision.admit_direct
 
 

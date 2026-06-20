@@ -372,23 +372,31 @@ class GatewayStateStore:
         self,
         *,
         profile_id: str,
+        session_id: str | None = None,
         limit: int = 10,
         hours: float = 6.0,
     ) -> list[dict[str, Any]]:
         safe_limit = max(1, min(50, int(limit or 10)))
         safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "").strip()
         cutoff = datetime.now(timezone.utc) - timedelta(hours=max(0.0, float(hours or 0)))
         conn = self._connect()
+        where_clause = "profile_id = ? AND created_at >= ?"
+        params: list[Any] = [safe_profile_id, cutoff.isoformat(timespec="seconds")]
+        if safe_session_id:
+            where_clause += " AND session_id = ?"
+            params.append(safe_session_id)
+        params.append(safe_limit)
         rows = conn.execute(
-            """
+            f"""
             SELECT id, profile_id, session_id, round_id, created_at,
                    user_text, assistant_text, model, client, route
             FROM conversation_turns
-            WHERE profile_id = ? AND created_at >= ?
+            WHERE {where_clause}
             ORDER BY id DESC
             LIMIT ?
             """,
-            (safe_profile_id, cutoff.isoformat(timespec="seconds"), safe_limit),
+            params,
         ).fetchall()
         conn.close()
         return [

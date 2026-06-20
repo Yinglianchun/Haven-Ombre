@@ -325,9 +325,17 @@ class MemoryMomentStore:
         if not query:
             return []
         bucket_boosts = bucket_boosts or {}
+        query_terms = content_terms_for_query(query, self.relevance_options)
+        expanded_query_terms = _expanded_query_terms(query, self.relevance_options)
         scored = []
         for moment in self.list_all():
-            score = _moment_query_score(moment, query, self.relevance_options)
+            score = _moment_query_score(
+                moment,
+                query,
+                self.relevance_options,
+                query_terms=query_terms,
+                expanded_query_terms=expanded_query_terms,
+            )
             bucket_id = str(moment.get("bucket_id") or "")
             try:
                 boost = float(bucket_boosts.get(bucket_id, 0.0))
@@ -1050,6 +1058,9 @@ def _moment_query_score(
     moment: dict,
     query: str,
     relevance_options: MemoryRelevanceOptions | None = None,
+    *,
+    query_terms: list[str] | None = None,
+    expanded_query_terms: list[str] | None = None,
 ) -> float:
     query = str(query or "").strip()
     if not query:
@@ -1073,11 +1084,15 @@ def _moment_query_score(
     score = 0.0
     if _term_matches_fields(query_lower, fields):
         score += 0.65
-    terms = content_terms_for_query(query, relevance_options)
+    terms = query_terms if query_terms is not None else content_terms_for_query(query, relevance_options)
     if terms:
         matched = sum(1 for term in terms if _term_matches_fields(term.lower(), fields))
         score += min(0.5, matched / max(1, len(terms)) * 0.5)
-    expanded_terms = _expanded_query_terms(query, relevance_options)
+    expanded_terms = (
+        expanded_query_terms
+        if expanded_query_terms is not None
+        else _expanded_query_terms(query, relevance_options)
+    )
     if expanded_terms:
         matched_expanded = sum(
             1 for term in expanded_terms

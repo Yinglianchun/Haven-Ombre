@@ -190,6 +190,25 @@ EXPLICIT_MOMENT_ID_RE = re.compile(
     r"|(?:moment_id|moment id|moment-id|片段id|片段ID)\s*[:=：]\s*(?P<plain>[A-Za-z0-9_.:-]+)",
     re.IGNORECASE,
 )
+EXACT_ANCHOR_UUID_RE = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
+EXACT_ANCHOR_QUOTED_RE = re.compile(r"[“\"'「『]([^”\"'」』]{2,64})[”\"'」』]")
+EXACT_ANCHOR_CODE_RE = re.compile(
+    r"(?<![A-Za-z0-9_.:-])"
+    r"(?:"
+    r"[A-Za-z]+[A-Za-z0-9_.:-]*\d[A-Za-z0-9_.:-]*"
+    r"|\d[A-Za-z0-9_.:-]*[A-Za-z][A-Za-z0-9_.:-]*"
+    r"|0\d{1,5}"
+    r"|(?<![年月日])\d{2,3}(?![年月日])"
+    r")"
+    r"(?![A-Za-z0-9_.:-])"
+)
+EXACT_ANCHOR_COMPOUND_RE = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"[A-Za-z][A-Za-z0-9]+(?:[-_:./][A-Za-z0-9]+)+"
+    r"(?![A-Za-z0-9])"
+)
 QUERY_PLANNER_SYSTEM_PROMPT = """You are Ombre Memory Query Planner.
 Return only strict JSON. Do not write memory. Do not choose final memories.
 Split the user's long mixed message into 1-3 short memory search anchors.
@@ -290,6 +309,8 @@ class GatewayService:
         self.memory_edge_store = MemoryEdgeStore(config)
         self.memory_node_store = memory_node_store or MemoryNodeStore(config)
         self.memory_moment_store = MemoryMomentStore(config)
+        self._moment_graph_cache_signature = ""
+        self._moment_graph_cache_value: tuple[list[dict], dict[str, list[dict]], list[dict]] | None = None
         self.relevance_options = memory_relevance_options_from_config(config)
         self.state_store = state_store or GatewayStateStore(
             os.path.join(config["buckets_dir"], "gateway_state.db")
@@ -456,6 +477,17 @@ class GatewayService:
         self.keyword_weight = float(self.gateway_cfg.get("keyword_weight", 0.35))
         self.importance_weight = float(self.gateway_cfg.get("importance_weight", 0.10))
         self.freshness_weight = float(self.gateway_cfg.get("freshness_weight", 0.10))
+        embedding_cfg = config.get("embedding", {}) if isinstance(config.get("embedding", {}), dict) else {}
+        try:
+            embedding_timeout = float(
+                self.gateway_cfg.get(
+                    "embedding_query_timeout_seconds",
+                    embedding_cfg.get("query_timeout_seconds", 3),
+                )
+            )
+        except (TypeError, ValueError):
+            embedding_timeout = 3.0
+        self.embedding_query_timeout_seconds = max(0.0, min(30.0, embedding_timeout))
         self.first_card_min_score = float(self.gateway_cfg.get("first_card_min_score", 0.55))
         self.second_card_min_score = float(self.gateway_cfg.get("second_card_min_score", 0.50))
         self.second_card_relative_score = float(
@@ -493,6 +525,10 @@ class GatewayService:
         self.query_planner_min_chars = max(0, int(self.gateway_cfg.get("query_planner_min_chars", 16)))
         self.query_planner_max_queries = max(1, min(3, int(self.gateway_cfg.get("query_planner_max_queries", 3))))
         self.query_planner_max_tokens = max(128, int(self.gateway_cfg.get("query_planner_max_tokens", 360)))
+        self.query_planner_supplemental_semantic = self._bool_config_value(
+            self.gateway_cfg.get("query_planner_supplemental_semantic"),
+            False,
+        )
         self.query_planner_score_bonus = self._clamp(
             float(self.gateway_cfg.get("query_planner_score_bonus", 0.04)),
             0.0,
@@ -1403,16 +1439,29 @@ class GatewayService:
         include_favorite_memory: bool = False,
         include_debug: bool = False,
     ) -> tuple[dict, list[str] | None] | tuple[dict, list[str] | None, dict[str, Any]]:
+        prepare_started_at = time.perf_counter()
+        prepare_steps_ms: dict[str, int] = {}
+
+        def mark_step(name: str, started_at: float) -> None:
+            elapsed_ms = max(0, int((time.perf_counter() - started_at) * 1000))
+            prepare_steps_ms[name] = prepare_steps_ms.get(name, 0) + elapsed_ms
+
         messages = payload.get("messages")
         if not isinstance(messages, list) or not messages:
             raise ValueError("messages must be a non-empty list")
 
+        stage_started_at = time.perf_counter()
         model = payload.get("model") or self.upstream_default_model
         if not model:
             raise ValueError("model is required when gateway.upstream_default_model is empty")
         self._get_upstream_for_model(model)
+        mark_step("resolve_model", stage_started_at)
 
+        stage_started_at = time.perf_counter()
         all_buckets = await self.bucket_mgr.list_all(include_archive=False)
+        mark_step("list_all_buckets", stage_started_at)
+
+        stage_started_at = time.perf_counter()
         current_user_query = self._extract_current_turn_user_query(messages)
         is_new_user_turn = bool(current_user_query)
         has_handoff_context = self._messages_contain_handoff_context(messages)
@@ -1432,6 +1481,8 @@ class GatewayService:
             self.date_recall_enabled
             and self._query_requests_date_recall(current_user_query)
         )
+        low_signal_auto_recall = self._auto_recall_low_signal_query(current_user_query)
+        mark_step("classify_request", stage_started_at)
 
         persona_block = ""
         core_memory = ""
@@ -1469,8 +1520,11 @@ class GatewayService:
         persona_state: dict[str, Any] | None = None
         injected_ids: list[str] | None = None
         query_planner_debug: dict[str, Any] = self._query_planner_debug_base(current_user_query)
+        skip_broad_dynamic_recall = False
+        date_persona_trace_requested = False
 
         if is_new_user_turn:
+            stage_started_at = time.perf_counter()
             skip_for_targeted_detail = self._query_should_skip_broad_for_targeted_memory_detail(
                 current_user_query,
                 session_id,
@@ -1480,7 +1534,9 @@ class GatewayService:
                 or needs_handoff_first
                 or just_now_context_requested
                 or date_recall_requested
+                or low_signal_auto_recall
             )
+            mark_step("targeted_skip_check", stage_started_at)
             if needs_handoff_first:
                 query_planner_debug["skip_reason"] = (
                     "handoff_trigger" if is_handoff_trigger_query else "session_start_handoff"
@@ -1500,31 +1556,45 @@ class GatewayService:
                     )
             elif just_now_context_requested:
                 query_planner_debug["skip_reason"] = "just_now_context"
+                stage_started_at = time.perf_counter()
                 just_now_context, just_now_context_debug = self._build_just_now_chat_context(
                     current_user_query,
                 )
+                mark_step("just_now_context", stage_started_at)
             elif date_recall_requested:
                 query_planner_debug["skip_reason"] = "date_recall"
+                stage_started_at = time.perf_counter()
                 date_recall, date_recall_debug, date_recall_bucket_ids = self._build_date_recall_context(
                     current_user_query,
                     all_buckets,
                 )
+                mark_step("date_recall", stage_started_at)
+            elif low_signal_auto_recall:
+                query_planner_debug["skip_reason"] = "low_signal_auto_recall"
             if self.persona_engine.enabled and self._should_inject_interval(
                 session_id,
                 self.current_inner_state_interval_rounds,
             ):
+                stage_started_at = time.perf_counter()
                 persona_state = await self.persona_engine.build_pre_reply_guidance(
                     session_id, current_user_query
                 )
                 persona_block = self.persona_engine.format_state_block(persona_state)
+                mark_step("persona_pre_reply", stage_started_at)
             if self.persona_engine.enabled and persona_state is None:
+                stage_started_at = time.perf_counter()
                 persona_state = self._get_persona_state_for_context_mode(session_id)
+                mark_step("persona_state_read", stage_started_at)
+            stage_started_at = time.perf_counter()
             context_mode = self._classify_context_mode(current_user_query, persona_state)
+            mark_step("context_mode", stage_started_at)
             if not needs_handoff_first and not just_now_context_requested and not date_recall_requested and self._should_inject_interval(
                 session_id,
                 self.core_memory_interval_rounds,
             ):
+                stage_started_at = time.perf_counter()
                 core_memory = await self._build_core_memory_block(all_buckets)
+                mark_step("core_memory", stage_started_at)
             if needs_handoff_first or just_now_context_requested or date_recall_requested:
                 portrait_memory_debug["skip_reason"] = (
                     "just_now_context"
@@ -1534,7 +1604,9 @@ class GatewayService:
                     else ("handoff_trigger" if is_handoff_trigger_query else "session_start_handoff")
                 )
             else:
+                stage_started_at = time.perf_counter()
                 portrait_memory, portrait_memory_debug = self._build_portrait_memory_block(all_buckets)
+                mark_step("portrait_memory", stage_started_at)
             if self.recalled_budget > 0 or self.related_memory_budget > 0:
                 if skip_broad_dynamic_recall:
                     logger.info(
@@ -1545,6 +1617,7 @@ class GatewayService:
                     suppressed_moments = []
                     suppressed_buckets = []
                 elif self.retrieval_mode == "bucket":
+                    stage_started_at = time.perf_counter()
                     selected_buckets, suppressed_buckets, query_planner_debug = await self._select_dynamic_buckets(
                         current_user_query,
                         session_id,
@@ -1552,6 +1625,8 @@ class GatewayService:
                         search_query=self._normalized_recall_query(current_user_query),
                         include_query_planner_debug=True,
                     )
+                    mark_step("dynamic_recall_bucket_select", stage_started_at)
+                    stage_started_at = time.perf_counter()
                     selected_buckets = self._with_explicit_source_record_buckets(
                         current_user_query,
                         selected_buckets,
@@ -1575,8 +1650,12 @@ class GatewayService:
                         recalled_moments.append(moment)
                     moment_candidates = list(recalled_moments)
                     suppressed_moments = []
+                    mark_step("dynamic_recall_bucket_format", stage_started_at)
                 else:
+                    stage_started_at = time.perf_counter()
                     all_moments, grouped_moments, moment_edges = self._refresh_moment_graph(all_buckets)
+                    mark_step("moment_graph_refresh", stage_started_at)
+                    stage_started_at = time.perf_counter()
                     (
                         recalled_moments,
                         moment_candidates,
@@ -1590,9 +1669,11 @@ class GatewayService:
                         grouped_moments,
                         include_query_planner_debug=True,
                     )
+                    mark_step("dynamic_recall_graph_select", stage_started_at)
             else:
                 suppressed_moments = []
                 suppressed_buckets = []
+            stage_started_at = time.perf_counter()
             recalled_memory = await self._format_recalled_moments(
                 recalled_moments,
                 grouped_moments,
@@ -1600,6 +1681,7 @@ class GatewayService:
                 self.recalled_budget,
                 current_user_query,
             )
+            mark_step("format_recalled_memory", stage_started_at)
             date_persona_trace_requested = (
                 date_recall_requested
                 or self._query_requests_date_persona_trace(current_user_query)
@@ -1617,19 +1699,26 @@ class GatewayService:
                     else "date_trace_not_requested"
                 )
             else:
+                stage_started_at = time.perf_counter()
                 date_persona_trace, date_persona_trace_debug = self._build_date_persona_trace_block(
                     current_user_query,
                     all_buckets,
                 )
+                mark_step("date_persona_trace", stage_started_at)
             if self._should_inject_interval(session_id, self.relationship_weather_interval_rounds):
+                stage_started_at = time.perf_counter()
                 relationship_weather = await self._build_relationship_weather_block(all_buckets)
+                mark_step("relationship_weather", stage_started_at)
             if (
                 include_favorite_memory
                 or self._query_requests_favorite_memory(current_user_query)
                 or self._should_inject_interval(session_id, self.favorite_memory_interval_rounds)
             ):
+                stage_started_at = time.perf_counter()
                 favorite_memory, favorite_ids = await self._build_favorite_memory_block(all_buckets, session_id)
+                mark_step("favorite_memory", stage_started_at)
             if self.retrieval_mode == "graph":
+                stage_started_at = time.perf_counter()
                 related_memory, diffused_moment_debug = self._build_moment_diffused_memory_with_debug(
                     recalled_moments,
                     moment_candidates,
@@ -1638,8 +1727,10 @@ class GatewayService:
                     current_user_query,
                     context_mode=context_mode,
                 )
+                mark_step("memory_diffusion", stage_started_at)
             else:
                 related_memory = ""
+            stage_started_at = time.perf_counter()
             current_direct_bucket_ids = [
                 str(moment.get("bucket_id") or "")
                 for moment in recalled_moments
@@ -1663,6 +1754,8 @@ class GatewayService:
             current_shown_moment_ids = list(
                 dict.fromkeys(current_direct_moment_ids + current_diffused_moment_ids)
             )
+            mark_step("shown_id_collection", stage_started_at)
+            stage_started_at = time.perf_counter()
             targeted_memory_detail, targeted_memory_detail_debug = self._build_targeted_memory_detail(
                 all_buckets,
                 session_id=session_id,
@@ -1675,6 +1768,7 @@ class GatewayService:
                 current_diffused_moment_ids=current_diffused_moment_ids,
                 recalled_memory=recalled_memory,
             )
+            mark_step("targeted_memory_detail", stage_started_at)
             can_retry_memory_detail = payload.get("stream") is not True
             if self.memory_detail_recall_enabled and can_retry_memory_detail and (
                 recalled_memory.strip()
@@ -1699,21 +1793,26 @@ class GatewayService:
                 has_handoff_context=has_handoff_context or needs_handoff_first,
             ):
                 explicit_recent_query = self._query_requests_recent_context(current_user_query)
+                stage_started_at = time.perf_counter()
                 recent_context = await self._build_recent_context_block(
                     all_buckets,
                     current_user_query,
                     allow_vague=explicit_recent_query,
                 )
+                mark_step("recent_context", stage_started_at)
                 if recent_context.strip():
                     recent_context_reason = self._recent_context_reason(
                         session_id,
                         current_user_query,
                         has_reliable_dynamic_context=reliable_dynamic_context,
                     )
+            stage_started_at = time.perf_counter()
             dream_context, dream_context_status = await self._build_dream_context_block(
                 current_user_query,
                 session_id,
             )
+            mark_step("dream_context", stage_started_at)
+            stage_started_at = time.perf_counter()
             injected_ids = list(
                 dict.fromkeys(
                     [
@@ -1730,12 +1829,14 @@ class GatewayService:
                     ]
                 )
             )
+            mark_step("injected_id_collection", stage_started_at)
         else:
             logger.info(
                 "Gateway dynamic context skipped | session=%s reason=not_current_user_turn",
                 session_id,
             )
 
+        stage_started_at = time.perf_counter()
         stable_context, dynamic_context = self._build_injected_context_messages(
             persona_block=persona_block,
             core_memory=core_memory,
@@ -1754,7 +1855,9 @@ class GatewayService:
             handoff_tool_hint=handoff_tool_hint,
             context_mode=context_mode,
         )
+        mark_step("build_context_messages", stage_started_at)
 
+        stage_started_at = time.perf_counter()
         forward_payload = deepcopy(payload)
         forward_payload["model"] = model
         self._restore_cached_reasoning_content(session_id, forward_payload.get("messages"))
@@ -1765,8 +1868,63 @@ class GatewayService:
         )
         self._apply_prompt_cache_hints(forward_payload, session_id)
         forward_payload["stream"] = payload.get("stream") is True
+        mark_step("finalize_forward_payload", stage_started_at)
+
+        prepare_total_ms = max(0, int((time.perf_counter() - prepare_started_at) * 1000))
+        prepare_timing_debug = {
+            "total_ms": prepare_total_ms,
+            "steps_ms": dict(prepare_steps_ms),
+            "query_chars": len(current_user_query),
+            "message_count": len(messages),
+            "bucket_count": len(all_buckets),
+            "is_new_user_turn": is_new_user_turn,
+            "needs_handoff_first": needs_handoff_first,
+            "just_now_context_requested": just_now_context_requested,
+            "date_recall_requested": date_recall_requested,
+            "date_persona_trace_requested": date_persona_trace_requested,
+            "low_signal_auto_recall": low_signal_auto_recall,
+            "skip_broad_dynamic_recall": skip_broad_dynamic_recall,
+            "retrieval_mode": self.retrieval_mode,
+            "context_mode": context_mode,
+            "recalled_moment_count": len(recalled_moments),
+            "suppressed_moment_count": len(suppressed_moments),
+            "suppressed_bucket_count": len(suppressed_buckets),
+            "diffused_item_count": len(diffused_moment_debug),
+            "recalled_chars": len(recalled_memory),
+            "diffused_chars": len(related_memory),
+            "date_recall_chars": len(date_recall),
+            "date_trace_chars": len(date_persona_trace),
+            "targeted_detail_chars": len(targeted_memory_detail),
+            "stable_context_chars": len(stable_context),
+            "dynamic_context_chars": len(dynamic_context),
+            "query_planner_triggered": bool(query_planner_debug.get("triggered")),
+            "query_planner_skip_reason": str(query_planner_debug.get("skip_reason") or ""),
+        }
+
+        def log_prepare_timing() -> None:
+            logger.info(
+                "Gateway prepare timing | session=%s model=%s stream=%s total_ms=%s "
+                "query_chars=%s messages=%s buckets=%s recalled=%s diffused=%s "
+                "date_recall=%s date_trace=%s planner=%s planner_skip=%s steps_ms=%s",
+                session_id,
+                model,
+                forward_payload.get("stream") is True,
+                prepare_timing_debug["total_ms"],
+                len(current_user_query),
+                len(messages),
+                len(all_buckets),
+                len(recalled_moments),
+                len(diffused_moment_debug),
+                date_recall_requested,
+                date_persona_trace_requested,
+                bool(query_planner_debug.get("triggered")),
+                query_planner_debug.get("skip_reason") or "",
+                json.dumps(prepare_timing_debug["steps_ms"], ensure_ascii=False, separators=(",", ":")),
+            )
+
         if include_debug:
-            return forward_payload, injected_ids, self._build_injection_debug_payload(
+            stage_started_at = time.perf_counter()
+            debug_payload = self._build_injection_debug_payload(
                 model=model,
                 query=current_user_query,
                 stable_context=stable_context,
@@ -1797,6 +1955,13 @@ class GatewayService:
                 suppressed_buckets=suppressed_buckets,
                 query_planner_debug=query_planner_debug,
             )
+            mark_step("build_debug_payload", stage_started_at)
+            prepare_timing_debug["total_ms"] = max(0, int((time.perf_counter() - prepare_started_at) * 1000))
+            prepare_timing_debug["steps_ms"] = dict(prepare_steps_ms)
+            debug_payload["prepare_timing_debug"] = prepare_timing_debug
+            log_prepare_timing()
+            return forward_payload, injected_ids, debug_payload
+        log_prepare_timing()
         return forward_payload, injected_ids
 
     def _apply_prompt_cache_hints(self, payload: dict[str, Any], session_id: str) -> None:
@@ -2178,12 +2343,30 @@ class GatewayService:
     ) -> Response:
         model = str(payload.get("model") or "").strip()
         route = self._resolve_upstream_for_model(model)
+        stream_started_at = time.perf_counter()
+        upstream_open_started_at = time.perf_counter()
         upstream_response = await self._open_upstream_stream(route, payload)
+        upstream_headers_ms = max(0, int((time.perf_counter() - upstream_open_started_at) * 1000))
         content_type = upstream_response.headers.get("content-type", "text/event-stream")
+        upstream = route["upstream"]
 
         if not 200 <= upstream_response.status_code < 300:
+            body_read_started_at = time.perf_counter()
             body = await upstream_response.aread()
             await upstream_response.aclose()
+            logger.info(
+                "Gateway stream timing | session=%s route=%s upstream=%s model=%s upstream_model=%s "
+                "status=%s error_response=true header_ms=%s body_read_ms=%s total_ms=%s",
+                session_id,
+                "/v1/chat/completions",
+                upstream.get("name"),
+                model,
+                route["upstream_model"],
+                upstream_response.status_code,
+                upstream_headers_ms,
+                max(0, int((time.perf_counter() - body_read_started_at) * 1000)),
+                max(0, int((time.perf_counter() - stream_started_at) * 1000)),
+            )
             return Response(
                 content=body,
                 status_code=upstream_response.status_code,
@@ -2193,6 +2376,11 @@ class GatewayService:
         async def stream_body():
             finalized = False
             stream_state = self._new_stream_capture_state()
+            body_started_at = time.perf_counter()
+            first_chunk_ms: int | None = None
+            header_to_first_chunk_ms: int | None = None
+            chunk_count = 0
+            byte_count = 0
 
             async def finalize_once() -> None:
                 nonlocal finalized
@@ -2213,6 +2401,26 @@ class GatewayService:
             try:
                 async for chunk in upstream_response.aiter_bytes():
                     if chunk:
+                        chunk_count += 1
+                        byte_count += len(chunk)
+                        if first_chunk_ms is None:
+                            now = time.perf_counter()
+                            first_chunk_ms = max(0, int((now - stream_started_at) * 1000))
+                            header_to_first_chunk_ms = max(0, int((now - body_started_at) * 1000))
+                            logger.info(
+                                "Gateway stream first chunk | session=%s route=%s upstream=%s "
+                                "model=%s upstream_model=%s status=%s header_ms=%s "
+                                "first_chunk_ms=%s header_to_first_chunk_ms=%s",
+                                session_id,
+                                "/v1/chat/completions",
+                                upstream.get("name"),
+                                model,
+                                route["upstream_model"],
+                                upstream_response.status_code,
+                                upstream_headers_ms,
+                                first_chunk_ms,
+                                header_to_first_chunk_ms,
+                            )
                         self._consume_stream_capture_chunk(stream_state, chunk)
                         if stream_state.get("seen_done"):
                             await finalize_once()
@@ -2220,6 +2428,26 @@ class GatewayService:
                 self._consume_stream_capture_chunk(stream_state, b"", final=True)
                 await finalize_once()
             finally:
+                logger.info(
+                    "Gateway stream timing | session=%s route=%s upstream=%s model=%s upstream_model=%s "
+                    "status=%s header_ms=%s first_chunk_ms=%s header_to_first_chunk_ms=%s "
+                    "body_ms=%s total_ms=%s chunks=%s bytes=%s finalized=%s seen_done=%s",
+                    session_id,
+                    "/v1/chat/completions",
+                    upstream.get("name"),
+                    model,
+                    route["upstream_model"],
+                    upstream_response.status_code,
+                    upstream_headers_ms,
+                    first_chunk_ms,
+                    header_to_first_chunk_ms,
+                    max(0, int((time.perf_counter() - body_started_at) * 1000)),
+                    max(0, int((time.perf_counter() - stream_started_at) * 1000)),
+                    chunk_count,
+                    byte_count,
+                    finalized,
+                    bool(stream_state.get("seen_done")),
+                )
                 await upstream_response.aclose()
 
         return StreamingResponse(
@@ -3120,6 +3348,11 @@ class GatewayService:
             )
             return
         tool_summary = self._summarize_assistant_tool_calls(assistant_message)
+        recent_conversation_turns = self._recent_persona_conversation_turns(
+            session_id,
+            user_message,
+            assistant_response,
+        )
         try:
             await self.persona_engine.update_from_exchange(
                 session_id=session_id,
@@ -3127,9 +3360,52 @@ class GatewayService:
                 assistant_response=assistant_response,
                 recalled_memory_ids=recalled_ids,
                 tool_summary=tool_summary,
+                recent_conversation_turns=recent_conversation_turns,
             )
         except Exception as exc:
             logger.warning("Persona post-reply update failed | session=%s error=%s", session_id, exc)
+
+    def _recent_persona_conversation_turns(
+        self,
+        session_id: str,
+        user_message: str,
+        assistant_response: str,
+    ) -> list[dict[str, Any]]:
+        try:
+            max_turns = int(getattr(self.persona_engine, "evaluation_context_turns", 3))
+        except (TypeError, ValueError):
+            max_turns = 3
+        max_turns = max(0, min(8, max_turns))
+        if max_turns <= 0:
+            return []
+
+        profile_id = str(getattr(self.persona_engine, "profile_id", "") or "default")
+        turns = self.state_store.list_recent_conversation_turns(
+            profile_id=profile_id,
+            session_id=session_id,
+            limit=max_turns + 4,
+            hours=12,
+        )
+        current_user = self._clean_conversation_turn_text(user_message)
+        current_assistant = self._clean_conversation_turn_text(assistant_response)
+        selected: list[dict[str, Any]] = []
+        for turn in turns:
+            user_text = self._clean_conversation_turn_text(turn.get("user_text", ""))
+            assistant_text = self._clean_conversation_turn_text(turn.get("assistant_text", ""))
+            if user_text == current_user and assistant_text == current_assistant:
+                continue
+            if not user_text and not assistant_text:
+                continue
+            selected.append(
+                {
+                    "created_at": turn.get("created_at", ""),
+                    "user_text": user_text,
+                    "assistant_text": assistant_text,
+                }
+            )
+            if len(selected) >= max_turns:
+                break
+        return list(reversed(selected))
 
     async def _finalize_stream_turn(
         self,
@@ -3954,11 +4230,29 @@ class GatewayService:
                 injection_debug=injection_debug,
             )
 
+        stream_started_at = time.perf_counter()
+        upstream_open_started_at = time.perf_counter()
         upstream_response = await self._open_upstream_stream(route, payload)
+        upstream_headers_ms = max(0, int((time.perf_counter() - upstream_open_started_at) * 1000))
+        upstream = route["upstream"]
 
         if not 200 <= upstream_response.status_code < 300:
+            body_read_started_at = time.perf_counter()
             body = await upstream_response.aread()
             await upstream_response.aclose()
+            logger.info(
+                "Gateway stream timing | session=%s route=%s upstream=%s model=%s upstream_model=%s "
+                "status=%s error_response=true header_ms=%s body_read_ms=%s total_ms=%s",
+                session_id,
+                "/v1/messages",
+                upstream.get("name"),
+                model,
+                route["upstream_model"],
+                upstream_response.status_code,
+                upstream_headers_ms,
+                max(0, int((time.perf_counter() - body_read_started_at) * 1000)),
+                max(0, int((time.perf_counter() - stream_started_at) * 1000)),
+            )
             return self._proxy_anthropic_error_response(
                 httpx.Response(
                     status_code=upstream_response.status_code,
@@ -3970,6 +4264,11 @@ class GatewayService:
         async def stream_body():
             finalized = False
             stream_state = self._new_stream_capture_state()
+            body_started_at = time.perf_counter()
+            first_chunk_ms: int | None = None
+            header_to_first_chunk_ms: int | None = None
+            chunk_count = 0
+            byte_count = 0
             message_id = f"msg_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
             usage = {"input_tokens": 0, "output_tokens": 0}
             stop_reason = "end_turn"
@@ -4014,6 +4313,26 @@ class GatewayService:
                 async for chunk in upstream_response.aiter_bytes():
                     if not chunk:
                         continue
+                    chunk_count += 1
+                    byte_count += len(chunk)
+                    if first_chunk_ms is None:
+                        now = time.perf_counter()
+                        first_chunk_ms = max(0, int((now - stream_started_at) * 1000))
+                        header_to_first_chunk_ms = max(0, int((now - body_started_at) * 1000))
+                        logger.info(
+                            "Gateway stream first chunk | session=%s route=%s upstream=%s "
+                            "model=%s upstream_model=%s status=%s header_ms=%s "
+                            "first_chunk_ms=%s header_to_first_chunk_ms=%s",
+                            session_id,
+                            "/v1/messages",
+                            upstream.get("name"),
+                            model,
+                            route["upstream_model"],
+                            upstream_response.status_code,
+                            upstream_headers_ms,
+                            first_chunk_ms,
+                            header_to_first_chunk_ms,
+                        )
                     self._consume_stream_capture_chunk(stream_state, chunk)
                     if stream_state.get("seen_done"):
                         await finalize_once()
@@ -4128,6 +4447,26 @@ class GatewayService:
                     {"type": "message_stop"},
                 )
             finally:
+                logger.info(
+                    "Gateway stream timing | session=%s route=%s upstream=%s model=%s upstream_model=%s "
+                    "status=%s header_ms=%s first_chunk_ms=%s header_to_first_chunk_ms=%s "
+                    "body_ms=%s total_ms=%s chunks=%s bytes=%s finalized=%s seen_done=%s",
+                    session_id,
+                    "/v1/messages",
+                    upstream.get("name"),
+                    model,
+                    route["upstream_model"],
+                    upstream_response.status_code,
+                    upstream_headers_ms,
+                    first_chunk_ms,
+                    header_to_first_chunk_ms,
+                    max(0, int((time.perf_counter() - body_started_at) * 1000)),
+                    max(0, int((time.perf_counter() - stream_started_at) * 1000)),
+                    chunk_count,
+                    byte_count,
+                    finalized,
+                    bool(stream_state.get("seen_done")),
+                )
                 await upstream_response.aclose()
 
         return StreamingResponse(
@@ -4151,11 +4490,29 @@ class GatewayService:
         injection_debug: dict[str, Any] | None = None,
     ) -> Response:
         model = str(payload.get("model") or "").strip()
+        stream_started_at = time.perf_counter()
+        upstream_open_started_at = time.perf_counter()
         upstream_response = await self._open_anthropic_upstream_stream(route, payload)
+        upstream_headers_ms = max(0, int((time.perf_counter() - upstream_open_started_at) * 1000))
+        upstream = route["upstream"]
 
         if not 200 <= upstream_response.status_code < 300:
+            body_read_started_at = time.perf_counter()
             body = await upstream_response.aread()
             await upstream_response.aclose()
+            logger.info(
+                "Gateway stream timing | session=%s route=%s upstream=%s model=%s upstream_model=%s "
+                "status=%s error_response=true header_ms=%s body_read_ms=%s total_ms=%s",
+                session_id,
+                "/v1/messages",
+                upstream.get("name"),
+                model,
+                route["upstream_model"],
+                upstream_response.status_code,
+                upstream_headers_ms,
+                max(0, int((time.perf_counter() - body_read_started_at) * 1000)),
+                max(0, int((time.perf_counter() - stream_started_at) * 1000)),
+            )
             return self._proxy_anthropic_error_response(
                 httpx.Response(
                     status_code=upstream_response.status_code,
@@ -4167,6 +4524,11 @@ class GatewayService:
         async def stream_body():
             finalized = False
             stream_state = self._new_stream_capture_state()
+            body_started_at = time.perf_counter()
+            first_chunk_ms: int | None = None
+            header_to_first_chunk_ms: int | None = None
+            chunk_count = 0
+            byte_count = 0
 
             async def finalize_once() -> None:
                 nonlocal finalized
@@ -4187,6 +4549,26 @@ class GatewayService:
             try:
                 async for chunk in upstream_response.aiter_bytes():
                     if chunk:
+                        chunk_count += 1
+                        byte_count += len(chunk)
+                        if first_chunk_ms is None:
+                            now = time.perf_counter()
+                            first_chunk_ms = max(0, int((now - stream_started_at) * 1000))
+                            header_to_first_chunk_ms = max(0, int((now - body_started_at) * 1000))
+                            logger.info(
+                                "Gateway stream first chunk | session=%s route=%s upstream=%s "
+                                "model=%s upstream_model=%s status=%s header_ms=%s "
+                                "first_chunk_ms=%s header_to_first_chunk_ms=%s",
+                                session_id,
+                                "/v1/messages",
+                                upstream.get("name"),
+                                model,
+                                route["upstream_model"],
+                                upstream_response.status_code,
+                                upstream_headers_ms,
+                                first_chunk_ms,
+                                header_to_first_chunk_ms,
+                            )
                         self._consume_anthropic_stream_capture_chunk(stream_state, chunk)
                         if stream_state.get("seen_done"):
                             await finalize_once()
@@ -4194,6 +4576,26 @@ class GatewayService:
                 self._consume_anthropic_stream_capture_chunk(stream_state, b"", final=True)
                 await finalize_once()
             finally:
+                logger.info(
+                    "Gateway stream timing | session=%s route=%s upstream=%s model=%s upstream_model=%s "
+                    "status=%s header_ms=%s first_chunk_ms=%s header_to_first_chunk_ms=%s "
+                    "body_ms=%s total_ms=%s chunks=%s bytes=%s finalized=%s seen_done=%s",
+                    session_id,
+                    "/v1/messages",
+                    upstream.get("name"),
+                    model,
+                    route["upstream_model"],
+                    upstream_response.status_code,
+                    upstream_headers_ms,
+                    first_chunk_ms,
+                    header_to_first_chunk_ms,
+                    max(0, int((time.perf_counter() - body_started_at) * 1000)),
+                    max(0, int((time.perf_counter() - stream_started_at) * 1000)),
+                    chunk_count,
+                    byte_count,
+                    finalized,
+                    bool(stream_state.get("seen_done")),
+                )
                 await upstream_response.aclose()
 
         return StreamingResponse(
@@ -4540,7 +4942,7 @@ class GatewayService:
             "以前", "过去", "remember", "recall", "memory", "look up",
         )
         intimate_terms = (
-            "今天是雨天", "亲亲", "抱抱", "抱我", "吻", "亲密", "想你", "爱你",
+            "亲亲", "抱抱", "抱我", "吻", "亲密", "想你", "爱你",
             "老婆", "宝宝", "亲爱的", "身体", "欲望", "intimate", "kiss",
             "hug", "miss you", "love you",
         )
@@ -4882,6 +5284,8 @@ class GatewayService:
         if self._query_requests_recent_context(query_text):
             return True
         if has_handoff_context:
+            return False
+        if self._auto_recall_low_signal_query(query_text):
             return False
         if self._auto_query_too_vague(query_text):
             return False
@@ -5731,12 +6135,73 @@ class GatewayService:
         all_buckets: list[dict],
     ) -> tuple[list[dict], dict[str, list[dict]], list[dict]]:
         recallable_buckets = [bucket for bucket in all_buckets if not is_self_anchor_bucket(bucket)]
+        bucket_edges = self.memory_edge_store.list_edges()
+        signature = self._moment_graph_signature(recallable_buckets, bucket_edges)
+        if (
+            signature
+            and signature == self._moment_graph_cache_signature
+            and self._moment_graph_cache_value is not None
+        ):
+            return self._moment_graph_cache_value
         self.memory_moment_store.bulk_upsert(recallable_buckets)
         moments = self._recallable_moments(self.memory_moment_store.list_all())
         grouped = self._moments_by_bucket(moments)
         edges = self.memory_moment_store.list_edges()
-        edges.extend(self._bucket_edges_as_moment_edges(self.memory_edge_store.list_edges(), grouped))
-        return moments, grouped, edges
+        edges.extend(self._bucket_edges_as_moment_edges(bucket_edges, grouped))
+        value = (moments, grouped, edges)
+        self._moment_graph_cache_signature = signature
+        self._moment_graph_cache_value = value
+        return value
+
+    @staticmethod
+    def _moment_graph_signature(buckets: list[dict], bucket_edges: list[dict] | None = None) -> str:
+        digest = hashlib.sha1()
+        for bucket in sorted(buckets or [], key=lambda item: str(item.get("id") or "")):
+            meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+            structural_meta = {
+                key: meta.get(key)
+                for key in (
+                    "name",
+                    "tags",
+                    "domain",
+                    "importance",
+                    "type",
+                    "pinned",
+                    "protected",
+                    "resolved",
+                    "digested",
+                    "comments",
+                    "created",
+                    "date",
+                    "source_record",
+                )
+                if key in meta
+            }
+            payload = {
+                "id": bucket.get("id"),
+                "content": bucket.get("content"),
+                "metadata": structural_meta,
+            }
+            digest.update(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8"))
+            digest.update(b"\n")
+        for edge in sorted(
+            bucket_edges or [],
+            key=lambda item: (
+                str(item.get("source") or item.get("source_memory_id") or ""),
+                str(item.get("target") or item.get("target_memory_id") or ""),
+                str(item.get("relation_type") or item.get("type") or ""),
+            ),
+        ):
+            payload = {
+                "source": edge.get("source") or edge.get("source_memory_id"),
+                "target": edge.get("target") or edge.get("target_memory_id"),
+                "relation_type": edge.get("relation_type") or edge.get("type"),
+                "confidence": edge.get("confidence"),
+                "reason": edge.get("reason"),
+            }
+            digest.update(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8"))
+            digest.update(b"\n")
+        return digest.hexdigest()
 
     def _recallable_moments(self, moments: list[dict]) -> list[dict]:
         return [
@@ -6142,6 +6607,7 @@ class GatewayService:
         list[dict], list[dict], list[dict], list[dict], dict[str, Any]
     ]:
         query_planner_debug = self._query_planner_debug_base(query)
+        timing_debug = query_planner_debug.setdefault("timing_ms", {})
         if not query or self.inject_max_cards <= 0:
             return self._empty_moment_selection(
                 include_query_planner_debug=include_query_planner_debug,
@@ -6155,6 +6621,7 @@ class GatewayService:
             )
         anchor_plan = self._query_anchor_plan(query)
 
+        stage_started_at = time.perf_counter()
         relevance_query = self._query_has_relevance_facet(query)
         eligible_ids = {
             bucket["id"]
@@ -6168,6 +6635,7 @@ class GatewayService:
                 or (relevance_query and self._is_relevance_candidate_bucket(query, bucket))
             )
         }
+        self._add_timing_ms(timing_debug, "moment.eligible_ids", stage_started_at)
         if not eligible_ids:
             query_planner_debug["skip_reason"] = "no_eligible_buckets"
             return self._empty_moment_selection(
@@ -6175,6 +6643,7 @@ class GatewayService:
                 query_planner_debug=query_planner_debug,
             )
 
+        stage_started_at = time.perf_counter()
         search_query = self._normalized_recall_query(query)
         selected_buckets, suppressed_buckets, query_planner_debug = await self._select_dynamic_buckets(
             query,
@@ -6183,6 +6652,9 @@ class GatewayService:
             search_query=search_query,
             include_query_planner_debug=True,
         )
+        timing_debug = query_planner_debug.setdefault("timing_ms", {})
+        self._add_timing_ms(timing_debug, "moment.select_dynamic_buckets", stage_started_at)
+        stage_started_at = time.perf_counter()
         selected_buckets = self._with_explicit_source_record_buckets(
             query,
             selected_buckets,
@@ -6193,6 +6665,8 @@ class GatewayService:
             for bucket in selected_buckets
             if bucket.get("id")
         ]
+        self._add_timing_ms(timing_debug, "moment.source_record_extend", stage_started_at)
+        stage_started_at = time.perf_counter()
         selected_bucket_ids = [bucket["id"] for bucket in selected_buckets if bucket.get("id")]
         bucket_boosts = {bucket_id: 1.0 for bucket_id in selected_bucket_ids}
         eligible_buckets = [
@@ -6214,6 +6688,8 @@ class GatewayService:
                 self._clamp(score) * self.word_map_hint_moment_boost,
             )
         candidates = []
+        self._add_timing_ms(timing_debug, "moment.word_map_boost", stage_started_at)
+        stage_started_at = time.perf_counter()
         if search_query:
             moment_search_queries = [search_query]
             raw_moment_query = str(query or "").strip()
@@ -6232,6 +6708,8 @@ class GatewayService:
                     if moment_id:
                         seen_moment_ids.add(moment_id)
                     candidates.append(moment)
+        self._add_timing_ms(timing_debug, "moment.search_moments", stage_started_at)
+        stage_started_at = time.perf_counter()
         explicit_lookup = self._query_explicitly_requests_caution_memory(query)
         candidates = [
             moment for moment in candidates
@@ -6239,7 +6717,11 @@ class GatewayService:
             and can_moment_be_direct_seed(moment, explicit_lookup=explicit_lookup)
         ]
         candidates = self._apply_relevance_to_moment_candidates(query, candidates)
+        self._add_timing_ms(timing_debug, "moment.filter_relevance", stage_started_at)
+        stage_started_at = time.perf_counter()
         candidates = await self._rerank_moment_candidates(query, candidates)
+        self._add_timing_ms(timing_debug, "moment.rerank_candidates", stage_started_at)
+        stage_started_at = time.perf_counter()
         admitted_bucket_ids = set(selected_bucket_ids)
         admitted_candidates = []
         suppressed_candidates = []
@@ -6273,9 +6755,11 @@ class GatewayService:
             else:
                 suppressed_candidates.append(item)
         candidates = admitted_candidates
+        self._add_timing_ms(timing_debug, "moment.admit_candidates", stage_started_at)
 
         selected: list[dict] = []
         seen_buckets: set[str] = set()
+        stage_started_at = time.perf_counter()
         for bucket_id in selected_bucket_ids:
             moment = next(
                 (
@@ -6314,6 +6798,7 @@ class GatewayService:
             if moment and bucket_id not in seen_buckets:
                 selected.append(moment)
                 seen_buckets.add(bucket_id)
+        self._add_timing_ms(timing_debug, "moment.pick_selected", stage_started_at)
 
         if selected:
             result = (selected[: self.inject_max_cards], candidates, suppressed_candidates, suppressed_buckets)
@@ -6321,6 +6806,7 @@ class GatewayService:
                 return (*result, query_planner_debug)
             return result
 
+        stage_started_at = time.perf_counter()
         recent_ids = self.state_store.get_recent_bucket_ids(session_id, self.skip_recent_rounds)
         active_candidates = [
             moment for moment in candidates
@@ -6336,6 +6822,7 @@ class GatewayService:
             seen_buckets.add(bucket_id)
             if len(selected) >= self.inject_max_cards:
                 break
+        self._add_timing_ms(timing_debug, "moment.fallback_select", stage_started_at)
         result = (selected, candidates, suppressed_candidates, suppressed_buckets)
         if include_query_planner_debug:
             return (*result, query_planner_debug)
@@ -7463,6 +7950,43 @@ class GatewayService:
     def _auto_query_too_vague(self, query: str) -> bool:
         return self.recall_policy.is_auto_query_too_vague(query)
 
+    def _auto_recall_low_signal_query(self, query: str) -> bool:
+        text = str(query or "").strip()
+        if not text:
+            return True
+        if self._query_requests_recent_context(text) or self._query_requests_just_now_context(text):
+            return False
+        if self._query_requests_date_recall(text) or self._query_requests_date_persona_trace(text):
+            return False
+        if self._auto_query_too_vague(text):
+            return True
+        normalized = self._normalized_recall_query(text)
+        if self._extract_exact_anchor_terms(text, normalized):
+            return False
+        if self.recall_policy.requires_topic_evidence(text):
+            return False
+        if self._query_has_relevance_facet(text):
+            return False
+        if self.recall_policy.is_auto_concrete_topic_query(text):
+            return False
+
+        compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text.lower())
+        if not compact:
+            return True
+        cjk_chars = re.findall(r"[\u4e00-\u9fff]", compact)
+        latin_words = re.findall(r"[a-z][a-z0-9_.:-]*", text.lower())
+        if not cjk_chars and latin_words and len(latin_words) <= 2 and len(compact) <= 16:
+            return True
+        if cjk_chars and len(cjk_chars) <= 4:
+            terms = [
+                term
+                for term in self._specific_query_terms(text)
+                if re.search(r"[\u4e00-\u9fffA-Za-z0-9]", str(term or ""))
+            ]
+            if not terms:
+                return True
+        return False
+
     def _recent_context_requires_topic_evidence(self, query: str) -> bool:
         return self._recall_query_plan(query).recent_context_requires_topic_evidence
 
@@ -8015,10 +8539,26 @@ class GatewayService:
                 "terms": [],
                 "neighbor_terms": [],
             },
+            "exact_anchor_hints": {
+                "bucket_ids": [],
+                "terms": [],
+            },
             "errors": [],
             "model": self.query_planner_model,
             "model_source": "dehydration" if self.query_planner_uses_dehydrator else "gateway",
+            "semantic": {
+                "query_timeout_seconds": self.embedding_query_timeout_seconds,
+                "supplemental_enabled": self.query_planner_supplemental_semantic,
+            },
+            "timing_ms": {},
         }
+
+    @staticmethod
+    def _add_timing_ms(target: dict[str, Any] | None, name: str, started_at: float) -> None:
+        if not isinstance(target, dict):
+            return
+        elapsed_ms = max(0, int((time.perf_counter() - started_at) * 1000))
+        target[name] = target.get(name, 0) + elapsed_ms
 
     def _normalized_recall_query(self, query: str) -> str:
         topic = str(recall_topic_query(query, self.relevance_options) or "").strip()
@@ -8089,6 +8629,8 @@ class GatewayService:
             return ""
         compact_len = len(re.sub(r"\s+", "", text))
         long_enough = compact_len >= self.query_planner_min_chars
+        if self._query_looks_operational_task_without_recall(text):
+            return ""
         multi_topic = self._query_looks_multi_topic(text)
         if multi_topic:
             return "multi_topic"
@@ -8097,6 +8639,61 @@ class GatewayService:
         if not selected_items and long_enough:
             return "direct_recall_empty_or_low_confidence"
         return ""
+
+    def _query_looks_operational_task_without_recall(self, query: str) -> bool:
+        text = str(query or "").strip().lower()
+        if not text:
+            return False
+        recall_markers = (
+            "记得",
+            "记忆",
+            "召回",
+            "检索",
+            "想起",
+            "回忆",
+            "之前",
+            "上次",
+            "为什么",
+            "原因",
+            "remember",
+            "recall",
+            "memory",
+            "search",
+            "why",
+        )
+        if any(marker in text for marker in recall_markers):
+            return False
+        task_markers = (
+            "直接用",
+            "新建",
+            "直接改",
+            "改一下",
+            "修改",
+            "修一下",
+            "修复",
+            "加一下",
+            "删掉",
+            "删除",
+            "部署",
+            "推一下",
+            "跑一下",
+            "运行",
+            "模板",
+            "工作流",
+            "代码",
+            "文件",
+            "配置",
+            "脚本",
+            "commit",
+            "push",
+            "deploy",
+            "run",
+            "fix",
+            "use",
+            "template",
+            "workflow",
+        )
+        return any(marker in text for marker in task_markers)
 
     def _query_looks_emotional_reason_lookup(self, query: str) -> bool:
         return emotional_recall_plan(query, self.relevance_options).triggered
@@ -8357,6 +8954,194 @@ class GatewayService:
         ).lower()
         return any(str(term or "").strip().lower() in fields for term in terms)
 
+    def _extract_exact_anchor_terms(self, raw_query: str, normalized_query: str = "") -> list[str]:
+        terms: list[str] = []
+
+        def add(value: object) -> None:
+            cleaned = str(value or "").strip().strip("\"'`“”‘’「」『』")
+            cleaned = re.sub(r"\s+", " ", cleaned)
+            if not self._exact_anchor_term_allowed(cleaned):
+                return
+            key = self._compact_exact_anchor_text(cleaned)
+            if any(self._compact_exact_anchor_text(existing) == key for existing in terms):
+                return
+            terms.append(cleaned)
+
+        raw = str(raw_query or "").strip()
+        normalized = str(normalized_query or "").strip()
+        for text in (normalized, raw):
+            if not text:
+                continue
+            for match in EXACT_ANCHOR_UUID_RE.finditer(text):
+                add(match.group(0))
+            for match in EXACT_ANCHOR_QUOTED_RE.finditer(text):
+                add(match.group(1))
+            for match in EXACT_ANCHOR_CODE_RE.finditer(text):
+                add(match.group(0))
+            for match in EXACT_ANCHOR_COMPOUND_RE.finditer(text):
+                add(match.group(0))
+        add(self._clean_exact_anchor_phrase(raw))
+        return terms[:6]
+
+    def _clean_exact_anchor_phrase(self, query: str) -> str:
+        text = str(query or "").strip()
+        text = self._strip_leading_lookup_address_from_text(text, query)
+        text = re.sub(r"^(?:还记得|记不记得|记得|如果我说|假如我说|我说|提到|说起|讲到)\s*", "", text)
+        text = re.sub(r"\s*(?:吗|么|嘛|呀|啊|呢|吧|？|\?)+\s*$", "", text)
+        return text.strip()
+
+    def _exact_anchor_term_allowed(self, term: str) -> bool:
+        text = str(term or "").strip()
+        if not text:
+            return False
+        compact = self._compact_exact_anchor_text(text)
+        if len(compact) < 2 or len(compact) > 64:
+            return False
+        if self._is_exact_anchor_denied(compact):
+            return False
+        if EXACT_ANCHOR_UUID_RE.fullmatch(text):
+            return True
+        if EXACT_ANCHOR_CODE_RE.fullmatch(text):
+            return True
+        if EXACT_ANCHOR_COMPOUND_RE.fullmatch(text):
+            return True
+        question_markers = (
+            "为什么",
+            "怎么",
+            "为何",
+            "原因",
+            "相关",
+            "什么",
+            "啥",
+            "哪",
+            "哪里",
+            "哪个",
+            "哪段",
+            "哪次",
+            "谁",
+            "多少",
+            "几个",
+            "是否",
+            "是不是",
+            "有没有",
+        )
+        if re.fullmatch(r"[\u4e00-\u9fff]{3,18}", compact):
+            if any(marker in compact for marker in question_markers):
+                return False
+            return True
+        if (
+            3 <= len(compact) <= 48
+            and re.search(r"[\u4e00-\u9fff]", compact)
+            and re.search(r"[a-z0-9]", compact)
+        ):
+            if any(marker in compact for marker in question_markers):
+                return False
+            return True
+        return False
+
+    def _is_exact_anchor_denied(self, compact_term: str) -> bool:
+        key = str(compact_term or "").strip().lower()
+        if not key:
+            return True
+        deny_terms = set(QUERY_PLANNER_GENERIC_TERMS)
+        deny_terms.update(str(term or "") for term in getattr(self.relevance_options, "context_terms", []) or [])
+        for value in (
+            self.identity.get("ai_name"),
+            self.identity.get("user_name"),
+            self.identity.get("user_display_name"),
+        ):
+            if value:
+                deny_terms.add(str(value))
+        for value in self.identity.get("user_aliases") or []:
+            deny_terms.add(str(value))
+        compact_deny = {
+            self._compact_exact_anchor_text(term)
+            for term in deny_terms
+            if self._compact_exact_anchor_text(term)
+        }
+        return key in compact_deny
+
+    def _get_exact_anchor_candidates(
+        self,
+        raw_query: str,
+        normalized_query: str,
+        buckets: list[dict],
+    ) -> tuple[dict[str, float], dict[str, dict[str, Any]]]:
+        terms = self._extract_exact_anchor_terms(raw_query, normalized_query)
+        if not terms or not buckets:
+            return {}, {}
+
+        per_term: dict[str, list[tuple[str, float, str]]] = {term: [] for term in terms}
+        for bucket in buckets:
+            bucket_id = str(bucket.get("id") or "") if isinstance(bucket, dict) else ""
+            if not bucket_id:
+                continue
+            for term in terms:
+                score, field = self._bucket_exact_anchor_score(bucket, term)
+                if score > 0:
+                    per_term[term].append((bucket_id, score, field))
+
+        max_per_term = max(1, min(3, self.inject_max_cards + 1))
+        scores: dict[str, float] = {}
+        debug: dict[str, dict[str, Any]] = {}
+        for term in terms:
+            matches = sorted(per_term.get(term) or [], key=lambda item: (-item[1], item[0]))[:max_per_term]
+            for bucket_id, score, field in matches:
+                if score > scores.get(bucket_id, 0.0):
+                    scores[bucket_id] = score
+                bucket_debug = debug.setdefault(
+                    bucket_id,
+                    {
+                        "terms": [],
+                        "fields": [],
+                    },
+                )
+                if term not in bucket_debug["terms"]:
+                    bucket_debug["terms"].append(term)
+                if field not in bucket_debug["fields"]:
+                    bucket_debug["fields"].append(field)
+
+        ranked_ids = sorted(scores, key=lambda bucket_id: (-scores[bucket_id], bucket_id))
+        limit = max(self.dynamic_top_k, len(terms) * max_per_term)
+        kept_ids = set(ranked_ids[:limit])
+        return (
+            {bucket_id: round(scores[bucket_id], 4) for bucket_id in ranked_ids if bucket_id in kept_ids},
+            {bucket_id: debug[bucket_id] for bucket_id in ranked_ids if bucket_id in kept_ids},
+        )
+
+    def _bucket_exact_anchor_score(self, bucket: dict, term: str) -> tuple[float, str]:
+        anchor = self._compact_exact_anchor_text(term)
+        if not anchor:
+            return 0.0, ""
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        fields = (
+            ("id", bucket.get("id"), 1.0),
+            ("name", meta.get("name"), 0.98),
+            ("tags", " ".join(str(item) for item in meta.get("tags", []) or []), 0.96),
+            ("domain", " ".join(str(item) for item in meta.get("domain", []) or []), 0.90),
+            (
+                "content",
+                strip_display_temperature_sections(strip_wikilinks(str(bucket.get("content") or ""))),
+                0.88,
+            ),
+        )
+        best_score = 0.0
+        best_field = ""
+        for field, value, score in fields:
+            haystack = self._compact_exact_anchor_text(value)
+            if haystack and anchor in haystack and score > best_score:
+                best_score = score
+                best_field = field
+        return best_score, best_field
+
+    @staticmethod
+    def _compact_exact_anchor_text(value: object) -> str:
+        return re.sub(
+            r"[\s，。！？、,.!?:：;；~～♡❤♥（）()\[\]【】「」『』“”\"'`-]+",
+            "",
+            str(value or "").strip().lower(),
+        )
+
     def _planner_lexical_match_terms(self, terms: list[str] | None) -> list[str]:
         output = []
         seen = set()
@@ -8462,12 +9247,19 @@ class GatewayService:
         search_query: str = "",
         required_terms: list[str] | None = None,
         planner_query: dict[str, Any] | None = None,
+        allow_semantic: bool = True,
+        timing_debug: dict[str, Any] | None = None,
+        timing_prefix: str = "candidate",
     ) -> tuple[list[dict], list[dict]]:
+        def mark(name: str, started_at: float) -> None:
+            self._add_timing_ms(timing_debug, f"{timing_prefix}.{name}", started_at)
+
         if not query or self.inject_max_cards <= 0:
             return [], []
         if self._auto_query_too_vague(query):
             return [], []
 
+        stage_started_at = time.perf_counter()
         relevance_query = self._query_has_relevance_facet(query)
         eligible = [
             bucket for bucket in all_buckets
@@ -8477,6 +9269,7 @@ class GatewayService:
             )
             or (relevance_query and self._is_relevance_candidate_bucket(query, bucket))
         ]
+        mark("eligible_filter", stage_started_at)
         if not eligible:
             return [], []
 
@@ -8485,8 +9278,22 @@ class GatewayService:
         normalized_query = str(search_query or "").strip()
         if not normalized_query:
             normalized_query = self._normalized_recall_query(raw_query)
+        stage_started_at = time.perf_counter()
         keyword_scores = self._get_keyword_candidates(normalized_query, eligible) if normalized_query else {}
-        semantic_scores = await self._get_semantic_candidates(raw_query, set(bucket_map))
+        mark("keyword_candidates", stage_started_at)
+        stage_started_at = time.perf_counter()
+        if allow_semantic:
+            semantic_scores = await self._get_semantic_candidates(raw_query, set(bucket_map))
+        else:
+            semantic_scores = {}
+        mark("semantic_candidates", stage_started_at)
+        stage_started_at = time.perf_counter()
+        if planner_query is None and self._query_looks_emotional_reason_lookup(raw_query):
+            exact_scores, exact_debug = {}, {}
+        else:
+            exact_scores, exact_debug = self._get_exact_anchor_candidates(raw_query, normalized_query, eligible)
+        mark("exact_anchor_candidates", stage_started_at)
+        stage_started_at = time.perf_counter()
         if normalized_query:
             word_map_scores, word_map_debug = self._get_word_map_hint_scores(
                 normalized_query,
@@ -8495,6 +9302,8 @@ class GatewayService:
             )
         else:
             word_map_scores, word_map_debug = {}, {}
+        mark("word_map_hint", stage_started_at)
+        stage_started_at = time.perf_counter()
         lexical_terms = self._planner_lexical_match_terms(required_terms)
         if (
             not lexical_terms
@@ -8512,10 +9321,12 @@ class GatewayService:
             if lexical_terms and bucket.get("id") and self._bucket_matches_any_planner_term(bucket, lexical_terms)
         }
         diversity_terms = self._query_anchor_terms_for_diversity(normalized_query or raw_query)
-        candidate_ids = set(keyword_scores) | set(semantic_scores) | lexical_ids | set(word_map_scores)
+        mark("lexical_candidates", stage_started_at)
+        candidate_ids = set(keyword_scores) | set(semantic_scores) | set(exact_scores) | lexical_ids | set(word_map_scores)
         if not candidate_ids:
             return [], []
 
+        stage_started_at = time.perf_counter()
         now = datetime.now()
         recent_ids = self.state_store.get_recent_bucket_ids(session_id, self.skip_recent_rounds)
         scored_candidates = []
@@ -8528,14 +9339,25 @@ class GatewayService:
             importance_score = self._clamp(float(meta.get("importance", 5)) / 10.0)
             semantic_score = self._clamp(semantic_scores.get(bucket_id, 0.0))
             keyword_score = self._clamp(keyword_scores.get(bucket_id, 0.0))
+            exact_score = self._clamp(exact_scores.get(bucket_id, 0.0))
             word_map_score = self._clamp(word_map_scores.get(bucket_id, 0.0))
             lexical_match = bucket_id in lexical_ids
+            exact_match = bucket_id in exact_scores
             if lexical_match:
                 keyword_score = max(keyword_score, 1.0)
+            if exact_match:
+                keyword_score = max(keyword_score, exact_score)
             relevance_score = relevance_multiplier(query, self._bucket_relevance_node(bucket), self.relevance_options)
             if relevance_score <= 0:
                 continue
             matched_query_terms = self._bucket_matched_query_terms(bucket, diversity_terms)
+            if exact_match:
+                matched_query_terms = list(
+                    dict.fromkeys(
+                        matched_query_terms
+                        + list((exact_debug.get(bucket_id) or {}).get("terms") or [])
+                    )
+                )
             base_score = (
                 semantic_score * self.semantic_weight
                 + keyword_score * self.keyword_weight
@@ -8558,7 +9380,7 @@ class GatewayService:
                     self.high_confidence_cooldown_floor,
                 )
             final_score = round(base_score * cooldown_multiplier, 4)
-            if lexical_match:
+            if lexical_match or exact_match:
                 final_score = max(final_score, self.first_card_min_score)
             scored_candidates.append(
                 {
@@ -8566,6 +9388,10 @@ class GatewayService:
                     "score": final_score,
                     "semantic_score": semantic_score,
                     "keyword_score": keyword_score,
+                    "exact_anchor_score": exact_score,
+                    "exact_anchor_match": exact_match,
+                    "exact_anchor_terms": list((exact_debug.get(bucket_id) or {}).get("terms") or []),
+                    "exact_anchor_fields": list((exact_debug.get(bucket_id) or {}).get("fields") or []),
                     "word_map_score": word_map_score,
                     "word_map_hint": bucket_id in word_map_scores,
                     "word_map_terms": list((word_map_debug.get(bucket_id) or {}).get("direct_terms") or []),
@@ -8580,7 +9406,9 @@ class GatewayService:
                     "matched_query_terms": matched_query_terms,
                 }
             )
+        mark("score_candidates", stage_started_at)
 
+        stage_started_at = time.perf_counter()
         scored_candidates.sort(
             key=lambda item: self._bucket_recall_rank(
                 query,
@@ -8588,12 +9416,18 @@ class GatewayService:
                 item["score"],
             )
         )
+        scored_candidates.sort(key=lambda item: self._dynamic_bucket_priority(item))
+        mark("sort_candidates", stage_started_at)
+        stage_started_at = time.perf_counter()
         scored_candidates = await self._rerank_scored_bucket_candidates(query, scored_candidates)
+        mark("rerank_bucket_candidates", stage_started_at)
+        stage_started_at = time.perf_counter()
         filtered = [
             item
             for item in scored_candidates
             if item["bucket"]["id"] not in recent_ids
             or item.get("planner_lexical_match")
+            or item.get("exact_anchor_match")
             or self._is_high_confidence_match(
                 self._safe_float(item.get("semantic_score"), 0.0),
                 self._safe_float(item.get("keyword_score"), 0.0),
@@ -8617,6 +9451,7 @@ class GatewayService:
                 admitted_pool.append(item)
             else:
                 suppressed_candidates.append(item)
+        mark("admit_candidates", stage_started_at)
         return admitted_pool, suppressed_candidates
 
     async def _select_dynamic_buckets(
@@ -8629,6 +9464,7 @@ class GatewayService:
         include_query_planner_debug: bool = False,
     ) -> tuple[list[dict], list[dict]] | tuple[list[dict], list[dict], dict[str, Any]]:
         planner_debug = self._query_planner_debug_base(query)
+        timing_debug = planner_debug.setdefault("timing_ms", {})
         if not query or self.inject_max_cards <= 0:
             if include_query_planner_debug:
                 return [], [], planner_debug
@@ -8639,21 +9475,33 @@ class GatewayService:
                 return [], [], planner_debug
             return [], []
 
+        stage_started_at = time.perf_counter()
         active_pool, suppressed_candidates = await self._dynamic_bucket_candidate_items(
             query,
             session_id,
             all_buckets,
             search_query=search_query,
+            allow_semantic=True,
+            timing_debug=timing_debug,
+            timing_prefix="direct",
         )
+        self._add_timing_ms(timing_debug, "direct.candidate_items_total", stage_started_at)
+        stage_started_at = time.perf_counter()
         self._merge_word_map_hint_debug(planner_debug, active_pool + suppressed_candidates)
+        self._merge_exact_anchor_debug(planner_debug, active_pool + suppressed_candidates)
         direct_selected = self._pick_dynamic_cards(active_pool, query=query)
         selected_items = list(direct_selected)
+        self._add_timing_ms(timing_debug, "direct.pick_cards", stage_started_at)
 
+        stage_started_at = time.perf_counter()
         trigger_reason = self._query_planner_trigger_reason(query, direct_selected)
+        self._add_timing_ms(timing_debug, "query_planner_trigger_check", stage_started_at)
         if trigger_reason:
             planner_debug["triggered"] = True
             planner_debug["trigger_reason"] = trigger_reason
+            stage_started_at = time.perf_counter()
             plan, error = await self._call_query_planner(query)
+            self._add_timing_ms(timing_debug, "query_planner_call", stage_started_at)
             if error:
                 planner_debug["errors"].append(error)
                 if trigger_reason == "emotional_reason_lookup":
@@ -8664,12 +9512,14 @@ class GatewayService:
                 planner_debug["queries"] = plan.get("queries", [])
                 if plan.get("should_search") and not plan.get("too_vague"):
                     supplemental_items: list[dict] = []
-                    for planner_query in plan.get("queries", [])[: self.query_planner_max_queries]:
+                    planner_debug["supplemental_semantic_enabled"] = self.query_planner_supplemental_semantic
+                    for index, planner_query in enumerate(plan.get("queries", [])[: self.query_planner_max_queries]):
                         short_query = str(planner_query.get("query") or "").strip()
                         must_terms = list(planner_query.get("must_terms") or [])
                         if not short_query or not must_terms:
                             continue
                         short_search_query = self._normalized_recall_query(short_query)
+                        stage_started_at = time.perf_counter()
                         admitted, suppressed = await self._dynamic_bucket_candidate_items(
                             short_query,
                             session_id,
@@ -8677,10 +9527,20 @@ class GatewayService:
                             search_query=short_search_query,
                             required_terms=must_terms,
                             planner_query=planner_query,
+                            allow_semantic=self.query_planner_supplemental_semantic,
+                            timing_debug=timing_debug,
+                            timing_prefix=f"supplemental_{index}",
+                        )
+                        self._add_timing_ms(
+                            timing_debug,
+                            f"supplemental_{index}.candidate_items_total",
+                            stage_started_at,
                         )
                         supplemental_items.extend(admitted)
                         suppressed_candidates.extend(suppressed)
+                        stage_started_at = time.perf_counter()
                         self._merge_word_map_hint_debug(planner_debug, admitted + suppressed)
+                        self._merge_exact_anchor_debug(planner_debug, admitted + suppressed)
                         suppressed_must = [
                             self._format_suppressed_bucket_debug(item, query=short_query)
                             for item in suppressed
@@ -8708,11 +9568,14 @@ class GatewayService:
                                 ],
                             }
                         )
+                        self._add_timing_ms(timing_debug, f"supplemental_{index}.debug_merge", stage_started_at)
                     if supplemental_items:
+                        stage_started_at = time.perf_counter()
                         selected_items = self._pick_dynamic_cards(
                             self._merge_dynamic_bucket_items(selected_items + supplemental_items, query),
                             query=query,
                         )
+                        self._add_timing_ms(timing_debug, "supplemental.pick_cards", stage_started_at)
                 else:
                     planner_debug["skip_reason"] = "planner_returned_no_search"
         elif self.query_planner_enabled:
@@ -8805,7 +9668,7 @@ class GatewayService:
             has_topic_evidence=self._bucket_has_query_topic_evidence(query, bucket),
             semantic_score=item.get("semantic_score"),
             rerank_score=item.get("rerank_score"),
-            high_confidence_edge=bool(item.get("planner_lexical_match")),
+            high_confidence_edge=bool(item.get("planner_lexical_match") or item.get("exact_anchor_match")),
             auto=True,
         )
         item["admission_reason"] = decision.reason
@@ -8902,7 +9765,22 @@ class GatewayService:
         if not getattr(self.embedding_engine, "enabled", False):
             return {}
 
-        results = await self.embedding_engine.search_similar(query, top_k=self.dynamic_top_k)
+        try:
+            search = self.embedding_engine.search_similar(query, top_k=self.dynamic_top_k)
+            if self.embedding_query_timeout_seconds > 0:
+                results = await asyncio.wait_for(search, timeout=self.embedding_query_timeout_seconds)
+            else:
+                results = await search
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Gateway embedding semantic search timed out | query_chars=%s timeout_seconds=%.2f",
+                len(str(query or "")),
+                self.embedding_query_timeout_seconds,
+            )
+            return {}
+        except Exception as exc:
+            logger.warning("Gateway embedding semantic search failed: %s", exc)
+            return {}
         semantic_scores = {}
         for bucket_id, similarity in results:
             if bucket_id not in eligible_ids:
@@ -9042,6 +9920,41 @@ class GatewayService:
                 if value not in values:
                     values.append(value)
 
+    @staticmethod
+    def _exact_anchor_debug_from_items(items: list[dict]) -> dict[str, Any]:
+        payload = {
+            "bucket_ids": [],
+            "terms": [],
+        }
+        for item in items or []:
+            if not isinstance(item, dict) or not item.get("exact_anchor_match"):
+                continue
+            bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
+            bucket_id = str(bucket.get("id") or "")
+            if bucket_id and bucket_id not in payload["bucket_ids"]:
+                payload["bucket_ids"].append(bucket_id)
+            for term in item.get("exact_anchor_terms") or []:
+                if term not in payload["terms"]:
+                    payload["terms"].append(term)
+        return payload
+
+    def _merge_exact_anchor_debug(self, target: dict[str, Any], items: list[dict]) -> None:
+        if not isinstance(target, dict):
+            return
+        current = target.setdefault(
+            "exact_anchor_hints",
+            {
+                "bucket_ids": [],
+                "terms": [],
+            },
+        )
+        incoming = self._exact_anchor_debug_from_items(items)
+        for key in ("bucket_ids", "terms"):
+            values = current.setdefault(key, [])
+            for value in incoming.get(key) or []:
+                if value not in values:
+                    values.append(value)
+
     def _pick_dynamic_cards(self, scored_candidates: list[dict], *, query: str = "") -> list[dict]:
         if not scored_candidates:
             return []
@@ -9084,8 +9997,19 @@ class GatewayService:
             chosen.append(second)
         return chosen
 
-    def _dynamic_bucket_item_has_reliable_recall_signal(self, query: str, item: dict) -> bool:
+    def _dynamic_bucket_priority(self, item: dict) -> int:
+        if item.get("exact_anchor_match"):
+            return 0
+        if self._safe_float(item.get("semantic_score"), 0.0) >= self.high_confidence_semantic_score:
+            return 1
         if item.get("planner_lexical_match"):
+            return 2
+        if item.get("word_map_hint"):
+            return 3
+        return 4
+
+    def _dynamic_bucket_item_has_reliable_recall_signal(self, query: str, item: dict) -> bool:
+        if item.get("planner_lexical_match") or item.get("exact_anchor_match"):
             return True
         if self._is_high_confidence_match(
             self._safe_float(item.get("semantic_score"), 0.0),
@@ -9561,6 +10485,10 @@ class GatewayService:
             "score": self._safe_float(item.get("score"), 0.0),
             "semantic_score": self._safe_float(item.get("semantic_score"), 0.0),
             "keyword_score": self._safe_float(item.get("keyword_score"), 0.0),
+            "exact_anchor_score": self._safe_float(item.get("exact_anchor_score"), 0.0),
+            "exact_anchor_match": bool(item.get("exact_anchor_match")),
+            "exact_anchor_terms": list(item.get("exact_anchor_terms") or []),
+            "exact_anchor_fields": list(item.get("exact_anchor_fields") or []),
             "word_map_score": self._safe_float(item.get("word_map_score"), 0.0),
             "word_map_hint": bool(item.get("word_map_hint")),
             "word_map_terms": list(item.get("word_map_terms") or []),
@@ -10287,7 +11215,7 @@ class GatewayService:
         node = self._bucket_relevance_node(bucket)
         if should_suppress_context_candidate(query, node, self.relevance_options):
             return False
-        node_active = active_facets(facets_for_node(node, self.relevance_options), threshold=0.3)
+        node_active = active_facets(facets_for_node(node, self.relevance_options), threshold=0.25)
         if not node_active:
             return False
         if query_active & node_active:

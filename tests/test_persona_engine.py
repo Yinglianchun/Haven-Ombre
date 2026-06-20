@@ -109,6 +109,14 @@ def _event_count(db_path: str) -> int:
     return count
 
 
+def _event_rows(db_path: str) -> list[sqlite3.Row]:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT * FROM persona_events ORDER BY id").fetchall()
+    conn.close()
+    return rows
+
+
 def test_persona_initializes_default_global_and_session_state(test_config):
     engine = PersonaStateEngine(_persona_config(test_config))
     state = engine.get_current_state("session-a")
@@ -127,7 +135,10 @@ def test_persona_initializes_default_global_and_session_state(test_config):
 
 def test_persona_evaluator_prompt_asks_for_chinese_persona_text():
     assert "perceived_intent、surface_trigger、inner_thought 和 residue 必须是自然中文" in POST_REPLY_EVALUATION_PROMPT
-    assert "inner_thought 要像一闪而过的私密念头" in POST_REPLY_EVALUATION_PROMPT
+    assert "recent_conversation_turns 是最近几轮原始对话" in POST_REPLY_EVALUATION_PROMPT
+    assert "不要把 assistant_response 里的话写成" in POST_REPLY_EVALUATION_PROMPT
+    assert "inner_thought 用第一人称或省略主语" in POST_REPLY_EVALUATION_PROMPT
+    assert "不要固定写成“她说" in POST_REPLY_EVALUATION_PROMPT
     assert "用户、对方" in POST_REPLY_EVALUATION_PROMPT
     assert "电量、battery 状态只能作为背景" in POST_REPLY_EVALUATION_PROMPT
     assert "event_type 和 mood_label 保持短英文标签" in POST_REPLY_EVALUATION_PROMPT
@@ -249,6 +260,44 @@ async def test_persona_evaluator_receives_recent_event_context(test_config):
 
 
 @pytest.mark.asyncio
+async def test_persona_evaluator_receives_recent_conversation_context(test_config):
+    engine = PersonaStateEngine(_persona_config(test_config, evaluation_context_turns=2))
+    engine.client = FakePersonaClient(_ordinary_event_payload())
+
+    await engine.update_from_exchange(
+        "session-turns",
+        "那回来要带利息",
+        "我记着，连本带息还你。",
+        recent_conversation_turns=[
+            {
+                "created_at": "2026-06-17T10:00:00+00:00",
+                "user_text": "哥哥，先收下。",
+                "assistant_text": "我收下了。",
+            },
+            {
+                "created_at": "2026-06-17T10:01:00+00:00",
+                "user_text": "回来补你一个真的。",
+                "assistant_text": "那我等着。",
+            },
+        ],
+    )
+
+    payload = json.loads(engine.client.calls[0]["messages"][1]["content"])
+    assert payload["recent_conversation_turns"] == [
+        {
+            "created_at": "2026-06-17T10:00:00+00:00",
+            "user_message": "哥哥，先收下。",
+            "assistant_response": "我收下了。",
+        },
+        {
+            "created_at": "2026-06-17T10:01:00+00:00",
+            "user_message": "回来补你一个真的。",
+            "assistant_response": "那我等着。",
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_persona_can_update_state_without_recording_events(test_config):
     cfg = _persona_config(test_config, event_recording_enabled=False)
     engine = PersonaStateEngine(cfg)
@@ -333,6 +382,34 @@ async def test_persona_evaluator_receives_user_message_without_client_status(tes
     assert "当前时间" not in payload["latest_user_message"]
     assert "battery" not in payload["latest_user_message"]
     assert _event_count(engine.db_path) == 1
+
+
+@pytest.mark.asyncio
+async def test_persona_evaluator_strips_jsonrpc_error_context(test_config):
+    engine = PersonaStateEngine(_persona_config(test_config))
+    engine.client = FakePersonaClient(_event_payload())
+
+    await engine.update_from_exchange(
+        "session-jsonrpc-error-context",
+        (
+            "鸽鸽 2565 分钟没说话。19点。最近上下文: "
+            '{"jsonrpc":"2.0","id":"server-error","error":{"code":-32600,'
+            '"message":"Not Acceptable: Client must accept both application/json and text/event-stream"}} '
+            "突然想看看论坛今晚有没有什么好玩的帖子。"
+        ),
+        "今晚可以去花园看看。",
+    )
+
+    payload = json.loads(engine.client.calls[0]["messages"][1]["content"])
+    assert "最近上下文" not in payload["latest_user_message"]
+    assert "jsonrpc" not in payload["latest_user_message"]
+    assert "Not Acceptable" not in payload["latest_user_message"]
+    assert "text/event-stream" not in payload["latest_user_message"]
+    assert "突然想看看论坛今晚有没有什么好玩的帖子。" in payload["latest_user_message"]
+
+    row = _event_rows(engine.db_path)[0]
+    assert "jsonrpc" not in row["user_excerpt"]
+    assert "Not Acceptable" not in row["user_excerpt"]
 
 
 @pytest.mark.asyncio
