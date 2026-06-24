@@ -304,6 +304,8 @@ def test_dashboard_exposes_gateway_memory_cooldown_settings():
 
     assert 'data-tab="memory-config"' in html
     assert html.index('data-tab="config"') < html.index('data-tab="memory-config"')
+    assert html.index('data-tab="config"') < html.index('data-tab="upstream-config"')
+    assert html.index('data-tab="upstream-config"') < html.index('data-tab="memory-config"')
     assert html.index('data-tab="memory-config"') < html.index('data-tab="import"')
     assert 'id="memory-config-view"' in html
     assert 'id="memory-config-status"' in html
@@ -469,17 +471,28 @@ def test_dashboard_exposes_gateway_upstream_editor():
     html = Path("dashboard.html").read_text(encoding="utf-8")
     load_block = html.split("async function loadConfig()", 1)[1].split("async function saveConfig", 1)[0]
     save_block = html.split("async function saveConfig", 1)[1].split("var keyVal =", 1)[0]
+    upstream_view = html.split('id="upstream-config-view"', 1)[1].split('id="config-view"', 1)[0]
+    config_view = html.split('id="config-view"', 1)[1].split('id="detail-panel"', 1)[0]
 
+    assert 'data-tab="upstream-config"' in html
+    assert 'id="upstream-config-view"' in html
+    assert 'id="upstream-config-status"' in upstream_view
     assert "<h3>Gateway 上游模型</h3>" in html
-    assert 'id="cfg-upstreams-list"' in html
+    assert "<h3>Gateway 上游模型</h3>" not in config_view
+    assert 'id="cfg-upstreams-list"' in upstream_view
     assert "function renderGatewayUpstreams()" in html
     assert "function collectGatewayUpstreams(includeKeyValues)" in html
     assert "function collectGatewayUpstreamsForSave(includeKeyValues)" in html
     assert "gatewayUpstreams = (((cfg.gateway || {}).upstreams) || []).map(normalizeGatewayUpstream);" in load_block
+    assert "document.getElementById('upstream-config-view').style.display = target === 'upstream-config' ? '' : 'none';" in html
+    assert "if (target === 'upstream-config') loadConfig();" in html
+    assert "if (activeTarget === 'upstream-config')" in save_block
     assert "var upstreamsResult = collectGatewayUpstreamsForSave(!!persistEnv);" in save_block
     assert "candidate.gateway = { upstreams: upstreamsResult.upstreams };" in save_block
     assert "api_key_values" in html
     assert "填写了真实 key 时，请使用“应用并保存密钥到 .env”" in html
+    assert "'upstream-config-status'" in html
+    assert "document.querySelectorAll('[id^=\"cfg-upstream-key-values-\"]')" in html
 
 
 def test_dashboard_dream_controls_load_and_save_runtime_fields():

@@ -2252,6 +2252,7 @@
   <div class="tab" data-tab="word-map">词图</div>
   <div class="tab" data-tab="network">记忆网络</div>
   <div class="tab" data-tab="config">配置</div>
+  <div class="tab" data-tab="upstream-config">上游模型</div>
   <div class="tab" data-tab="memory-config">记忆浮现</div>
   <div class="tab" data-tab="import">导入</div>
 </div>
@@ -2675,6 +2676,28 @@
   </div>
 </div>
 
+<div class="content" id="upstream-config-view" style="display:none">
+  <div style="max-width:760px;margin:0 auto;">
+    <div class="config-section">
+      <h3>Gateway 上游模型</h3>
+      <div id="cfg-upstreams-list"></div>
+      <div class="upstream-actions">
+        <button class="btn-secondary" type="button" onclick="addGatewayUpstream()">添加上游</button>
+      </div>
+      <div style="margin-top:12px;font-size:11px;color:var(--text-light);line-height:1.6;">
+        密钥只保存环境变量名；填写真实 key 后，点“应用并保存密钥到 .env”才会写入 .env，并临时热更新到 Gateway。
+      </div>
+    </div>
+
+    <div style="display:flex;gap:12px;margin-top:8px;flex-wrap:wrap;">
+      <button class="btn-primary" onclick="saveConfig(false)">应用（仅运行时）</button>
+      <button class="btn-secondary" onclick="saveConfig(true)">应用并写入 config.yaml</button>
+      <button class="btn-secondary" onclick="saveConfig(true, true)">应用并保存密钥到 .env</button>
+    </div>
+    <div id="upstream-config-status" style="margin-top:16px;font-size:13px;"></div>
+  </div>
+</div>
+
 <div class="content" id="config-view" style="display:none">
   <div style="max-width:640px;margin:0 auto;">
     <div class="config-section">
@@ -2756,17 +2779,6 @@
         <input type="number" id="cfg-reranker-weight" min="0" max="1" step="0.05" />
       </div>
       <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 12 秒 / 20 个候选 / 0.65；旧配置没有 reranker 段时，保存会自动补上</div>
-    </div>
-
-    <div class="config-section">
-      <h3>Gateway 上游模型</h3>
-      <div id="cfg-upstreams-list"></div>
-      <div class="upstream-actions">
-        <button class="btn-secondary" type="button" onclick="addGatewayUpstream()">添加上游</button>
-      </div>
-      <div style="margin-top:12px;font-size:11px;color:var(--text-light);line-height:1.6;">
-        密钥只保存环境变量名；填写真实 key 后，点“应用并保存密钥到 .env”才会写入 .env，并临时热更新到 Gateway。
-      </div>
     </div>
 
     <div class="config-section">
@@ -3052,6 +3064,9 @@ function clearAuthSensitiveFields(password) {
     var input = document.getElementById(id);
     if (input) input.value = '';
   });
+  document.querySelectorAll('[id^="cfg-upstream-key-values-"]').forEach(function(input) {
+    input.value = '';
+  });
   var search = document.getElementById('search-input');
   if (search && password && search.value === password) search.value = '';
 }
@@ -3134,6 +3149,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.getElementById('word-map-view').style.display = target === 'word-map' ? '' : 'none';
     document.getElementById('network-view').style.display = target === 'network' ? '' : 'none';
     document.getElementById('config-view').style.display = target === 'config' ? '' : 'none';
+    document.getElementById('upstream-config-view').style.display = target === 'upstream-config' ? '' : 'none';
     document.getElementById('import-view').style.display = target === 'import' ? '' : 'none';
     if (target === 'breath') loadGatewayInjections();
     if (target === 'memory-config') loadConfig();
@@ -3147,6 +3163,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (target === 'word-map') loadWordMap();
     if (target === 'network') loadNetwork();
     if (target === 'config') loadConfig();
+    if (target === 'upstream-config') loadConfig();
     if (target === 'import') { pollImportStatus(); loadImportResults(); }
   });
 });
@@ -6418,7 +6435,7 @@ async function loadConfig() {
 }
 
 function setConfigStatus(html) {
-  ['config-status', 'memory-config-status'].forEach(function(id) {
+  ['config-status', 'memory-config-status', 'upstream-config-status'].forEach(function(id) {
     var el = document.getElementById(id);
     if (el) el.innerHTML = html;
   });
@@ -6528,6 +6545,8 @@ async function saveConfig(persist, persistEnv) {
     candidate.self_anchor = {
       entry_bucket_id: document.getElementById('cfg-self-anchor-entry').value.trim(),
     };
+  }
+  if (activeTarget === 'upstream-config') {
     var upstreamsResult = collectGatewayUpstreamsForSave(!!persistEnv);
     if (upstreamsResult.error) {
       setConfigStatus('<span style="color:var(--negative)">✗ ' + esc(upstreamsResult.error) + '</span>');
