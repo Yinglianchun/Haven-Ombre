@@ -6944,7 +6944,8 @@ class GatewayService:
             )
 
         stage_started_at = time.perf_counter()
-        search_query = self._normalized_recall_query(query)
+        entity_query = self.recall_policy.get_entity_query()
+        search_query = entity_query if entity_query else self._normalized_recall_query(query)
         selected_buckets, suppressed_buckets, query_planner_debug = await self._select_dynamic_buckets(
             query,
             session_id,

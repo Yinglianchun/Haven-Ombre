@@ -18,6 +18,7 @@ from memory_relevance import (
     recall_topic_query,
 )
 from identity import identity_names
+import jieba
 
 
 CONTEXT_ONLY_SECTIONS = frozenset({"affect_anchor", "favorite_reason", "comment"})
@@ -796,6 +797,7 @@ class RecallPolicy:
         self.recall_context_terms = self._normalize_recall_context_terms(
             [*self.options.context_terms, *GENERIC_RECALL_CONTEXT_TERMS]
         )
+        self._last_entity_keywords: list[str] = []
 
     def requires_topic_evidence(self, query: str) -> bool:
         return query_has_explicit_entity_marker(query) or query_has_technical_recall_marker(query)
@@ -836,9 +838,186 @@ class RecallPolicy:
         text = " ".join(str(query or "").lower().split())
         return any(marker in text for marker in OLD_OR_RESOLVED_QUERY_MARKERS)
 
+    def extract_entity_keywords(self, text: str) -> list[str]:
+        """Extract proper-noun / entity keywords from a query.
+
+        Three-stage extraction, ordered from most to least reliable:
+        1. POS pass — jieba noun-class tags (n/nr/ns/nz/nrt/eng).
+        2. lcut fallback — re-tag each lcut segment; keep if posseg
+           agrees it is noun-class (including s/x for rare names).
+        3. Regex fallback — 2-6 char CJK spans NOT fully blocked by
+           non-entity posseg tokens. Catches rare names jieba cannot
+           segment (e.g. "恋与深空", "晚怡").
+        A blocklist and CJK stopword filter run before dedup.
+        """
+        raw = str(text or "").strip()
+        if not raw:
+            self._last_entity_keywords = []
+            return []
+
+        _entity_blocklist = frozenset({
+            "有点想你", "好想你", "想你", "想你了",
+            "今天好累", "好累", "好困", "好饿",
+            "嗯嗯", "好的", "好吧", "行吧", "行了",
+            "没事", "没什么", "没啥", "没有",
+            "不知道", "不清楚", "不记得",
+            "谢谢", "感谢", "辛苦了",
+            "哈哈", "嘿嘿", "嘻嘻", "哈哈谢谢",
+            "早上好", "晚上好", "晚安", "早安",
+            "对不起", "抱歉", "不好意思",
+        })
+
+        _cjk_stop = frozenset(
+            "的了嘛吗呢啊呀欸诶吧哈嗯呜我你他她它是看找查问说想会能要去在有不这那"
+            "最先后今明昨刚已现当前下个次回来想去记知道以所因为果如而但只从对把被"
+            "好好很真太都可也才就还又有没啥嘛么喔哦嘿嗨诶喂和与及跟"
+        )
+
+        _noun_flags = frozenset({"n", "nr", "ns", "nz", "nrt", "eng"})
+        # POS tags that definitely indicate a common / non-entity word.
+        _non_entity_flags = frozenset({
+            "v", "vd", "vn", "a", "ad", "an", "d",
+            "t", "tg", "p", "pba", "pbei", "c",
+            "u", "uzhe", "ule", "uguo", "ude1", "ude2", "ude3",
+            "usuo", "udeng", "uyy", "udh", "uls", "uzhi", "ulian",
+            "e", "o", "y", "r", "rr", "ry", "rg", "rz",
+            "m", "mq", "q", "f",
+            "w", "wkz", "wky", "wyz", "wyy", "wj", "ww", "wt",
+            "wd", "wf", "wn", "wm", "ws", "wp", "wb", "wh",
+        })
+        # s=space and x=non-morpheme are borderline; allow them.
+        _allow_flags = _noun_flags | {"s", "x"}
+
+        entities: list[str] = []
+        pos_tagged: list[tuple[str, str, int]] = []  # (token, flag, start_pos)
+
+        try:
+            import jieba
+            import jieba.posseg as pseg
+
+            # --- Stage 1: POS-tagged noun-class entities ---
+            char_pos = 0
+            for word, flag in pseg.cut(raw):
+                cleaned = word.strip()
+                if not cleaned:
+                    continue
+                start = raw.find(cleaned, char_pos)
+                if start < 0:
+                    start = char_pos
+                pos_tagged.append((cleaned, flag, start))
+                char_pos = start + len(cleaned)
+
+                if flag == "eng" and len(cleaned) >= 1:
+                    entities.append(cleaned)
+                elif flag in {"nr", "ns", "nz", "nrt"} and len(cleaned) >= 2:
+                    entities.append(cleaned)
+                elif flag == "n" and len(cleaned) >= 2:
+                    if re.fullmatch(r"[一-鿿]+", cleaned):
+                        meaningful = "".join(
+                            ch for ch in cleaned if ch not in _cjk_stop
+                        )
+                        if len(meaningful) >= 2:
+                            entities.append(cleaned)
+
+            # --- Stage 2: lcut fallback ---
+            lcut_tokens = jieba.lcut(raw, cut_all=False)
+            for token in lcut_tokens:
+                cleaned = token.strip()
+                if (
+                    not re.fullmatch(r"[一-鿿]+", cleaned)
+                    or len(cleaned) < 2
+                    or cleaned in entities
+                ):
+                    continue
+                # Re-tag the isolated token with posseg.
+                subtokens = list(pseg.cut(cleaned))
+                if not subtokens:
+                    continue
+                # If the FIRST subtoken's flag is allowed → keep.
+                if subtokens[0].flag in _allow_flags:
+                    meaningful = "".join(
+                        ch for ch in cleaned if ch not in _cjk_stop
+                    )
+                    if len(meaningful) >= 2:
+                        entities.append(cleaned)
+                    continue
+                # lcut+posseg disagreement: lcut kept these chars together
+                # but posseg splits them.  Only keep if not ALL subtokens
+                # are confidently common words (v/a/d/t/p/c/u etc.).
+                # This catches rare names ("晚怡"→tg+vg, vg is borderline)
+                # while rejecting verb compounds ("改好"→v+a, both blocked).
+                if cleaned != subtokens[0].word:
+                    if not all(
+                        st.flag in _non_entity_flags for st in subtokens
+                    ):
+                        meaningful = "".join(
+                            ch for ch in cleaned if ch not in _cjk_stop
+                        )
+                        if len(meaningful) >= 2:
+                            entities.append(cleaned)
+
+            # --- Stage 3: Delimiter-split fallback for compound names ---
+            # Catch multi-character proper nouns that jieba segments across
+            # multiple tokens (e.g. "恋与深空" → lcut["恋","与","深空"]).
+            # Only process segments of 2-6 CJK chars (short enough to be a
+            # name, not a sentence), split by non-CJK delimiters.
+            blocked: list[bool] = [False] * len(raw)
+            for token, flag, start in pos_tagged:
+                end = start + len(token)
+                if flag in _non_entity_flags:
+                    for ci in range(start, min(end, len(raw))):
+                        blocked[ci] = True
+
+            segments = re.split(r"[^一-鿿]+", raw)
+            for span in segments:
+                if len(span) < 2 or len(span) > 6:
+                    continue
+                if span in entities:
+                    continue
+                span_start = raw.find(span)
+                if span_start < 0:
+                    continue
+                span_end = span_start + len(span)
+                if all(blocked[ci] for ci in range(span_start, span_end)):
+                    continue
+                meaningful = "".join(
+                    ch for ch in span if ch not in _cjk_stop
+                )
+                if len(meaningful) < 2:
+                    continue
+                entities.append(span)
+
+        except Exception:
+            pass
+
+        # --- Stage 4: Deduplicate and filter blocklist ---
+        seen: set[str] = set()
+        result: list[str] = []
+        blocklist_lower = {bl.lower() for bl in _entity_blocklist}
+        for e in entities:
+            key = e.lower()
+            if key in seen:
+                continue
+            if e in _entity_blocklist or key in blocklist_lower:
+                continue
+            seen.add(key)
+            result.append(e)
+
+        self._last_entity_keywords = result
+        return result
+
+    def get_entity_query(self) -> str:
+        """Return the last extracted entity keywords as a search query."""
+        return " ".join(self._last_entity_keywords)
+
     def is_auto_query_too_vague(self, query: str) -> bool:
         text = str(query or "").strip()
         if not text:
+            return False
+        # Extract entity keywords first: proper nouns, game/person names,
+        # etc. If any concrete entity is found the query is specific enough
+        # to proceed to recall regardless of surrounding filler words.
+        if self.extract_entity_keywords(text):
             return False
         if self._is_reaction_only_query(text):
             return True
