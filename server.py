@@ -10034,6 +10034,7 @@ async def api_config_get(request):
             "current_inner_state_interval_rounds": gateway_cfg.get("current_inner_state_interval_rounds", 15),
             "direct_render_mode": _normalize_direct_render_mode(gateway_cfg.get("direct_render_mode", "auto")),
             "retrieval_mode": _normalize_retrieval_mode(gateway_cfg.get("retrieval_mode", "graph")),
+            "word_map_hint_enabled": _bool_value(gateway_cfg.get("word_map_hint_enabled"), False),
             "portrait_memory_enabled": _bool_value(gateway_cfg.get("portrait_memory_enabled"), False),
             "portrait_memory_budget": gateway_cfg.get("portrait_memory_budget", 360),
             "portrait_memory_max_sources": gateway_cfg.get("portrait_memory_max_sources", 8),
