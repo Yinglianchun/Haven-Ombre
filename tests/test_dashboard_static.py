@@ -236,7 +236,7 @@ def test_dashboard_exposes_portrait_state_panel():
     assert "loadPortraitState();" in load_buckets_block
 
 
-def test_dashboard_keeps_self_anchor_and_profile_domain_filter():
+def test_dashboard_keeps_compact_legacy_filter_row_and_compatible_filters():
     html = Path("dashboard.html").read_text(encoding="utf-8")
     build_block = html.split("function buildFilters()", 1)[1].split("function filterBuckets", 1)[0]
     filter_block = html.split("function filterBuckets", 1)[1].split("function bucketBulkDeleteBlockReason", 1)[0]
@@ -244,13 +244,29 @@ def test_dashboard_keeps_self_anchor_and_profile_domain_filter():
     assert "function isSelfAnchorBucket" in html
     assert "tag:self_anchor" in build_block
     assert "label: '自我'" in build_block
-    assert "const profileDomainAliases = new Set(['preference', 'project_milestone', 'relationship_anchor']);" in build_block
+    assert "label: '全部'" in build_block
+    assert "label: '📌 钉选'" in build_block
+    assert "label: '⚓ Anchor'" in build_block
+    assert "label: 'Feel'" in build_block
+    assert "label: '日印象'" in build_block
+    assert "label: '⚡ 未解决'" in build_block
+    assert "label: '🌿 已消化'" in build_block
+    assert "label: '📦 归档'" in build_block
+    assert "旧标签 / legacy domain" not in build_block
+    assert "canonicalDomains" not in build_block
+    assert "kindFilters" not in build_block
+    assert "statusFilters" not in build_block
+    assert "flagFilters" not in build_block
     assert "key: 'profile'" not in build_block
     assert "label: '画像'" not in build_block
     assert "filters.onclick = function(e)" in build_block
     assert "filters.addEventListener" not in build_block
     assert "currentFilter === 'profile'" not in filter_block
     assert "currentFilter === 'tag:self_anchor'" in filter_block
+    assert "currentFilter.startsWith('canonical_domain:')" in filter_block
+    assert "currentFilter.startsWith('legacy_domain:')" in filter_block
+    assert "&& !isDailyImpressionBucket(b)" in filter_block
+    assert "&& !isSelfAnchorBucket(b)" in filter_block
 
 
 def test_dashboard_hides_confirm_button_for_active_profile_facts():

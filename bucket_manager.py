@@ -41,7 +41,14 @@ import jieba
 
 from identity import identity_names
 from memory_relevance import content_terms_for_query, memory_relevance_options_from_config, recall_topic_query
-from utils import generate_bucket_id, sanitize_name, safe_path, now_iso, strip_affect_anchor, strip_wikilinks
+from utils import (
+    bucket_content_for_recall,
+    generate_bucket_id,
+    now_iso,
+    safe_path,
+    sanitize_name,
+    strip_wikilinks,
+)
 
 logger = logging.getLogger("ombre_brain.bucket")
 
@@ -1038,7 +1045,7 @@ class BucketManager:
         return self._compact_lexical_phrase(text)
 
     def _bucket_searchable_content(self, bucket: dict) -> str:
-        return strip_affect_anchor(strip_wikilinks(str(bucket.get("content", ""))))[:1000]
+        return bucket_content_for_recall(bucket)[:1000]
 
     def _bucket_lexical_profile(self, bucket: dict) -> tuple[Counter[str], float]:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}

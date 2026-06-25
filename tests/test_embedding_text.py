@@ -2,6 +2,7 @@ from utils import (
     bucket_text_for_embedding,
     strip_affect_anchor,
     strip_display_temperature_sections,
+    strip_followup_sections,
     strip_temperature_meaning_lines,
 )
 
@@ -32,6 +33,46 @@ def test_bucket_text_for_embedding_includes_title_and_content_only():
 
 def test_bucket_text_for_embedding_keeps_content_only_shape_without_title():
     assert bucket_text_for_embedding({"content": "只有正文", "metadata": {}}) == "只有正文"
+
+
+def test_bucket_text_for_embedding_excludes_followup_and_todo_sections():
+    text = bucket_text_for_embedding(
+        {
+            "content": (
+                "正文要保留：海边神庙在水边。\n\n"
+                "### followup\n"
+                "修 VPS smoke，别让它进普通 embedding。\n\n"
+                "### todo\n"
+                "再检查待办表。\n\n"
+                "### reflection\n"
+                "这段反思现在仍保留，后续再按场景降权。"
+            ),
+            "metadata": {"name": "水边记忆"},
+        }
+    )
+
+    assert "海边神庙" in text
+    assert "reflection" in text
+    assert "修 VPS smoke" not in text
+    assert "待办表" not in text
+    assert "followup" not in text
+    assert "todo" not in text
+
+
+def test_strip_followup_sections_excludes_followup_log():
+    text = (
+        "正文。\n\n"
+        "### followup\n"
+        "未完成的事。\n\n"
+        "### followup_log\n"
+        "[done 2026-06-25] 已完成的事。"
+    )
+
+    cleaned = strip_followup_sections(text)
+
+    assert "未完成的事" not in cleaned
+    assert "followup_log" not in cleaned
+    assert "[done 2026-06-25]" not in cleaned
 
 
 def test_strip_affect_anchor_preserves_following_sections():

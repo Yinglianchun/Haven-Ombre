@@ -61,7 +61,7 @@ DIFFUSE_CAREFUL_SOURCE = "careful_source"
 DIFFUSE_CHAIN_ONLY = "chain_only"
 DIFFUSE_NEVER = "never"
 
-CONTEXT_ONLY_SECTIONS = frozenset({"comment", "affect_anchor", "favorite_reason"})
+CONTEXT_ONLY_SECTIONS = frozenset({"comment", "affect_anchor", "favorite_reason", "followup", "followup_log"})
 RELATIONSHIP_WEATHER_TAGS = frozenset(
     {"relationship_weather", "daily_impression", "weekly_impression"}
 )

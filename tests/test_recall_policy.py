@@ -168,7 +168,7 @@ def test_entity_keywords_prevent_short_proper_nouns_from_being_skipped():
     policy = RecallPolicy()
 
     assert "伽罗" in policy.extract_entity_keywords("伽罗")
-    assert "恋与深空" in policy.extract_entity_keywords("恋与深空")
+    assert "以闪亮之名" in policy.extract_entity_keywords("以闪亮之名")
     assert "宁德哥" in policy.extract_entity_keywords("最近宁德哥妈死了")
     assert "晚怡" in policy.extract_entity_keywords("改好了 再测试一下 晚怡")
     assert policy.extract_entity_keywords("嗯嗯好的") == []
@@ -187,6 +187,31 @@ def test_entity_keywords_prevent_short_proper_nouns_from_being_skipped():
     assert not policy.is_auto_query_too_vague("改好了 再测试一下 晚怡")
     assert policy.is_auto_query_too_vague("嗯嗯好的")
     assert not policy.is_auto_query_too_vague("找了 对了 再测试一个 宁德哥")
+
+
+def test_affection_only_queries_do_not_unlock_memory_recall():
+    policy = RecallPolicy()
+
+    for query in [
+        "亲亲",
+        "抱抱",
+        "老婆贴贴",
+        "宝宝想你了",
+        "想你了",
+        "我想你了",
+        "老公想你啦",
+        "爱你",
+        "你爱我吗",
+        "你还爱我吗",
+        "蹭蹭",
+    ]:
+        assert policy.is_auto_query_too_vague(query)
+        assert policy.extract_entity_keywords(query) == []
+
+    assert not policy.is_auto_query_too_vague("亲亲，种子项目现在怎样")
+    assert not policy.is_auto_query_too_vague("哈哈逗你玩，gateway.py 那刀怎么样")
+    assert not policy.is_auto_query_too_vague("宝宝你还记得海边神庙吗")
+    assert not policy.is_auto_query_too_vague("想你那天是不是水边那次")
 
 
 def test_short_taste_query_requires_real_taste_evidence():
@@ -309,6 +334,8 @@ def test_bucket_topic_evidence_ignores_markdown_temperature_sections():
             "handoff bridge 注入 原文\n\n"
             "### 喜欢它的原因\n"
             "FF14 蓝色\n\n"
+            "### followup\n"
+            "VPS smoke 待检查\n\n"
             "### fact\n"
             "用户喜欢蓝色。"
         ),
@@ -318,6 +345,7 @@ def test_bucket_topic_evidence_ignores_markdown_temperature_sections():
     assert not policy.bucket_has_topic_evidence("handoff bridge 注入 原文", bucket)
     assert policy.bucket_has_topic_evidence("蓝色", bucket)
     assert not policy.bucket_has_topic_evidence("FF14", bucket)
+    assert not policy.bucket_has_topic_evidence("VPS smoke", bucket)
 
 
 def test_moment_topic_evidence_uses_text_and_bucket_metadata():

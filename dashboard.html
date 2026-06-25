@@ -4372,74 +4372,29 @@ function updateStats() {
 
 function buildFilters() {
   const filters = document.getElementById('filters');
-  const profileDomainAliases = new Set(['preference', 'project_milestone', 'relationship_anchor']);
-  const canonicalDomains = new Set();
-  const kinds = new Set();
-  const statuses = new Set();
-  const flags = new Set();
-  const legacyDomains = new Set();
-  allBuckets.forEach(function(bucket) {
-    if (bucketCanonicalDomain(bucket)) canonicalDomains.add(bucketCanonicalDomain(bucket));
-    if (bucketKind(bucket)) kinds.add(bucketKind(bucket));
-    if (bucketStatusView(bucket)) statuses.add(bucketStatusView(bucket));
-    bucketFlags(bucket).forEach(function(flag) { flags.add(flag); });
-    bucketLegacyDomain(bucket).forEach(function(domain) { legacyDomains.add(domain); });
-  });
-  const baseFilters = [{ key: 'all', label: '全部' }];
-  const domainFilters = Array.from(canonicalDomains).sort().map(function(value) {
-    return { key: 'canonical_domain:' + value, label: value };
-  });
-  const kindFilters = Array.from(kinds).sort().map(function(value) {
-    return { key: 'kind:' + value, label: value };
-  });
-  const statusFilters = Array.from(statuses).sort().map(function(value) {
-    return { key: 'status_view:' + value, label: value };
-  });
-  const flagFilters = Array.from(flags).sort().map(function(value) {
-    return { key: 'flag:' + value, label: value };
-  });
   const legacyViewFilters = [
+    { key: 'all', label: '全部' },
     { key: 'pinned', label: '📌 钉选' },
     { key: 'anchor', label: '⚓ Anchor' },
-    { key: 'feel', label: '🫧 Feel' },
+    { key: 'feel', label: 'Feel' },
     { key: 'daily_impression', label: '日印象' },
     { key: 'unresolved', label: '⚡ 未解决' },
     { key: 'digested', label: '🌿 已消化' },
     { key: 'archived', label: '📦 归档' },
+    { key: 'tag:self_anchor', label: '自我' },
   ];
-  if (allBuckets.some(isSelfAnchorBucket)) legacyViewFilters.push({ key: 'tag:self_anchor', label: '自我' });
-  const legacyFilters = Array.from(legacyDomains).filter(function(value) {
-    return !profileDomainAliases.has(String(value || '').trim());
-  }).sort().slice(0, 20).map(function(value) {
-    return { key: 'legacy_domain:' + value, label: value };
-  });
-  const groups = [
-    { label: '主域', items: baseFilters.concat(domainFilters) },
-    { label: '类型', items: kindFilters },
-    { label: '状态', items: statusFilters },
-    { label: '标记', items: flagFilters },
-    { label: '旧视图', items: legacyViewFilters },
-  ];
-  const availableFilters = groups.reduce(function(output, group) {
-    return output.concat(group.items.map(function(item) { return item.key; }));
-  }, legacyFilters.map(function(item) { return item.key; }));
-  if (availableFilters.indexOf(currentFilter) === -1) currentFilter = 'all';
+  const visibleFilters = legacyViewFilters.map(function(item) { return item.key; });
+  const compatiblePrefixes = ['canonical_domain:', 'kind:', 'status_view:', 'flag:', 'legacy_domain:', 'tag:', 'domain:'];
+  const isCompatibleFilter = currentFilter === 'all'
+    || visibleFilters.indexOf(currentFilter) !== -1
+    || compatiblePrefixes.some(function(prefix) { return currentFilter.startsWith(prefix); });
+  if (!isCompatibleFilter) currentFilter = 'all';
   function renderButton(item) {
     return '<button class="filter-btn ' + (item.key === currentFilter ? 'active' : '') + '" data-filter="' + escAttr(item.key) + '">' + esc(item.label) + '</button>';
   }
-  filters.innerHTML = groups.filter(function(group) {
-    return group.items.length;
-  }).map(function(group) {
-    return '<div class="filter-group"><span class="filter-group-label">' + esc(group.label) + '</span>' +
-      group.items.map(renderButton).join('') +
-      '</div>';
-  }).join('') + (
-    legacyFilters.length
-      ? '<details class="filter-legacy"><summary>旧标签 / legacy domain</summary><div class="filter-group">' +
-        legacyFilters.map(renderButton).join('') +
-        '</div></details>'
-      : ''
-  );
+  filters.innerHTML = '<div class="filter-group"><span class="filter-group-label">旧视图</span>' +
+    legacyViewFilters.map(renderButton).join('') +
+    '</div>';
 
   filters.onclick = function(e) {
     var btn = e.target.closest('.filter-btn');
@@ -4457,7 +4412,13 @@ function filterBuckets(buckets) {
   if (currentFilter === 'anchor') return buckets.filter(function(b) { return b.anchor; });
   if (currentFilter === 'feel') return buckets.filter(function(b) { return b.type === 'feel' && !isDailyImpressionBucket(b); });
   if (currentFilter === 'daily_impression') return buckets.filter(isDailyImpressionBucket);
-  if (currentFilter === 'unresolved') return buckets.filter(function(b) { return !b.resolved && b.type !== 'permanent' && !b.pinned; });
+  if (currentFilter === 'unresolved') return buckets.filter(function(b) {
+    return !b.resolved
+      && b.type !== 'permanent'
+      && !b.pinned
+      && !isDailyImpressionBucket(b)
+      && !isSelfAnchorBucket(b);
+  });
   if (currentFilter === 'digested') return buckets.filter(function(b) { return b.digested; });
   if (currentFilter === 'archived') return buckets.filter(function(b) { return b.type === 'archived' || b.score < 0.3; });
   if (currentFilter === 'tag:self_anchor') return buckets.filter(isSelfAnchorBucket);

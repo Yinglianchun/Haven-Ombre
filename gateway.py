@@ -79,6 +79,7 @@ from self_anchor import is_self_anchor_bucket, is_self_anchor_metadata
 from source_refs import source_ref_window
 from utils import (
     count_tokens_approx,
+    bucket_content_for_recall,
     bucket_text_for_embedding,
     local_date_key,
     load_config,
@@ -86,6 +87,7 @@ from utils import (
     setup_logging,
     strip_human_date_references,
     strip_display_temperature_sections,
+    strip_followup_sections,
     strip_temperature_meaning_lines,
     strip_wikilinks,
 )
@@ -275,8 +277,9 @@ MOMENT_SECTION_LABELS = {
     "favorite_reason": "favorite_reason",
     "comment": "year_ring",
 }
-MOMENT_TEMPERATURE_SECTIONS = CONTEXT_ONLY_SECTIONS
-PROFILE_CONTEXT_SECTIONS = ("evidence_context", "context", "reflection", "feeling", "followup", "comment")
+TASK_ONLY_MOMENT_SECTIONS = {"followup", "followup_log"}
+MOMENT_TEMPERATURE_SECTIONS = CONTEXT_ONLY_SECTIONS - TASK_ONLY_MOMENT_SECTIONS
+PROFILE_CONTEXT_SECTIONS = ("evidence_context", "context", "reflection", "feeling", "comment")
 
 
 class GatewayService:
@@ -7063,6 +7066,7 @@ class GatewayService:
                     moment_query,
                     limit=max(self.moment_search_limit, self.inject_max_cards * 8),
                     bucket_boosts=bucket_boosts,
+                    exclude_sections=TASK_ONLY_MOMENT_SECTIONS,
                 ):
                     moment_id = str(moment.get("moment_id") or "")
                     if moment_id and moment_id in seen_moment_ids:
@@ -7970,6 +7974,7 @@ class GatewayService:
     def _rendered_bucket_content(bucket: dict) -> str:
         text = strip_wikilinks(str(bucket.get("content") or ""))
         text = strip_display_temperature_sections(text)
+        text = strip_followup_sections(text)
         text = strip_temperature_meaning_lines(text).strip()
         # Deduplicate: if body first sentence ≈ moment text, drop the duplicate from body
         if "### moment" in text:
@@ -9731,7 +9736,7 @@ class GatewayService:
                 str(meta.get("name") or bucket.get("id") or ""),
                 " ".join(str(tag) for tag in meta.get("tags", []) or []),
                 " ".join(str(item) for item in meta.get("domain", []) or []),
-                strip_wikilinks(str(bucket.get("content") or "")),
+                bucket_content_for_recall(bucket),
             ]
         ).lower()
         return any(str(term or "").strip().lower() in fields for term in terms)
@@ -9903,7 +9908,7 @@ class GatewayService:
             ("domain", " ".join(str(item) for item in meta.get("domain", []) or []), 0.90),
             (
                 "content",
-                strip_display_temperature_sections(strip_wikilinks(str(bucket.get("content") or ""))),
+                strip_display_temperature_sections(bucket_content_for_recall(bucket)),
                 0.88,
             ),
         )
@@ -10531,7 +10536,7 @@ class GatewayService:
             f"title: {meta.get('name') or bucket.get('id') or ''}",
             f"domain: {' '.join(str(item) for item in meta.get('domain', []) or [])}",
             f"tags: {' '.join(str(item) for item in meta.get('tags', []) or [])}",
-            f"content: {strip_wikilinks(str(bucket.get('content') or ''))}",
+            f"content: {bucket_content_for_recall(bucket)}",
         ]
         return "\n".join(fields)[:4000]
 
@@ -11055,10 +11060,10 @@ class GatewayService:
                 for comment in comments
                 if isinstance(comment, dict)
             )
-        return f"{strip_wikilinks(bucket.get('content', '')).strip()}\n{comment_text}".strip()
+        return f"{bucket_content_for_recall(bucket)}\n{comment_text}".strip()
 
     def _bucket_context_snippet(self, bucket: dict, max_chars: int = 180) -> str:
-        text = " ".join(strip_wikilinks(str(bucket.get("content") or "")).split())
+        text = " ".join(bucket_content_for_recall(bucket).split())
         if len(text) <= max_chars:
             return text
         return text[:max_chars].rstrip() + "..."
@@ -11535,7 +11540,7 @@ class GatewayService:
                 explicit_lookup=explicit_lookup,
                 query=query,
             ),
-            "content_preview": self._clip_text(strip_wikilinks(str(bucket.get("content") or "")), 180),
+            "content_preview": self._clip_text(bucket_content_for_recall(bucket), 180),
         }
 
     def _format_moment_debug(
@@ -12214,7 +12219,7 @@ class GatewayService:
     def _bucket_relevance_node(self, bucket: dict) -> dict:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         return {
-            "content": bucket.get("content") or "",
+            "content": bucket_content_for_recall(bucket),
             "name": meta.get("name") or bucket.get("id") or "",
             "metadata": meta,
         }

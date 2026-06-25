@@ -233,6 +233,20 @@ def test_bucket_manager_loads_content_start_line(test_config):
     assert lines[bucket["content_start_line"] - 1] == "正文第一行"
 
 
+def test_bucket_manager_topic_score_excludes_followup_sections(test_config):
+    bucket_mgr = BucketManager(test_config)
+    bucket = _bucket(
+        "todo-body",
+        "正文只说普通排查。\n\n### followup\n修 VPS smoke，连续测两遍同一条内容。",
+        name="普通记录",
+        tags=[],
+        domain=[],
+    )
+
+    assert bucket_mgr._calc_topic_score("VPS smoke", bucket) == 0.0
+    assert bucket_mgr._calc_topic_score("普通排查", bucket) > 0.0
+
+
 def test_favorite_tags_and_affect_anchor_are_preserved_as_bucket_temperature():
     bucket = _bucket(
         "warm",
@@ -331,6 +345,37 @@ def test_search_expands_body_query_to_embodiment_terms(test_config):
     results = store.search_moments("身体", limit=5)
 
     assert [item["bucket_id"] for item in results] == ["embodied"]
+
+
+def test_search_moments_can_exclude_or_select_followup_sections(test_config):
+    store = MemoryMomentStore(test_config)
+    store.bulk_upsert(
+        [
+            _bucket(
+                "mixed",
+                "\n".join(
+                    [
+                        "正文说海边神庙在水边。",
+                        "",
+                        "### followup",
+                        "修 VPS smoke 这件待办也提到水边。",
+                        "",
+                        "### followup_log",
+                        "[done 2026-06-25] 修 VPS smoke 这件已完成待办。",
+                    ]
+                ),
+            )
+        ]
+    )
+
+    ordinary = store.search_moments("VPS smoke", limit=5, exclude_sections={"followup", "followup_log"})
+    todo = store.search_moments("VPS smoke", limit=5, include_sections={"followup"})
+    todo_log = store.search_moments("VPS smoke", limit=5, include_sections={"followup_log"})
+
+    assert ordinary == []
+    assert [item["section"] for item in todo] == ["followup"]
+    assert [item["section"] for item in todo_log] == ["followup_log"]
+    assert "VPS smoke" in todo[0]["text"]
 
 
 def test_moment_store_builds_context_and_temperature_edges(test_config):

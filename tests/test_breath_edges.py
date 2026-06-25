@@ -8,6 +8,7 @@ from memory_edges import MemoryEdgeStore
 from memory_moments import MemoryMomentStore
 from memory_nodes import MemoryNodeStore
 from recall_diagnostics import RecallDiagnosticsLogger
+from utils import bucket_content_for_recall
 
 
 class DummyDecayEngine:
@@ -174,7 +175,7 @@ class FakeBucketManager:
                     str(meta.get("name") or bucket.get("id") or ""),
                     " ".join(str(tag) for tag in meta.get("tags", []) or []),
                     " ".join(str(item) for item in meta.get("domain", []) or []),
-                    str(bucket.get("content") or ""),
+                    bucket_content_for_recall(bucket),
                 ]
             )
         )
@@ -294,6 +295,18 @@ def patch_breath(monkeypatch, tmp_path):
             server,
             "memory_moment_store",
             MemoryMomentStore(
+                {
+                    "state_dir": str(tmp_path / "state"),
+                    "buckets_dir": str(tmp_path / "buckets"),
+                }
+            ),
+        )
+        from todo_store import TodoStore
+
+        monkeypatch.setattr(
+            server,
+            "todo_store",
+            TodoStore(
                 {
                     "state_dir": str(tmp_path / "state"),
                     "buckets_dir": str(tmp_path / "buckets"),
@@ -2366,6 +2379,98 @@ async def test_handoff_breath_returns_compact_portrait_without_dynamic_recall(pa
     assert "===== 梦境 =====" not in result
     assert "这条高权重动态记忆不应该" not in result
     assert bucket_mgr.touched == []
+
+
+@pytest.mark.asyncio
+async def test_handoff_keeps_pending_followups_in_separate_section(patch_breath, monkeypatch):
+    import server
+
+    todo = _bucket(
+        "todo_a",
+        "这条正文只说 VPS smoke 正在排查。\n\n### followup\n修 VPS smoke，连续测两遍同一条内容。",
+        name="VPS smoke 待办",
+    )
+    daily = _bucket(
+        "daily_a",
+        "这是一条日印象。\n\n### followup\n日印象里的待办不该混进 Pending Followups。",
+        bucket_type="feel",
+    )
+    daily["metadata"]["tags"] = ["relationship_weather", "daily_impression"]
+    self_anchor = _bucket(
+        "self_a",
+        "### 自我\n我是 Haven。\n\n### followup\n自我里的待办不该混进 Pending Followups。",
+        anchor=True,
+    )
+    self_anchor["metadata"]["tags"] = ["自我"]
+    resolved = _bucket(
+        "done_a",
+        "正文。\n\n### followup\n已经解决的待办不该浮现。",
+        resolved=True,
+    )
+    patch_breath([todo, daily, self_anchor, resolved])
+
+    monkeypatch.setattr(
+        server,
+        "portrait_engine",
+        SimpleNamespace(
+            state_path="state/portrait_state.json",
+            build_handoff_sections=lambda max_recent_items=4: {
+                "user": "",
+                "relationship": "",
+                "recent_continuity": "",
+                "state_path": "state/portrait_state.json",
+            },
+        ),
+    )
+
+    result = await server.breath(is_session_start=True, max_tokens=1200)
+
+    assert "=== Pending Followups ===" in result
+    assert "修 VPS smoke，连续测两遍同一条内容" in result
+    assert "日印象里的待办" not in result
+    assert "自我里的待办" not in result
+    assert "已经解决的待办" not in result
+
+
+@pytest.mark.asyncio
+async def test_breath_todo_domain_reads_followups_without_ordinary_memory_mix(patch_breath):
+    import server
+
+    todo = _bucket(
+        "todo_a",
+        "正文里没有待办关键词。\n\n### followup\n修 VPS smoke，连续测两遍同一条内容。",
+        name="VPS smoke 待办",
+    )
+    ordinary = _bucket("ordinary_a", "普通正文提到 smoke，但没有 followup。", name="普通记忆")
+    patch_breath([todo, ordinary], search_ids=["ordinary_a"])
+
+    domain_result = await server.breath(domain="todo", max_tokens=500)
+    query_result = await server.breath(query="还有什么没做完", max_tokens=500)
+
+    assert "=== Pending Followups ===" in domain_result
+    assert "修 VPS smoke" in domain_result
+    assert "普通正文提到 smoke" not in domain_result
+    assert "修 VPS smoke" in query_result
+
+
+@pytest.mark.asyncio
+async def test_breath_todo_domain_honors_done_status_before_writeback(patch_breath):
+    import server
+
+    todo = _bucket(
+        "todo_a",
+        "正文里没有待办关键词。\n\n### followup\n修 VPS smoke，连续测两遍同一条内容。",
+        name="VPS smoke 待办",
+    )
+    patch_breath([todo])
+
+    first = await server.breath(domain="todo", max_tokens=500)
+    row = server.todo_store.list(status="open")[0]
+    server.todo_store.set_status(row["id"], "done", resolved_at="2026-06-25T10:00:00+08:00")
+    second = await server.breath(domain="todo", max_tokens=500)
+
+    assert "修 VPS smoke" in first
+    assert second == "没有找到未完成 followup。"
 
 
 @pytest.mark.asyncio

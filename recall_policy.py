@@ -20,19 +20,29 @@ from memory_relevance import (
 from identity import identity_names
 
 
-CONTEXT_ONLY_SECTIONS = frozenset({"affect_anchor", "favorite_reason", "comment"})
+CONTEXT_ONLY_SECTIONS = frozenset({"affect_anchor", "favorite_reason", "comment", "followup"})
 CONTEXT_ONLY_SECTION_ALIASES = {
     "affect_anchor": "affect_anchor",
     "affect anchor": "affect_anchor",
     "favorite_reason": "favorite_reason",
     "favorite reason": "favorite_reason",
     "comment": "comment",
+    "followup": "followup",
+    "follow-up": "followup",
+    "followups": "followup",
+    "todo": "followup",
+    "to-do": "followup",
+    "next": "followup",
     "year_ring": "comment",
     "year ring": "comment",
     "喜欢它的原因": "favorite_reason",
     "喜欢的原因": "favorite_reason",
     "年轮": "comment",
     "评论": "comment",
+    "后续": "followup",
+    "后续待办": "followup",
+    "待办": "followup",
+    "待办事项": "followup",
 }
 MARKDOWN_HEADING_RE = re.compile(r"^(#{2,6})\s+(.+?)\s*$")
 WEAK_RECALL_TOPIC_TERMS = frozenset(
@@ -458,6 +468,70 @@ SHORT_CASUAL_FILLER_TERMS = frozenset(
         "诶",
     }
 )
+AFFECTION_ONLY_SIGNAL_TERMS = frozenset(
+    {
+        "亲亲",
+        "亲一下",
+        "亲一口",
+        "抱抱",
+        "抱我",
+        "抱一下",
+        "贴贴",
+        "蹭蹭",
+        "摸摸",
+        "啵啵",
+        "啵",
+        "么么",
+        "想你了",
+        "想你",
+        "想我吗",
+        "想我",
+        "爱你",
+        "爱我吗",
+        "爱我",
+        "mua",
+        "muah",
+        "kiss",
+        "hug",
+        "missyou",
+        "loveyou",
+        "loveu",
+    }
+)
+AFFECTION_ONLY_FILLER_TERMS = frozenset(
+    {
+        "亲爱的",
+        "老公",
+        "老婆",
+        "宝宝",
+        "宝贝",
+        "哥哥",
+        "姐姐",
+        "我",
+        "你",
+        "还",
+        "也",
+        "很",
+        "好",
+        "超",
+        "真的",
+        "有点",
+        "一点",
+        "一点点",
+        "了",
+        "啦",
+        "呢",
+        "啊",
+        "呀",
+        "嘛",
+        "吗",
+        "吧",
+        "欸",
+        "诶",
+        "qwq",
+        "tt",
+    }
+)
 ENTITY_KEYWORD_POS_PREFIXES = ("nr", "ns", "nz")
 ENTITY_KEYWORD_POS_TAGS = frozenset({"eng"})
 ENTITY_KEYWORD_TITLE_SUFFIXES = ("哥哥", "姐姐", "老师", "学长", "学姐", "哥", "姐")
@@ -466,6 +540,8 @@ ENTITY_KEYWORD_SHELL_TERMS = frozenset(
         *AUTO_VAGUE_FILLER_TERMS,
         *AUTO_VAGUE_RECALL_MARKERS,
         *SHORT_CASUAL_FILLER_TERMS,
+        *AFFECTION_ONLY_SIGNAL_TERMS,
+        *AFFECTION_ONLY_FILLER_TERMS,
         *RESPONSE_ACTION_FILLER_TERMS,
         "找了",
         "找",
@@ -495,6 +571,7 @@ ENTITY_KEYWORD_STOP_TERMS = frozenset(
     {
         *ENTITY_KEYWORD_SHELL_TERMS,
         *AFFECT_ONLY_QUERY_TERMS,
+        *AFFECTION_ONLY_SIGNAL_TERMS,
         "嗯",
         "嗯嗯",
         "好的",
@@ -934,6 +1011,8 @@ class RecallPolicy:
             return True
         if query_has_explicit_entity_marker(text) or query_has_technical_recall_marker(text):
             return False
+        if self._is_affection_only_query(text):
+            return True
         if self.extract_entity_keywords(text):
             return False
         if self._is_affect_only_query(text):
@@ -1153,6 +1232,31 @@ class RecallPolicy:
         stripped = compact
         removable = (
             SHORT_CASUAL_ONLY_TERMS
+            | SHORT_CASUAL_FILLER_TERMS
+            | AFFECT_ONLY_QUERY_FILLERS
+            | set(self.options.context_terms)
+        )
+        for term in sorted(removable, key=len, reverse=True):
+            cleaned = re.sub(r"\s+", "", str(term or "").lower())
+            if cleaned:
+                stripped = stripped.replace(cleaned, "")
+        return len(stripped) < 2
+
+    def _is_affection_only_query(self, query: str) -> bool:
+        text = str(query or "").strip().lower()
+        if not text:
+            return False
+        if query_has_explicit_entity_marker(text) or query_has_technical_recall_marker(text):
+            return False
+        compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text)
+        if not compact:
+            return False
+        if not any(term in compact for term in AFFECTION_ONLY_SIGNAL_TERMS):
+            return False
+        stripped = compact
+        removable = (
+            AFFECTION_ONLY_SIGNAL_TERMS
+            | AFFECTION_ONLY_FILLER_TERMS
             | SHORT_CASUAL_FILLER_TERMS
             | AFFECT_ONLY_QUERY_FILLERS
             | set(self.options.context_terms)

@@ -168,7 +168,7 @@ def test_relationship_weather_never_becomes_direct_seed_or_diffusion_source():
 
 
 def test_context_only_sections_override_bucket_layer():
-    for section in ("comment", "affect_anchor", "favorite_reason"):
+    for section in ("comment", "affect_anchor", "favorite_reason", "followup", "followup_log"):
         moment = _moment(
             section,
             bucket_type="dynamic",
@@ -183,6 +183,8 @@ def test_context_only_sections_override_bucket_layer():
         assert can_moment_be_related_target(moment, explicit_lookup=True) is False
 
     assert is_context_only_section("affect_anchor") is True
+    assert is_context_only_section("followup") is True
+    assert is_context_only_section("followup_log") is True
     assert is_context_only_section("body") is False
 
 

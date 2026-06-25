@@ -44,8 +44,13 @@ SECTION_ALIASES = {
     "haven reflection": "reflection",
     "followup": "followup",
     "follow-up": "followup",
+    "followup_log": "followup_log",
+    "followup log": "followup_log",
+    "follow-up log": "followup_log",
     "next": "followup",
     "todo": "followup",
+    "todo_log": "followup_log",
+    "todo log": "followup_log",
     "affect_anchor": "affect_anchor",
     "affect anchor": "affect_anchor",
     "favorite_reason": "favorite_reason",
@@ -66,7 +71,9 @@ SECTION_ALIASES = {
     "\u60c5\u7eea": "feeling",
     "\u53cd\u601d": "reflection",
     "\u540e\u7eed": "followup",
+    "\u540e\u7eed\u8bb0\u5f55": "followup_log",
     "\u5f85\u529e": "followup",
+    "\u5f85\u529e\u8bb0\u5f55": "followup_log",
     "\u559c\u6b22\u5b83\u7684\u539f\u56e0": "favorite_reason",
     "\u559c\u6b22\u7684\u539f\u56e0": "favorite_reason",
 }
@@ -320,15 +327,24 @@ class MemoryMomentStore:
         *,
         limit: int = 20,
         bucket_boosts: dict[str, float] | None = None,
+        include_sections: set[str] | list[str] | tuple[str, ...] | None = None,
+        exclude_sections: set[str] | list[str] | tuple[str, ...] | None = None,
     ) -> list[dict]:
         query = str(query or "").strip()
         if not query:
             return []
         bucket_boosts = bucket_boosts or {}
+        included = {str(section or "") for section in (include_sections or []) if str(section or "")}
+        excluded = {str(section or "") for section in (exclude_sections or []) if str(section or "")}
         query_terms = content_terms_for_query(query, self.relevance_options)
         expanded_query_terms = _expanded_query_terms(query, self.relevance_options)
         scored = []
         for moment in self.list_all():
+            section = str(moment.get("section") or "")
+            if included and section not in included:
+                continue
+            if excluded and section in excluded:
+                continue
             score = _moment_query_score(
                 moment,
                 query,
@@ -1152,6 +1168,7 @@ def _moment_section_weight(section: Any) -> float:
         "reflection": 0.9,
         "feeling": 0.9,
         "followup": 0.88,
+        "followup_log": 0.6,
         "affect_anchor": 0.82,
         "favorite_reason": 0.82,
         "comment": 0.78,

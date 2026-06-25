@@ -2713,6 +2713,96 @@ async def test_dashboard_date_api_updates_event_date_without_embedding(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_dashboard_content_api_followup_only_edit_skips_embedding(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    bucket_id = await bucket_mgr.create(
+        content="正文保持不变。\n\n### followup\n修旧 smoke。",
+        name="待办编辑",
+        domain=["项目"],
+        last_active="2026-06-25T08:00:00+08:00",
+    )
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    embedding_engine = CapturingEmbeddingEngine()
+    monkeypatch.setattr(server, "embedding_engine", embedding_engine)
+
+    response = await server.api_bucket_update(
+        DummyRequest(
+            {"content": "正文保持不变。\n\n### followup\n修新 smoke。"},
+            path_params={"bucket_id": bucket_id},
+        )
+    )
+    payload = json.loads(response.body)
+    await asyncio.sleep(0.05)
+
+    assert response.status_code == 200
+    assert payload["embedding_queued"] is False
+    assert embedding_engine.calls == []
+
+
+@pytest.mark.asyncio
+async def test_todo_api_marks_done_without_bucket_edit_and_writeback_skips_embedding(
+    monkeypatch,
+    bucket_mgr,
+    decay_eng,
+    tmp_path,
+):
+    import server
+    from todo_store import TodoStore
+
+    bucket_id = await bucket_mgr.create(
+        content="正文保持不变。\n\n### followup\n修 VPS smoke，连续测两遍同一条内容。",
+        name="VPS smoke 待办",
+        domain=["项目"],
+        last_active="2026-06-25T08:00:00+08:00",
+        updated_at="2026-06-25T08:00:00+08:00",
+    )
+    before = await bucket_mgr.get(bucket_id)
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(
+        server,
+        "todo_store",
+        TodoStore({"state_dir": str(tmp_path / "state"), "buckets_dir": str(tmp_path / "buckets")}),
+    )
+    embedding_engine = CapturingEmbeddingEngine()
+    monkeypatch.setattr(server, "embedding_engine", embedding_engine)
+
+    listed = await server.api_todos(DummyRequest(query_params={"status": "open"}))
+    listed_payload = json.loads(listed.body)
+    todo = listed_payload["todos"][0]
+
+    marked = await server.api_todo_update(
+        DummyRequest({"status": "done"}, path_params={"todo_id": todo["id"]})
+    )
+    after_mark = await bucket_mgr.get(bucket_id)
+    writeback = await server.api_todo_writeback(
+        DummyRequest({}, path_params={"todo_id": todo["id"]})
+    )
+    payload = json.loads(writeback.body)
+    after_writeback = await bucket_mgr.get(bucket_id)
+    await asyncio.sleep(0.05)
+
+    assert listed.status_code == 200
+    assert marked.status_code == 200
+    assert after_mark["content"] == before["content"]
+    assert writeback.status_code == 200
+    assert payload["embedding_queued"] is False
+    assert "### followup_log" in after_writeback["content"]
+    assert "[done " in after_writeback["content"]
+    assert "修 VPS smoke，连续测两遍同一条内容" in after_writeback["content"]
+    assert "### followup\n修 VPS smoke" not in after_writeback["content"]
+    assert after_writeback["metadata"]["last_active"] == before["metadata"]["last_active"]
+    assert after_writeback["metadata"]["updated_at"] == before["metadata"]["updated_at"]
+    assert embedding_engine.calls == []
+
+
+@pytest.mark.asyncio
 async def test_dashboard_comment_delete_only_allows_rain_dashboard_comments(monkeypatch, bucket_mgr, decay_eng):
     import server
 

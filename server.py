@@ -125,8 +125,10 @@ from reranker_engine import RerankerEngine
 from self_anchor import SELF_ANCHOR_TAG, is_self_anchor_bucket, is_self_anchor_metadata
 from scripts.migrate_affect_anchor_sections import plan_bucket_migration
 from source_refs import source_ref_window
+from todo_store import TodoStore
 from word_map import WordMapStore, reflection_identity_terms
 from utils import (
+    bucket_content_for_recall,
     bucket_text_for_embedding,
     count_tokens_approx,
     local_date_key,
@@ -136,7 +138,7 @@ from utils import (
     setup_logging,
     strip_human_date_references,
     strip_display_temperature_sections,
-    strip_affect_anchor,
+    strip_followup_sections,
     strip_temperature_meaning_lines,
     strip_wikilinks,
 )
@@ -175,6 +177,7 @@ word_map_store = WordMapStore(config)                   # Derived generic word c
 darkroom_store = DarkroomStore(config)                  # Private reflection room / 不回显正文的暗房
 gateway_state_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gateway_state.db"))
 raw_event_store = RawEventStore(config)                  # Raw dialogue archive / 原文保险箱
+todo_store = TodoStore(config)                            # Followup/todo derived state / 待办派生状态
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
@@ -1550,6 +1553,7 @@ async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", de
         )
     if not recent_continuity:
         recent_continuity = _format_handoff_recent_continuity(all_buckets, limit=3)
+    pending_followups = _format_pending_followups(all_buckets, limit=3)
     self_anchor = _format_handoff_self_anchor(all_buckets, limit=1)
     anchors = _format_handoff_anchors(all_buckets, limit=2)
 
@@ -1557,6 +1561,7 @@ async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", de
     user_portrait = _trim_text_to_token_budget(user_portrait, 220)
     relationship_portrait = _trim_text_to_token_budget(relationship_portrait, 240)
     recent_continuity = _trim_lines_to_token_budget(recent_continuity, 650)
+    pending_followups = _trim_lines_to_token_budget(pending_followups, 260)
     anchors = _trim_text_to_token_budget(anchors, 220)
 
     sections = [
@@ -1572,6 +1577,7 @@ async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", de
             or "No maintained relationship portrait is available yet.",
         ),
         ("Recent Continuity", recent_continuity),
+        ("Pending Followups", pending_followups),
         ("Optional Anchors", anchors),
     ]
     parts = [
@@ -1719,9 +1725,285 @@ def _format_handoff_recent_continuity(all_buckets: list[dict], limit: int = 3) -
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         name = str(meta.get("name") or bucket.get("id") or "").strip()
         created = str(meta.get("created") or "")[:10]
-        text = _clip_text(bucket.get("content", ""), 160)
+        text = _clip_text(bucket_content_for_recall(bucket), 160)
+        if not text:
+            continue
         lines.append(f"- [{created}] [bucket_id:{bucket.get('id', '')}] {name}: {text}")
     return "\n".join(lines)
+
+
+def _is_pending_followup_domain(domain_key: str) -> bool:
+    return domain_key in {"todo", "todos", "followup", "followups", "pending", "unfinished", "待办", "未完成"}
+
+
+def _breath_query_requests_pending_followups(query: str) -> bool:
+    text = str(query or "").strip().lower()
+    if not text:
+        return False
+    compact = re.sub(r"\s+", "", text)
+    if any(term in compact for term in ("待办", "没做完", "没做", "未完成", "还没做")):
+        return True
+    return any(term in text for term in ("todo", "pending", "unfinished", "followup", "follow-up"))
+
+
+def _normalize_todo_item_text(text: str) -> str:
+    item = str(text or "").strip()
+    item = re.sub(r"^\s*(?:[-*+]\s*)?(?:\[[ xX]\]\s*)?", "", item).strip()
+    return item
+
+
+def _todo_item_is_done(text: str) -> bool:
+    return bool(
+        re.match(
+            r"^\s*(?:[-*+]\s*)?(?:\[done(?:\s|\])|\[x\])",
+            str(text or ""),
+            flags=re.I,
+        )
+    )
+
+
+def _pending_followup_items(text: str) -> list[str]:
+    items = []
+    seen = set()
+    for raw_line in str(text or "").splitlines():
+        if _todo_item_is_done(raw_line):
+            continue
+        item = _normalize_todo_item_text(raw_line)
+        if not item:
+            continue
+        key = re.sub(r"\s+", " ", item).strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(item)
+    return items
+
+
+def _todo_source_hash(bucket_id: str, moment_id: str, text: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    payload = f"{bucket_id}\0{moment_id}\0{normalized}"
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _todo_id(bucket_id: str, moment_id: str, text: str) -> str:
+    return _todo_source_hash(bucket_id, moment_id, text)[:20]
+
+
+def _pending_followup_source_entries(all_buckets: list[dict]) -> list[dict]:
+    rows = []
+    for bucket in all_buckets or []:
+        if not isinstance(bucket, dict) or is_self_anchor_bucket(bucket):
+            continue
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        if meta.get("type") == "feel":
+            continue
+        if meta.get("active") is False or meta.get("deprecated"):
+            continue
+        if meta.get("resolved") or meta.get("digested") or meta.get("type") == "archived":
+            continue
+        bucket_id = str(bucket.get("id") or "")
+        if not bucket_id:
+            continue
+        for moment in parse_bucket_moments(bucket):
+            if str(moment.get("section") or "") != "followup":
+                continue
+            moment_id = str(moment.get("moment_id") or "")
+            for item in _pending_followup_items(moment.get("text") or ""):
+                rows.append(
+                    {
+                        "id": _todo_id(bucket_id, moment_id, item),
+                        "bucket_id": bucket_id,
+                        "moment_id": moment_id,
+                        "section": "followup",
+                        "source_hash": _todo_source_hash(bucket_id, moment_id, item),
+                        "title": str(meta.get("name") or bucket_id).strip(),
+                        "date": _bucket_handoff_date(bucket) or str(meta.get("created") or "")[:10],
+                        "updated": str(meta.get("updated_at") or meta.get("last_active") or meta.get("created") or ""),
+                        "text": item,
+                    }
+                )
+    rows.sort(key=lambda item: (item.get("updated") or "", item.get("date") or ""), reverse=True)
+    return rows
+
+
+def _sync_pending_followups(all_buckets: list[dict]) -> None:
+    todo_store.sync_from_entries(_pending_followup_source_entries(all_buckets))
+
+
+def _pending_followup_entries(all_buckets: list[dict], limit: int = 5) -> list[dict]:
+    _sync_pending_followups(all_buckets)
+    safe_limit = max(0, int(limit or 0))
+    if safe_limit <= 0:
+        return []
+    return todo_store.list(status="open", limit=safe_limit)
+
+
+def _format_pending_followups(all_buckets: list[dict], limit: int = 5, max_chars: int = 180) -> str:
+    lines = []
+    for entry in _pending_followup_entries(all_buckets, limit=limit):
+        date = entry.get("date") or "recent"
+        bucket_id = entry.get("bucket_id") or entry.get("source_bucket_id") or ""
+        moment_id = entry.get("moment_id") or entry.get("source_moment_id") or ""
+        title = entry.get("title") or bucket_id or "memory"
+        text = _clip_text(entry.get("text") or "", max_chars)
+        if not text:
+            continue
+        moment_part = f" [moment_id:{moment_id}]" if moment_id else ""
+        lines.append(
+            f"- [{date}] [bucket_id:{bucket_id}]{moment_part} {title}: {text}"
+        )
+    return "\n".join(lines)
+
+
+async def _sync_todos_from_buckets(include_archive: bool = False) -> None:
+    all_buckets = await bucket_mgr.list_all(include_archive=include_archive)
+    _sync_pending_followups(all_buckets)
+
+
+def _followup_log_date(resolved_at: str | None) -> str:
+    raw = str(resolved_at or "").strip()
+    if re.match(r"^\d{4}-\d{2}-\d{2}", raw):
+        return raw[:10]
+    return "date_unknown"
+
+
+def _markdown_section_name(line: str) -> str:
+    match = re.match(r"^\s*#{2,6}\s+(.+?)\s*$", str(line or ""))
+    if not match:
+        return ""
+    heading = match.group(1).strip().lower()
+    heading = re.split(r"[:：(/|\s]", heading, maxsplit=1)[0].strip()
+    return re.sub(r"[\s_\-]+", "_", heading)
+
+
+def _is_followup_section_name(name: str) -> bool:
+    return name in {
+        "followup",
+        "followups",
+        "follow_up",
+        "todo",
+        "to_do",
+        "next",
+        "后续",
+        "后续待办",
+        "待办",
+        "待办事项",
+    }
+
+
+def _is_followup_log_section_name(name: str) -> bool:
+    return name in {"followup_log", "followups_log", "todo_log", "done_followup", "done_todo"}
+
+
+def _split_bucket_markdown_sections(content: str) -> list[dict]:
+    lines = str(content or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    sections = []
+    current = {"heading": "", "heading_name": "", "lines": []}
+    for line in lines:
+        heading_name = _markdown_section_name(line)
+        if heading_name:
+            sections.append(current)
+            current = {"heading": line, "heading_name": heading_name, "lines": []}
+        else:
+            current["lines"].append(line)
+    sections.append(current)
+    return [section for section in sections if section["heading"] or any(str(line).strip() for line in section["lines"])]
+
+
+def _render_bucket_markdown_sections(sections: list[dict]) -> str:
+    chunks = []
+    for section in sections:
+        lines = []
+        heading = str(section.get("heading") or "").rstrip()
+        if heading:
+            lines.append(heading)
+        lines.extend(str(line).rstrip() for line in section.get("lines", []))
+        chunk = "\n".join(lines).strip()
+        if chunk:
+            chunks.append(chunk)
+    return "\n\n".join(chunks).strip()
+
+
+def _writeback_completed_followup_content(content: str, todo_text: str, resolved_at: str | None) -> tuple[str, bool]:
+    target = _normalize_todo_item_text(todo_text)
+    if not target:
+        return str(content or ""), False
+    done_line = f"[done {_followup_log_date(resolved_at)}] {target}"
+    sections = _split_bucket_markdown_sections(content)
+    changed = False
+    rendered = []
+    log_section = None
+
+    for section in sections:
+        heading_name = str(section.get("heading_name") or "")
+        if _is_followup_log_section_name(heading_name):
+            log_section = section
+            rendered.append(section)
+            continue
+        if not _is_followup_section_name(heading_name):
+            rendered.append(section)
+            continue
+
+        kept_lines = []
+        for line in section.get("lines", []):
+            if _normalize_todo_item_text(line) == target:
+                changed = True
+                continue
+            kept_lines.append(line)
+        if any(str(line).strip() for line in kept_lines):
+            section = {**section, "lines": kept_lines}
+            rendered.append(section)
+
+    if log_section is None:
+        rendered.append({"heading": "### followup_log", "heading_name": "followup_log", "lines": [done_line]})
+        changed = True
+    else:
+        existing = {_normalize_todo_item_text(line) for line in log_section.get("lines", [])}
+        if _normalize_todo_item_text(done_line) not in existing:
+            log_section.setdefault("lines", []).append(done_line)
+            changed = True
+
+    return _render_bucket_markdown_sections(rendered), changed
+
+
+async def _writeback_completed_todo(todo_id: str) -> dict:
+    todo = todo_store.get(todo_id)
+    if not todo:
+        return {"status": "not_found", "reason": "todo_not_found"}
+    if todo.get("status") != "done":
+        return {"status": "skipped", "reason": "todo_not_done", "todo": todo}
+    bucket_id = str(todo.get("source_bucket_id") or "")
+    if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
+        return {"status": "failed", "reason": "invalid_bucket_id", "todo": todo}
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
+        return {"status": "not_found", "reason": "bucket_not_found", "todo": todo}
+    new_content, changed = _writeback_completed_followup_content(
+        bucket.get("content", ""),
+        todo.get("text", ""),
+        todo.get("resolved_at"),
+    )
+    embedding_queued = False
+    if changed:
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        ok = await bucket_mgr.update(
+            bucket_id,
+            content=new_content,
+            last_active=meta.get("last_active") or meta.get("created"),
+            updated_at=meta.get("updated_at") or meta.get("created") or now_iso(),
+        )
+        if not ok:
+            return {"status": "failed", "reason": "bucket_update_failed", "todo": todo}
+        updated_bucket = await bucket_mgr.get(bucket_id)
+        embedding_queued = _queue_embedding_refresh_if_changed(bucket_id, bucket, updated_bucket)
+    written = todo_store.mark_writeback(todo_id)
+    return {
+        "status": "written" if changed else "unchanged",
+        "id": todo_id,
+        "bucket_id": bucket_id,
+        "embedding_queued": embedding_queued,
+        "todo": written or todo,
+    }
 
 
 def _format_handoff_personal_recent_continuity(all_buckets: list[dict], limit: int = 3) -> str:
@@ -2678,6 +2960,20 @@ def _queue_embedding_refresh(bucket_id: str) -> bool:
     return True
 
 
+def _bucket_embedding_text_changed(before: dict | None, after: dict | None) -> bool:
+    return bucket_text_for_embedding(before or {}) != bucket_text_for_embedding(after or {})
+
+
+def _queue_embedding_refresh_if_changed(
+    bucket_id: str,
+    before: dict | None,
+    after: dict | None,
+) -> bool:
+    if not _bucket_embedding_text_changed(before, after):
+        return False
+    return _queue_embedding_refresh(bucket_id)
+
+
 async def _refresh_bucket_embedding_async(bucket_id: str) -> None:
     try:
         ok = await _refresh_bucket_embedding(bucket_id)
@@ -2947,11 +3243,11 @@ def _bucket_text_for_embedding(bucket: dict) -> str:
             for comment in comments
             if isinstance(comment, dict)
         )
-    return f"{strip_wikilinks(bucket.get('content', '')).strip()}\n{comment_text}".strip()
+    return f"{bucket_content_for_recall(bucket)}\n{comment_text}".strip()
 
 
 def _bucket_context_snippet(bucket: dict, max_chars: int = 180) -> str:
-    text = " ".join(strip_wikilinks(str(bucket.get("content") or "")).split())
+    text = " ".join(bucket_content_for_recall(bucket).split())
     if len(text) <= max_chars:
         return text
     return text[:max_chars].rstrip() + "..."
@@ -3063,6 +3359,7 @@ def _bucket_handoff_date(bucket: dict) -> str:
 
 def _handoff_clean_summary_text(content: str, *, include_detail_sections: bool = False) -> str:
     text = strip_display_temperature_sections(strip_temperature_meaning_lines(str(content or "")))
+    text = strip_followup_sections(text)
     if not include_detail_sections:
         text = re.split(
             r"\n\s*###\s+(?:moment|affect_anchor|reflection|assistant_reflection)\b",
@@ -3731,8 +4028,9 @@ MOMENT_SECTION_LABELS = {
     "comment": "年轮",
 }
 
-MOMENT_TEMPERATURE_SECTIONS = CONTEXT_ONLY_SECTIONS
-PROFILE_CONTEXT_SECTIONS = ("evidence_context", "context", "reflection", "feeling", "followup", "comment")
+TASK_ONLY_MOMENT_SECTIONS = {"followup", "followup_log"}
+MOMENT_TEMPERATURE_SECTIONS = CONTEXT_ONLY_SECTIONS - TASK_ONLY_MOMENT_SECTIONS
+PROFILE_CONTEXT_SECTIONS = ("evidence_context", "context", "reflection", "feeling", "comment")
 
 
 def _moment_text(moment: dict, max_chars: int = 500) -> str:
@@ -4312,7 +4610,7 @@ def _bucket_relevance_node(bucket: dict, score: float = 0.0) -> dict:
     meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
     return {
         "id": bucket.get("id"),
-        "text": strip_wikilinks(str(bucket.get("content") or "")),
+        "text": bucket_content_for_recall(bucket),
         "score": score,
         "metadata": {
             "bucket_name": meta.get("name") or bucket.get("id"),
@@ -4589,6 +4887,7 @@ def _direct_bucket_header(bucket: dict, moment: dict) -> str:
 def _rendered_bucket_content(bucket: dict) -> str:
     text = strip_wikilinks(str(bucket.get("content") or ""))
     text = strip_display_temperature_sections(text)
+    text = strip_followup_sections(text)
     return strip_temperature_meaning_lines(text).strip()
 
 
@@ -5306,7 +5605,7 @@ def _bucket_matches_breath_lexical_terms(bucket: dict, terms: list[str]) -> bool
             str(meta.get("name") or bucket.get("id") or ""),
             " ".join(str(tag) for tag in meta.get("tags", []) or []),
             " ".join(str(item) for item in meta.get("domain", []) or []),
-            strip_wikilinks(strip_affect_anchor(str(bucket.get("content") or ""))),
+            bucket_content_for_recall(bucket),
         ]
     ).lower()
     return any(str(term or "").strip().lower() in haystack for term in terms)
@@ -5539,6 +5838,7 @@ async def _build_recall_debug_payload(
         search_query,
         limit=max(max_candidates, max_results, 20),
         bucket_boosts=bucket_boosts,
+        exclude_sections=TASK_ONLY_MOMENT_SECTIONS,
     )
     explicit_lookup = _query_explicitly_requests_archive_memory(query)
     direct_candidates = _direct_recallable_moments(searched_candidates, explicit_lookup=explicit_lookup)
@@ -6373,6 +6673,17 @@ async def breath(
             limit=max_results,
         )
 
+    if _is_pending_followup_domain(domain_key) or (not domain_key and _breath_query_requests_pending_followups(query)):
+        try:
+            all_buckets = await bucket_mgr.list_all(include_archive=False)
+            block = _format_pending_followups(all_buckets, limit=max_results, max_chars=220)
+            if not block:
+                return "没有找到未完成 followup。"
+            return _trim_text_to_token_budget("=== Pending Followups ===\n" + block, max_tokens)
+        except Exception as e:
+            logger.error("Pending followup retrieval failed / 待读 followup 失败: %s", e)
+            return "读取未完成 followup 失败。"
+
     # --- Feel/whisper retrieval: independent read-only channels ---
     # --- Feel/whisper 检索：独立只读入口 ---
     if domain_key in {"feel", "whisper", "daily_impression"}:
@@ -6840,6 +7151,7 @@ async def breath(
         search_query,
         limit=max(max_results, 20),
         bucket_boosts=bucket_boosts,
+        exclude_sections=TASK_ONLY_MOMENT_SECTIONS,
     )
     explicit_lookup = _query_explicitly_requests_archive_memory(query)
     moment_candidates = _direct_recallable_moments(moment_candidates, explicit_lookup=explicit_lookup)
@@ -8031,13 +8343,15 @@ async def trace(
     if _has_favorite_tag(effective_tags) and not _has_favorite_reason(effective_content):
         return _favorite_reason_error()
 
+    before_bucket = bucket
     success = await bucket_mgr.update(bucket_id, **updates)
     if not success:
         return f"修改失败: {bucket_id}"
 
     # Re-generate embedding if content or title changed.
     if "content" in updates or "name" in updates:
-        _queue_embedding_refresh(bucket_id)
+        after_bucket = await bucket_mgr.get(bucket_id)
+        _queue_embedding_refresh_if_changed(bucket_id, before_bucket, after_bucket)
 
     changed = ", ".join(f"{k}={v}" for k, v in updates.items() if k != "content")
     if "content" in updates:
@@ -8589,6 +8903,7 @@ async def api_create_memory(request):
 
     existing = await bucket_mgr.get(bucket_id) if bucket_id else None
     if existing:
+        before_bucket = existing
         update_kwargs = {
             "content": content,
             "tags": tags,
@@ -8615,6 +8930,13 @@ async def api_create_memory(request):
         if not ok:
             return JSONResponse({"error": "update failed"}, status_code=500)
         status = "updated"
+        updated_bucket = await bucket_mgr.get(bucket_id)
+        if embedding_engine.enabled:
+            embedding_status = (
+                "queued" if _queue_embedding_refresh_if_changed(bucket_id, before_bucket, updated_bucket) else "skipped"
+            )
+        else:
+            embedding_status = "disabled"
     else:
         bucket_id = await bucket_mgr.create(
             content=content,
@@ -8639,11 +8961,10 @@ async def api_create_memory(request):
             date=event_date or None,
         )
         status = "created"
-
-    if embedding_engine.enabled:
-        embedding_status = "queued" if _queue_embedding_refresh(bucket_id) else "failed"
-    else:
-        embedding_status = "disabled"
+        if embedding_engine.enabled:
+            embedding_status = "queued" if _queue_embedding_refresh(bucket_id) else "failed"
+        else:
+            embedding_status = "disabled"
 
     if bucket_type != "feel" and not is_self_anchor_metadata({"tags": tags, "self_anchor": body.get("self_anchor")}):
         _queue_memory_enrichment(bucket_id)
@@ -8906,13 +9227,14 @@ async def api_profile_fact_update(request):
             "source": meta.get("source") or "profile_fact",
         })
 
+    before_bucket = bucket
     ok = await bucket_mgr.update(bucket_id, **updates)
     if not ok:
         return JSONResponse({"error": "update failed"}, status_code=500)
 
     updated_bucket = await bucket_mgr.get(bucket_id)
     if action == "edit":
-        _queue_embedding_refresh(bucket_id)
+        _queue_embedding_refresh_if_changed(bucket_id, before_bucket, updated_bucket)
         try:
             if updated_bucket:
                 memory_moment_store.upsert_bucket(updated_bucket)
@@ -9420,6 +9742,70 @@ async def api_moments(request):
     return JSONResponse(payload)
 
 
+@mcp.custom_route("/api/todos", methods=["GET"])
+async def api_todos(request):
+    """List derived followup/todo items."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        await _sync_todos_from_buckets(include_archive=False)
+        status = str(request.query_params.get("status", "open") or "open").strip().lower()
+        limit = _int_between(request.query_params.get("limit"), 50, 1, 200)
+        items = todo_store.list(status=status, limit=limit, include_inactive=status == "all")
+        return JSONResponse({"count": len(items), "todos": items})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/todos/{todo_id}", methods=["PATCH"])
+async def api_todo_update(request):
+    """Update one derived todo status. Marking done does not edit the bucket."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    todo_id = str(request.path_params.get("todo_id") or "").strip()
+    if not todo_id:
+        return JSONResponse({"error": "missing todo_id"}, status_code=400)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    status = str(body.get("status") or "").strip().lower()
+    try:
+        todo = todo_store.set_status(todo_id, status)
+    except ValueError:
+        return JSONResponse({"error": "status must be open, done, or ignored"}, status_code=400)
+    if not todo:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"status": "updated", "todo": todo})
+
+
+@mcp.custom_route("/api/todos/{todo_id}/writeback", methods=["POST"])
+async def api_todo_writeback(request):
+    """Archive a completed todo back into the source bucket followup_log."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    todo_id = str(request.path_params.get("todo_id") or "").strip()
+    if not todo_id:
+        return JSONResponse({"error": "missing todo_id"}, status_code=400)
+    result = await _writeback_completed_todo(todo_id)
+    status = result.get("status")
+    if status == "not_found":
+        return JSONResponse(result, status_code=404)
+    if status == "failed":
+        return JSONResponse(result, status_code=500)
+    if status == "skipped":
+        return JSONResponse(result, status_code=400)
+    return JSONResponse(result)
+
+
 @mcp.custom_route("/api/bucket/{bucket_id}", methods=["PATCH"])
 async def api_bucket_update(request):
     """Update dashboard-editable bucket body fields."""
@@ -9472,13 +9858,17 @@ async def api_bucket_update(request):
         update_kwargs["date"] = event_date
     update_kwargs["last_active"] = meta.get("last_active") or meta.get("created")
 
+    before_bucket = bucket
     ok = await bucket_mgr.update(bucket_id, **update_kwargs)
     if not ok:
         return JSONResponse({"error": "update failed"}, status_code=500)
 
-    embedding_queued = _queue_embedding_refresh(bucket_id) if (content is not None or name is not None) else False
-
     bucket = await bucket_mgr.get(bucket_id)
+    embedding_queued = (
+        _queue_embedding_refresh_if_changed(bucket_id, before_bucket, bucket)
+        if (content is not None or name is not None)
+        else False
+    )
     return JSONResponse({
         "status": "updated",
         "id": bucket_id,

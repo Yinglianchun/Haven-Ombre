@@ -477,6 +477,42 @@ def test_gateway_reading_note_direct_evidence_can_be_explicit(
     assert moment["_reading_note"]["canonical_domain"] == "project_code"
 
 
+def test_gateway_recalled_memory_render_excludes_followup_sections(
+    monkeypatch, test_config, bucket_mgr
+):
+    cfg = _gateway_config(test_config)
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content=(
+            "正文记录：VPS smoke 已经在普通排查里复现。\n\n"
+            "### followup\n"
+            "修 VPS smoke，连续测两遍同一条内容。"
+        ),
+        name="VPS smoke 排查",
+        hours_ago=12,
+        domain=["代码"],
+        tags=["gateway"],
+    )
+    all_buckets = _run(bucket_mgr.list_all())
+    _, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr)
+    _all_moments, grouped_moments, _edges = service._refresh_moment_graph(all_buckets)
+    moment = dict(grouped_moments[bucket_id][0])
+    moment["exact_anchor_match"] = True
+
+    block = _run(service._format_recalled_moments(
+        [moment],
+        grouped_moments,
+        all_buckets,
+        800,
+        "VPS smoke 普通排查",
+        context_mode="task",
+    ))
+
+    assert "VPS smoke 已经在普通排查里复现" in block
+    assert "修 VPS smoke" not in block
+    assert "### followup" not in block
+
+
 def test_gateway_identity_terms_feed_query_filters(monkeypatch, test_config, bucket_mgr):
     cfg = _gateway_config(test_config)
     cfg["identity"] = {

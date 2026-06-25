@@ -755,6 +755,9 @@ def strip_wikilinks(text: str) -> str:
 
 
 _AFFECT_ANCHOR_RE = re.compile(r"(?ims)^###\s*affect_anchor\s*$.*?(?=^###\s+|\Z)")
+_FOLLOWUP_SECTION_RE = re.compile(
+    r"(?ims)^#{2,6}\s*(?:followup|followups|follow-up|followup_log|followups_log|followup-log|todo|to-do|todo_log|todo-log|next|后续|后续待办|后续记录|待办|待办事项|待办记录)\s*$.*?(?=^#{2,6}\s+|\Z)"
+)
 _DISPLAY_TEMPERATURE_SECTION_RE = re.compile(
     r"(?ims)^###\s*(?:affect_anchor|affect anchor|喜欢它的原因|favorite_reason|favorite reason)\s*$.*?(?=^###\s+|\Z)"
 )
@@ -797,6 +800,22 @@ def strip_affect_anchor(text: str) -> str:
     return _AFFECT_ANCHOR_RE.sub("", str(text)).strip()
 
 
+def strip_followup_sections(text: str) -> str:
+    """Remove followup/todo blocks from ordinary recall text."""
+    if not text:
+        return text
+    return _FOLLOWUP_SECTION_RE.sub("", str(text)).strip()
+
+
+def bucket_content_for_recall(bucket: dict) -> str:
+    """Build bucket body text for ordinary recall/search, excluding task-only blocks."""
+    if not isinstance(bucket, dict):
+        return ""
+    text = strip_wikilinks(str(bucket.get("content") or ""))
+    text = strip_affect_anchor(text)
+    return strip_followup_sections(text).strip()
+
+
 def strip_display_temperature_sections(text: str) -> str:
     """Remove display-only temperature sections from direct bucket rendering."""
     if not text:
@@ -831,7 +850,7 @@ def bucket_text_for_embedding(bucket: dict) -> str:
         meta = {}
 
     title = strip_wikilinks(str(meta.get("name") or "")).strip()
-    body = strip_affect_anchor(strip_wikilinks(str(bucket.get("content") or ""))).strip()
+    body = bucket_content_for_recall(bucket)
 
     parts = []
     if title:
