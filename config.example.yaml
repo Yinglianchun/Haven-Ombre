@@ -345,6 +345,9 @@ gateway:
   just_now_context_max_turns: 5
   just_now_context_budget: 420
   conversation_turns_max_entries: 500
+  memory_sentinel_enabled: true     # grey-zone routing: search | tone_only | skip; hard recall signals bypass it
+  memory_sentinel_model: ""         # empty = use dehydration.model via dehydration API
+  memory_sentinel_context_turns: 3   # recent same-session turns for vague followups
   date_persona_trace_enabled: true   # date words like 昨天/昨晚 add small same-day persona/original-turn trace
   date_persona_trace_budget: 220
   date_persona_trace_max_events: 5
@@ -371,7 +374,7 @@ gateway:
   favorite_memory_max_cards: 1
   related_memory_budget: 220
   core_memory_interval_rounds: 0
-  current_inner_state_interval_rounds: 15
+  current_inner_state_interval_rounds: 0
   relationship_weather_interval_rounds: 0
   favorite_memory_interval_rounds: 0
   word_map_hint_enabled: false       # true lets derived Word Map add weak recall candidates; still gated by RecallPolicy
@@ -381,10 +384,11 @@ gateway:
   word_map_hint_bucket_limit: 12
   semantic_candidate_top_k: 50       # internal embedding candidate pool; visible injection stays gated
   moment_search_limit: 50            # internal moment candidate pool for graph retrieval
+  recall_fusion_mode: dynamic        # dynamic | legacy; legacy uses the weights below as the main score
   semantic_weight: 0.45
   keyword_weight: 0.35
-  importance_weight: 0.03            # tie-breaker only; not a relevance gate
-  freshness_weight: 0.03             # tie-breaker only; not a relevance gate
+  importance_weight: 0.03            # legacy main score only; dynamic caps it as a tiny adjustment
+  freshness_weight: 0.03             # legacy main score only; dynamic caps it as a tiny adjustment
   first_card_min_score: 0.55
   second_card_min_score: 0.50
   second_card_relative_score: 0.85

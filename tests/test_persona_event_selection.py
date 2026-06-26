@@ -67,3 +67,15 @@ def test_format_persona_event_trace_line_falls_back_to_persona_fields():
     assert line.startswith("- 08:51")
     assert "trigger: 小雨问当时确认了什么" in line
     assert "residue: 不是表演，是终于摸到家" in line
+
+
+def test_format_persona_event_trace_line_converts_utc_to_eight_zone():
+    line = format_persona_event_trace_line(
+        {
+            "created_at": "2026-06-06T10:51:00+00:00",
+            "assistant_excerpt": "这是 UTC 时间写入的事件。",
+        }
+    )
+
+    assert line.startswith("- 18:51")
+    assert "assistant: 这是 UTC 时间写入的事件。" in line

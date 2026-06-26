@@ -238,6 +238,74 @@ class RawEventStore:
             "items": [self._row_to_event(row) for row in rows],
         }
 
+    def list_events_between(
+        self,
+        *,
+        start_at: datetime,
+        end_at: datetime,
+        limit: int = 40,
+        source: str = "",
+        conversation_id: str = "",
+        session_id: str = "",
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(200, int(limit or 40)))
+        filters, params = self._search_filters(
+            source=source,
+            conversation_id=conversation_id,
+            session_id=session_id,
+        )
+        conn = self._connect()
+        rows = conn.execute(
+            f"""
+            SELECT e.*
+            FROM raw_events e
+            WHERE 1 = 1 {filters}
+            ORDER BY e.id DESC
+            LIMIT ?
+            """,
+            [*params, max(safe_limit, 500)],
+        ).fetchall()
+        conn.close()
+
+        compare_tz = start_at.tzinfo or end_at.tzinfo
+
+        def parse_local(value: Any) -> datetime | None:
+            try:
+                parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if compare_tz is None:
+                return parsed.replace(tzinfo=None) if parsed.tzinfo is not None else parsed
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=compare_tz)
+            return parsed.astimezone(compare_tz)
+
+        start = start_at
+        end = end_at
+        if compare_tz is not None:
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=compare_tz)
+            else:
+                start = start.astimezone(compare_tz)
+            if end.tzinfo is None:
+                end = end.replace(tzinfo=compare_tz)
+            else:
+                end = end.astimezone(compare_tz)
+        elif start.tzinfo is not None:
+            start = start.replace(tzinfo=None)
+        elif end.tzinfo is not None:
+            end = end.replace(tzinfo=None)
+
+        selected: list[dict[str, Any]] = []
+        for row in rows:
+            created = parse_local(row["created_at"])
+            if created is None or not (start <= created < end):
+                continue
+            selected.append(self._row_to_event(row))
+            if len(selected) >= safe_limit:
+                break
+        return selected
+
     def _insert_event(self, event: dict[str, Any]) -> tuple[str, int | None]:
         conn = self._connect()
         try:

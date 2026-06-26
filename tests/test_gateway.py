@@ -831,9 +831,13 @@ def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_confi
         recent_context_budget=300,
         recalled_memory_budget=400,
         related_memory_budget=220,
+        memory_sentinel_enabled=False,
+        memory_sentinel_model="",
+        memory_sentinel_context_turns=3,
         current_inner_state_interval_rounds=15,
         direct_render_mode="auto",
         retrieval_mode="graph",
+        recall_fusion_mode="legacy",
         portrait_memory_enabled=False,
         portrait_memory_budget=360,
         portrait_memory_max_sources=8,
@@ -864,11 +868,15 @@ def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_confi
                     "recent_context_budget": 240,
                     "recalled_memory_budget": 520,
                     "related_memory_budget": 180,
+                    "memory_sentinel_enabled": True,
+                    "memory_sentinel_model": "sentinel-mini",
+                    "memory_sentinel_context_turns": 2,
                     "semantic_candidate_top_k": 64,
                     "moment_search_limit": 55,
                     "current_inner_state_interval_rounds": 9,
                     "direct_render_mode": "full",
                     "retrieval_mode": "bucket",
+                    "recall_fusion_mode": "dynamic",
                     "portrait_memory_enabled": True,
                     "portrait_memory_budget": 280,
                     "portrait_memory_max_sources": 4,
@@ -908,6 +916,9 @@ def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_confi
         "gateway.recent_context_cooldown_hours",
         "gateway.recent_context_reentry_idle_hours",
         "gateway.recent_context_budget",
+        "gateway.memory_sentinel_enabled",
+        "gateway.memory_sentinel_model",
+        "gateway.memory_sentinel_context_turns",
         "gateway.recalled_memory_budget",
         "gateway.related_memory_budget",
         "gateway.semantic_candidate_top_k",
@@ -915,6 +926,7 @@ def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_confi
         "gateway.current_inner_state_interval_rounds",
         "gateway.direct_render_mode",
         "gateway.retrieval_mode",
+        "gateway.recall_fusion_mode",
         "gateway.word_map_hint_enabled",
         "gateway.portrait_memory_enabled",
         "gateway.portrait_memory_budget",
@@ -947,11 +959,15 @@ def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_confi
     assert service.recent_budget == 240
     assert service.recalled_budget == 520
     assert service.related_memory_budget == 180
+    assert service.memory_sentinel_enabled is True
+    assert service.memory_sentinel_model == "sentinel-mini"
+    assert service.memory_sentinel_context_turns == 2
     assert service.semantic_candidate_top_k == 64
     assert service.moment_search_limit == 55
     assert service.current_inner_state_interval_rounds == 9
     assert service.direct_render_mode == "full"
     assert service.retrieval_mode == "bucket"
+    assert service.recall_fusion_mode == "dynamic"
     assert service.portrait_memory_enabled is True
     assert service.portrait_memory_budget == 280
     assert service.portrait_memory_max_sources == 4
@@ -991,9 +1007,13 @@ def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_confi
     assert response.json()["gateway"]["recent_context_budget"] == 240
     assert response.json()["gateway"]["recalled_memory_budget"] == 520
     assert response.json()["gateway"]["related_memory_budget"] == 180
+    assert response.json()["gateway"]["memory_sentinel_enabled"] is True
+    assert response.json()["gateway"]["memory_sentinel_model"] == "sentinel-mini"
+    assert response.json()["gateway"]["memory_sentinel_context_turns"] == 2
     assert response.json()["gateway"]["semantic_candidate_top_k"] == 64
     assert response.json()["gateway"]["moment_search_limit"] == 55
     assert response.json()["gateway"]["current_inner_state_interval_rounds"] == 9
+    assert response.json()["gateway"]["recall_fusion_mode"] == "dynamic"
     assert response.json()["reranker"]["enabled"] is False
     assert response.json()["reranker"]["model"] == "rerank-lite"
     assert response.json()["reranker"]["base_url"] == "https://rerank.example/v1"
@@ -1025,6 +1045,249 @@ def test_gateway_query_planner_defaults_to_dehydration_model(monkeypatch, test_c
     assert service.query_planner_uses_dehydrator is True
     assert dehydrator.calls[0]["model"] == "dehy-mini"
     assert captured == []
+
+
+def test_gateway_memory_sentinel_hard_signal_bypasses_model(monkeypatch, test_config, bucket_mgr):
+    temple_id = _create_bucket(
+        bucket_mgr,
+        content="海边神庙那次，小雨说风从石阶下面吹上来。",
+        name="海边神庙",
+        hours_ago=12,
+    )
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(test_config, recent_context_budget=0, current_inner_state_interval_rounds=0),
+        bucket_mgr,
+        embedding_results=[(temple_id, 0.96)],
+    )
+    calls = []
+
+    async def fail_if_called(query, turns):
+        calls.append({"query": query, "turns": turns})
+        return {"route": "skip", "reason": "should not run", "anchors": [], "confidence": 1.0}, None
+
+    monkeypatch.setattr(service, "_call_memory_sentinel", fail_if_called)
+
+    _payload, _recalled_ids, debug = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "还记得海边神庙吗"}]},
+            "sess-sentinel-hard-bypass",
+            include_debug=True,
+        )
+    )
+
+    assert calls == []
+    assert debug["memory_sentinel_debug"]["called"] is False
+    assert debug["memory_sentinel_debug"]["hard_bypass_reason"]
+
+
+def test_gateway_memory_sentinel_tone_only_skips_dynamic_and_recent_context(
+    monkeypatch, test_config, bucket_mgr
+):
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="小雨上次说想要抱抱时，Haven只需要轻轻接住她。",
+        name="抱抱语气",
+        hours_ago=3,
+    )
+    _, service, state_store, _ = _build_service(
+        monkeypatch,
+        _gateway_config(test_config, current_inner_state_interval_rounds=0),
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.99)],
+    )
+    state_store.record_conversation_turn(
+        profile_id="haven_xiaoyu",
+        session_id="sess-sentinel-tone",
+        round_id=1,
+        user_text="之前聊过住院的事。",
+        assistant_text="我记得。",
+    )
+
+    async def tone_only(query, turns):
+        return {
+            "route": "tone_only",
+            "reason": "affection without concrete anchor",
+            "anchors": [],
+            "confidence": 0.9,
+        }, None
+
+    monkeypatch.setattr(service, "_call_memory_sentinel", tone_only)
+
+    payload, recalled_ids, debug = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "想你了抱抱"}]},
+            "sess-sentinel-tone",
+            include_debug=True,
+        )
+    )
+    injected = _joined_message_content(payload["messages"])
+
+    assert recalled_ids == []
+    assert "Recalled Memory" not in injected
+    assert "Recent Context" not in injected
+    assert debug["memory_sentinel_debug"]["called"] is True
+    assert debug["memory_sentinel_debug"]["route"] == "tone_only"
+    assert debug["query_planner_debug"]["skip_reason"] == "memory_sentinel_tone_only"
+
+
+def test_gateway_memory_sentinel_skip_blocks_low_signal_recall(monkeypatch, test_config, bucket_mgr):
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="ping 只是联通测试，不应该翻旧记忆。",
+        name="ping测试",
+        hours_ago=1,
+    )
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(test_config, current_inner_state_interval_rounds=0),
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.99)],
+    )
+
+    async def skip(query, turns):
+        return {"route": "skip", "reason": "ack only", "anchors": [], "confidence": 0.95}, None
+
+    monkeypatch.setattr(service, "_call_memory_sentinel", skip)
+
+    payload, recalled_ids, debug = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "哈哈"}]},
+            "sess-sentinel-skip",
+            include_debug=True,
+        )
+    )
+
+    assert recalled_ids == []
+    assert "Recalled Memory" not in _joined_message_content(payload["messages"])
+    assert debug["memory_sentinel_debug"]["route"] == "skip"
+    assert debug["query_planner_debug"]["skip_reason"] == "memory_sentinel_skip"
+
+
+def test_gateway_memory_sentinel_search_uses_recent_turns_for_vague_followup(
+    monkeypatch, test_config, bucket_mgr
+):
+    hospital_id = _create_bucket(
+        bucket_mgr,
+        content="小雨住院那次，后来医生说可以先观察，第二天再确认结果。",
+        name="住院后续",
+        hours_ago=48,
+        keywords=["住院", "医生", "结果"],
+    )
+    _, service, state_store, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recent_context_budget=0,
+            current_inner_state_interval_rounds=0,
+            first_card_min_score=0.35,
+        ),
+        bucket_mgr,
+        embedding_results={"后来呢": [(hospital_id, 0.95)]},
+    )
+    monkeypatch.setattr(service, "_admit_bucket_for_recall", lambda query, item: True)
+    state_store.record_conversation_turn(
+        profile_id="haven_xiaoyu",
+        session_id="sess-sentinel-followup",
+        round_id=1,
+        user_text="我当时住院检查，医生说要等结果。",
+        assistant_text="嗯，我陪你等。",
+    )
+    calls = []
+
+    async def search(query, turns):
+        calls.append({"query": query, "turns": turns})
+        return {
+            "route": "search",
+            "reason": "vague followup refers to recent hospital turn",
+            "anchors": ["住院", "医生", "结果"],
+            "confidence": 0.88,
+        }, None
+
+    monkeypatch.setattr(service, "_call_memory_sentinel", search)
+
+    payload, recalled_ids, debug = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "后来呢"}]},
+            "sess-sentinel-followup",
+            include_debug=True,
+        )
+    )
+    injected = _joined_message_content(payload["messages"])
+
+    assert calls and "住院检查" in calls[0]["turns"][0]["user_text"]
+    assert recalled_ids == [hospital_id]
+    assert "Recalled Memory" in injected
+    assert "住院后续" in injected
+    assert debug["memory_sentinel_debug"]["route"] == "search"
+    assert debug["memory_sentinel_debug"]["anchors"] == ["住院", "医生", "结果"]
+
+
+def test_gateway_memory_sentinel_failure_falls_back_to_existing_rules(
+    monkeypatch, test_config, bucket_mgr
+):
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="小雨那件事激动哭，是因为终于确认自己被认真接住了。",
+        name="激动哭的原因",
+        hours_ago=24,
+    )
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recent_context_budget=0,
+            current_inner_state_interval_rounds=0,
+            first_card_min_score=0.35,
+        ),
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.96)],
+    )
+    monkeypatch.setattr(service, "_admit_bucket_for_recall", lambda query, item: True)
+
+    async def bad_json(query, turns):
+        return None, "memory_sentinel_parse_failed:invalid_json"
+
+    monkeypatch.setattr(service, "_call_memory_sentinel", bad_json)
+
+    payload, recalled_ids, debug = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "那件事为什么让我激动哭"}]},
+            "sess-sentinel-fallback",
+            include_debug=True,
+        )
+    )
+
+    assert recalled_ids == [bucket_id]
+    assert "激动哭的原因" in _joined_message_content(payload["messages"])
+    assert debug["memory_sentinel_debug"]["called"] is True
+    assert debug["memory_sentinel_debug"]["fallback_used"] is True
+    assert debug["memory_sentinel_debug"]["errors"] == ["memory_sentinel_parse_failed:invalid_json"]
+
+
+def test_gateway_default_disables_pre_reply_persona(monkeypatch, test_config, bucket_mgr):
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recent_context_budget=0,
+            recalled_memory_budget=0,
+            related_memory_budget=0,
+        ),
+        bucket_mgr,
+    )
+    persona = RecordingPersonaEngine()
+    service.persona_engine = persona
+
+    _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "今天有点累"}]},
+            "sess-persona-default-off",
+        )
+    )
+
+    assert service.current_inner_state_interval_rounds == 0
+    assert persona.pre_calls == []
 
 
 def test_gateway_config_endpoint_updates_persona_engine(monkeypatch, test_config, bucket_mgr):
@@ -1376,7 +1639,8 @@ def test_gateway_accepts_anthropic_messages(monkeypatch, test_config, bucket_mgr
     assert forwarded["stream"] is False
     assert forwarded["messages"][0] == {"role": "system", "content": "你是一个自然聊天助手。"}
     assert forwarded["messages"][1]["role"] == "user"
-    assert "Long-term State Summary" in forwarded["messages"][1]["content"]
+    assert "Long-term State Summary" not in forwarded["messages"][1]["content"]
+    assert "Live private context" in forwarded["messages"][1]["content"]
     assert "Core Memory" not in forwarded["messages"][1]["content"]
     assert forwarded["messages"][1]["content"].endswith("今天怎么样？")
     assert state_store.get_recent_bucket_ids("sess-anthropic", 5) == set()
@@ -1403,7 +1667,8 @@ def test_gateway_defaults_anthropic_session_id(monkeypatch, test_config, bucket_
     assert response.status_code == 200
     last_message = captured[0]["json"]["messages"][-1]
     assert last_message["role"] == "user"
-    assert "Long-term State Summary" in last_message["content"]
+    assert "Long-term State Summary" not in last_message["content"]
+    assert "Live private context" in last_message["content"]
     assert last_message["content"].endswith("你好")
     assert state_store.get_recent_bucket_ids("main", 5) == set()
 
@@ -1445,7 +1710,8 @@ def test_gateway_maps_anthropic_image_blocks(monkeypatch, test_config, bucket_mg
     forwarded_content = captured[0]["json"]["messages"][-1]["content"]
     assert isinstance(forwarded_content, list)
     assert forwarded_content[0]["type"] == "text"
-    assert "Long-term State Summary" in forwarded_content[0]["text"]
+    assert "Long-term State Summary" not in forwarded_content[0]["text"]
+    assert "Live private context" in forwarded_content[0]["text"]
     assert forwarded_content[1] == {"type": "text", "text": "这张图是什么？"}
     assert forwarded_content[2] == {
         "type": "image_url",
@@ -3538,7 +3804,8 @@ def test_gateway_injects_after_existing_system_message(monkeypatch, test_config,
 
     dynamic = forwarded["messages"][1]["content"]
     assert "Core Memory" not in dynamic
-    assert "Long-term State Summary" in dynamic
+    assert "Long-term State Summary" not in dynamic
+    assert "Live private context" in dynamic
     assert "valence=" not in dynamic
     assert "affinity=" not in dynamic
     assert "Recent Context" in dynamic
@@ -3761,7 +4028,8 @@ def test_gateway_injects_when_no_system_message(monkeypatch, test_config, bucket
     assert response.status_code == 200
     messages = captured[0]["json"]["messages"]
     assert messages[0]["role"] == "user"
-    assert "Long-term State Summary" in messages[0]["content"]
+    assert "Long-term State Summary" not in messages[0]["content"]
+    assert "Live private context" in messages[0]["content"]
     assert "Core Memory" not in messages[0]["content"]
     assert messages[0]["content"].endswith("今天怎么样")
 
@@ -5955,6 +6223,189 @@ def test_gateway_date_recall_handles_plain_yesterday_chat_question(
     assert "Recalled Memory" not in injected
     assert debug["date_recall_injected"] is True
     assert debug["date_recall_debug"]["topic_terms"] == []
+    assert debug["date_persona_trace_injected"] is False
+    assert debug["date_persona_trace_debug"]["skip_reason"] == "date_trace_not_requested"
+
+
+def test_gateway_date_recall_prefers_raw_events_transcript_over_short_turn_store(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    target = datetime.now(timezone(timedelta(hours=8))) - timedelta(days=1)
+    local_created = target.replace(hour=17, minute=12, second=0, microsecond=0)
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=0,
+        recalled_memory_budget=500,
+        related_memory_budget=0,
+        inject_total_budget=1800,
+        current_inner_state_interval_rounds=0,
+        relationship_weather_interval_rounds=0,
+        favorite_memory_interval_rounds=0,
+        date_recall_enabled=True,
+        date_recall_budget=500,
+        date_recall_max_turns=4,
+        date_recall_max_buckets=2,
+    )
+    _create_bucket(
+        bucket_mgr,
+        content="今天的关系天气：这条日印象不该回答昨天聊了什么。",
+        name=f"{target.date().isoformat()} 日印象",
+        hours_ago=24,
+        bucket_type="feel",
+        tags=["relationship_weather", "daily_impression"],
+        date=target.date().isoformat(),
+    )
+    _, service, state_store, _ = _build_service(monkeypatch, cfg, bucket_mgr, embedding_results=[])
+    state_store.record_success("sess-date-recall-raw", [], completed_at=datetime.now() - timedelta(minutes=5))
+    state_store.record_conversation_turn(
+        profile_id="haven_xiaoyu",
+        session_id="window-yesterday",
+        round_id=1,
+        user_text="这条旧 short-turn 内容不该优先生效。",
+        assistant_text="short-turn fallback 只该在 raw 缺失时使用。",
+        model="dummy",
+        client="unit-test",
+        route="/v1/chat/completions",
+        created_at=local_created,
+    )
+    created_at = local_created.astimezone(timezone.utc).isoformat(timespec="seconds")
+    result = service.raw_event_store.ingest(
+        [
+            {
+                "source": "gateway",
+                "source_event_id": "haven_xiaoyu:window-yesterday:2:user",
+                "role": "user",
+                "text": "昨天下午主要在聊换窗、raw transcript 和日期召回。",
+                "created_at": created_at,
+                "conversation_id": "window-yesterday",
+                "session_id": "window-yesterday",
+                "client": "unit-test",
+                "metadata": {"profile_id": "haven_xiaoyu", "round_id": 2},
+            },
+            {
+                "source": "gateway",
+                "source_event_id": "haven_xiaoyu:window-yesterday:2:assistant",
+                "role": "assistant",
+                "text": "我当时说先把 transcript 拉稳，再谈关系天气。",
+                "created_at": created_at,
+                "conversation_id": "window-yesterday",
+                "session_id": "window-yesterday",
+                "client": "unit-test",
+                "metadata": {"profile_id": "haven_xiaoyu", "round_id": 2},
+            },
+        ],
+        source="gateway",
+    )
+    assert result["inserted"] == 2
+
+    payload, recalled_ids, debug = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "昨天在聊什么"}]},
+            "sess-date-recall-raw",
+            include_debug=True,
+        )
+    )
+    injected = _joined_message_content(payload["messages"])
+
+    assert recalled_ids == []
+    assert "chat_transcript:" in injected
+    assert "昨天下午主要在聊换窗、raw transcript 和日期召回。" in injected
+    assert "这条旧 short-turn 内容不该优先生效。" not in injected
+    assert "今天的关系天气：这条日印象不该回答昨天聊了什么。" not in injected
+    assert debug["date_recall_debug"]["turn_source"] == "raw_events"
+    assert debug["date_persona_trace_injected"] is False
+
+
+def test_gateway_date_recall_raw_events_apply_topic_filter(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    target = datetime.now(timezone(timedelta(hours=8))) - timedelta(days=1)
+    created_at = target.replace(hour=20, minute=15, second=0, microsecond=0).astimezone(timezone.utc)
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=0,
+        recalled_memory_budget=500,
+        related_memory_budget=0,
+        inject_total_budget=1800,
+        current_inner_state_interval_rounds=0,
+        relationship_weather_interval_rounds=0,
+        favorite_memory_interval_rounds=0,
+        date_recall_enabled=True,
+        date_recall_budget=500,
+        date_recall_max_turns=4,
+        date_recall_max_buckets=2,
+    )
+    _, service, state_store, _ = _build_service(monkeypatch, cfg, bucket_mgr, embedding_results=[])
+    state_store.record_success("sess-date-recall-raw-topic", [], completed_at=datetime.now() - timedelta(minutes=5))
+    service.raw_event_store.ingest(
+        [
+            {
+                "source": "gateway",
+                "source_event_id": "haven_xiaoyu:window-yesterday:1:user",
+                "role": "user",
+                "text": "昨天先改简历再投递，继续找工作。",
+                "created_at": created_at.isoformat(timespec="seconds"),
+                "conversation_id": "window-yesterday",
+                "session_id": "window-yesterday",
+                "client": "unit-test",
+                "metadata": {"profile_id": "haven_xiaoyu", "round_id": 1},
+            },
+            {
+                "source": "gateway",
+                "source_event_id": "haven_xiaoyu:window-yesterday:1:assistant",
+                "role": "assistant",
+                "text": "我当时回的是先把简历和投递顺序压稳。",
+                "created_at": created_at.isoformat(timespec="seconds"),
+                "conversation_id": "window-yesterday",
+                "session_id": "window-yesterday",
+                "client": "unit-test",
+                "metadata": {"profile_id": "haven_xiaoyu", "round_id": 1},
+            },
+            {
+                "source": "gateway",
+                "source_event_id": "haven_xiaoyu:window-yesterday:2:user",
+                "role": "user",
+                "text": "昨天还聊了蛋糕好不好吃。",
+                "created_at": (created_at + timedelta(minutes=5)).isoformat(timespec="seconds"),
+                "conversation_id": "window-yesterday",
+                "session_id": "window-yesterday",
+                "client": "unit-test",
+                "metadata": {"profile_id": "haven_xiaoyu", "round_id": 2},
+            },
+            {
+                "source": "gateway",
+                "source_event_id": "haven_xiaoyu:window-yesterday:2:assistant",
+                "role": "assistant",
+                "text": "蛋糕这轮和找工作无关。",
+                "created_at": (created_at + timedelta(minutes=5)).isoformat(timespec="seconds"),
+                "conversation_id": "window-yesterday",
+                "session_id": "window-yesterday",
+                "client": "unit-test",
+                "metadata": {"profile_id": "haven_xiaoyu", "round_id": 2},
+            },
+        ],
+        source="gateway",
+    )
+
+    payload, recalled_ids, debug = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "昨天聊找工作吗"}]},
+            "sess-date-recall-raw-topic",
+            include_debug=True,
+        )
+    )
+    injected = _joined_message_content(payload["messages"])
+
+    assert recalled_ids == []
+    assert "找工作" in injected
+    assert "简历" in injected
+    assert "蛋糕" not in injected
+    assert debug["date_recall_debug"]["turn_source"] == "raw_events"
+    assert debug["date_persona_trace_injected"] is False
 
 
 def test_gateway_plain_today_status_does_not_trigger_date_recall(monkeypatch, test_config, bucket_mgr):
@@ -6105,7 +6556,7 @@ def test_gateway_recent_context_allows_twenty_four_hour_reentry(
     assert payload["recent_context_reason"] == "session_reentry"
 
 
-def test_gateway_handoff_skips_auto_recent_but_keeps_date_trace(
+def test_gateway_handoff_skips_auto_recent_and_plain_date_trace(
     monkeypatch,
     test_config,
     bucket_mgr,
@@ -6167,13 +6618,13 @@ def test_gateway_handoff_skips_auto_recent_but_keeps_date_trace(
     )
     injected = _joined_message_content(payload["messages"])
 
-    assert recalled_ids == [date_recall_id]
-    assert "Date Recall" in injected
-    assert "Date Persona Trace" in injected
-    assert debug["date_persona_trace_debug"]["daily_bucket_id"] == date_trace_id
+    assert recalled_ids == []
+    assert "Date Persona Trace" not in injected
     assert "Recent Context" not in injected
-    assert "Haven的梦键盘花园求婚" in injected
-    assert debug["date_persona_trace_injected"] is True
+    assert "今天的关系天气" not in injected
+    assert "Haven的梦键盘花园求婚" not in injected
+    assert debug["date_persona_trace_injected"] is False
+    assert debug["date_persona_trace_debug"]["skip_reason"] == "date_trace_not_requested"
     assert debug["recent_context_injected"] is False
     assert debug["recent_context_reason"] == ""
 
@@ -8525,12 +8976,146 @@ def test_date_persona_trace_skips_plain_yesterday_statement_even_with_material(
     assert debug["date_persona_trace_debug"]["skip_reason"] == "date_trace_not_requested"
 
 
+def test_dynamic_alpha_prefers_high_semantic_over_weak_keyword_and_importance(
+    monkeypatch, test_config, bucket_mgr
+):
+    semantic_id = _create_bucket(
+        bucket_mgr,
+        content="猫咪术后吃药剂量按医生备注来，晚上先观察精神状态。",
+        name="猫咪术后药量",
+        hours_ago=240,
+        importance=1,
+    )
+    noisy_id = _create_bucket(
+        bucket_mgr,
+        content="猫咪普通玩具购买记录，重要度很高但不是药量。",
+        name="猫咪玩具",
+        hours_ago=1,
+        importance=10,
+    )
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recall_fusion_mode="dynamic",
+            current_inner_state_interval_rounds=0,
+            first_card_min_score=0.1,
+        ),
+        bucket_mgr,
+        embedding_results=[(semantic_id, 0.95), (noisy_id, 0.55)],
+    )
+    monkeypatch.setattr(bucket_mgr, "calc_topic_scores", lambda query, buckets: {noisy_id: 1.0})
+    monkeypatch.setattr(service, "_admit_bucket_for_recall", lambda query, item: True)
+
+    selected, _suppressed = _run(
+        service._dynamic_bucket_candidate_items(
+            "猫咪药量今晚怎么处理",
+            "sess-dynamic-alpha-semantic",
+            _run(bucket_mgr.list_all()),
+        )
+    )
+
+    assert [item["bucket"]["id"] for item in selected[:2]] == [semantic_id, noisy_id]
+    assert selected[0]["fusion_mode"] == "dynamic"
+    assert selected[0]["dynamic_alpha"] >= 0.80
+    assert selected[0]["score"] > selected[1]["score"]
+
+
+def test_dynamic_alpha_raises_keyword_candidate_when_vector_margin_is_small(
+    monkeypatch, test_config, bucket_mgr
+):
+    keyword_id = _create_bucket(
+        bucket_mgr,
+        content="海边神庙那次的具体细节：风、石阶、潮湿的盐味。",
+        name="海边神庙",
+        hours_ago=72,
+        importance=5,
+    )
+    semantic_id = _create_bucket(
+        bucket_mgr,
+        content="另一次普通散步，只有贝壳和潮水。",
+        name="普通散步",
+        hours_ago=72,
+        importance=5,
+    )
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recall_fusion_mode="dynamic",
+            current_inner_state_interval_rounds=0,
+            first_card_min_score=0.1,
+        ),
+        bucket_mgr,
+        embedding_results=[(semantic_id, 0.51), (keyword_id, 0.50)],
+    )
+    monkeypatch.setattr(bucket_mgr, "calc_topic_scores", lambda query, buckets: {keyword_id: 1.0})
+    monkeypatch.setattr(service, "_admit_bucket_for_recall", lambda query, item: True)
+
+    selected, _suppressed = _run(
+        service._dynamic_bucket_candidate_items(
+            "海边神庙具体细节",
+            "sess-dynamic-alpha-keyword",
+            _run(bucket_mgr.list_all()),
+        )
+    )
+
+    assert selected[0]["bucket"]["id"] == keyword_id
+    assert selected[0]["keyword_norm"] == pytest.approx(1.0)
+    assert selected[0]["dynamic_alpha"] < 0.45
+
+
+def test_dynamic_alpha_metadata_adjustment_does_not_reverse_clear_fusion_gap(
+    monkeypatch, test_config, bucket_mgr
+):
+    clear_id = _create_bucket(
+        bucket_mgr,
+        content="签证材料清单里最关键的是护照、照片和在读证明。",
+        name="签证材料清单",
+        hours_ago=240,
+        importance=1,
+    )
+    noisy_id = _create_bucket(
+        bucket_mgr,
+        content="旅行愿望清单，最近很活跃但不是材料清单。",
+        name="旅行愿望",
+        hours_ago=1,
+        importance=10,
+    )
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recall_fusion_mode="dynamic",
+            current_inner_state_interval_rounds=0,
+            first_card_min_score=0.1,
+        ),
+        bucket_mgr,
+        embedding_results=[(clear_id, 0.95), (noisy_id, 0.70)],
+    )
+    monkeypatch.setattr(bucket_mgr, "calc_topic_scores", lambda query, buckets: {})
+    monkeypatch.setattr(service, "_admit_bucket_for_recall", lambda query, item: True)
+
+    selected, _suppressed = _run(
+        service._dynamic_bucket_candidate_items(
+            "签证材料清单",
+            "sess-dynamic-alpha-metadata",
+            _run(bucket_mgr.list_all()),
+        )
+    )
+
+    assert selected[0]["bucket"]["id"] == clear_id
+    assert selected[1]["metadata_adjustment"] > selected[0]["metadata_adjustment"]
+    assert selected[0]["score"] > selected[1]["score"]
+
+
 def test_recent_round_skip_prefers_unseen_candidate(monkeypatch, test_config, bucket_mgr):
     cfg = _gateway_config(
         test_config,
         core_memory_budget=0,
         recent_context_budget=0,
         first_card_min_score=0.45,
+        high_confidence_semantic_score=0.99,
     )
     cat_a = _create_bucket(
         bucket_mgr,

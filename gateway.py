@@ -233,6 +233,24 @@ Schema:
   ]
 }
 """
+MEMORY_SENTINEL_SYSTEM_PROMPT = """You are Ombre Memory Sentinel.
+Return only strict JSON. Do not write memory. Do not choose final memories.
+Classify whether the latest user message needs long-term memory search.
+Use the recent turns only to resolve vague followups such as 后来呢, 那件事, or 接着刚才.
+Routes:
+- search: the user is asking for old context, a past event, a reason/background, or a followup whose referent is in recent turns.
+- tone_only: affectionate, intimate, comfort, or light emotional contact where familiar tone may help but old events should not be retrieved.
+- skip: pure acknowledgement, laughter, ping/test, empty reaction, or no useful memory anchor.
+Do not treat generic affection, crying, missing, hugging, or "哥哥在吗" as search unless recent turns provide a concrete old-event referent.
+If searchable, include concrete anchors only; omit generic words such as memory, recent, context, remember, emotion, status, 哭, 想你, 抱抱.
+Schema:
+{
+  "route": "search",
+  "reason": "short reason",
+  "anchors": ["concrete anchor"],
+  "confidence": 0.8
+}
+"""
 EXTERNAL_CONTEXT_ATTACHMENT_RE = re.compile(
     r"<attachment\b[^>]*>[\s\S]*?</attachment>",
     re.IGNORECASE,
@@ -358,6 +376,18 @@ class GatewayService:
             0,
             int(self.gateway_cfg.get("conversation_turns_max_entries", 500)),
         )
+        self.memory_sentinel_enabled = self._bool_config_value(
+            self.gateway_cfg.get("memory_sentinel_enabled"),
+            True,
+        )
+        (
+            self.memory_sentinel_model,
+            self.memory_sentinel_uses_dehydrator,
+        ) = self._resolve_memory_sentinel_model()
+        self.memory_sentinel_context_turns = max(
+            0,
+            min(8, int(self.gateway_cfg.get("memory_sentinel_context_turns", 3))),
+        )
         self.dynamic_top_k = int(self.gateway_cfg.get("dynamic_top_k", 10))
         self.semantic_candidate_top_k = max(
             self.dynamic_top_k,
@@ -471,7 +501,7 @@ class GatewayService:
             "debug": self._portrait_memory_debug_base(),
         }
         self.current_inner_state_interval_rounds = max(
-            0, int(self.gateway_cfg.get("current_inner_state_interval_rounds", 15))
+            0, int(self.gateway_cfg.get("current_inner_state_interval_rounds", 0))
         )
         self.relationship_weather_interval_rounds = max(
             0, int(self.gateway_cfg.get("relationship_weather_interval_rounds", 0))
@@ -484,6 +514,9 @@ class GatewayService:
         self.keyword_weight = float(self.gateway_cfg.get("keyword_weight", 0.35))
         self.importance_weight = float(self.gateway_cfg.get("importance_weight", 0.03))
         self.freshness_weight = float(self.gateway_cfg.get("freshness_weight", 0.03))
+        self.recall_fusion_mode = self._normalize_recall_fusion_mode(
+            self.gateway_cfg.get("recall_fusion_mode", "dynamic")
+        )
         embedding_cfg = config.get("embedding", {}) if isinstance(config.get("embedding", {}), dict) else {}
         try:
             embedding_timeout = float(
@@ -589,6 +622,9 @@ class GatewayService:
                 "just_now_context_hours": self.just_now_context_hours,
                 "just_now_context_max_turns": self.just_now_context_max_turns,
                 "just_now_context_budget": self.just_now_context_budget,
+                "memory_sentinel_enabled": self.memory_sentinel_enabled,
+                "memory_sentinel_model": self.memory_sentinel_model,
+                "memory_sentinel_context_turns": self.memory_sentinel_context_turns,
                 "date_persona_trace_enabled": self.date_persona_trace_enabled,
                 "date_persona_trace_budget": self.date_persona_trace_budget,
                 "date_persona_trace_max_events": self.date_persona_trace_max_events,
@@ -606,6 +642,7 @@ class GatewayService:
                 "current_inner_state_interval_rounds": self.current_inner_state_interval_rounds,
                 "direct_render_mode": self.direct_render_mode,
                 "retrieval_mode": self.retrieval_mode,
+                "recall_fusion_mode": self.recall_fusion_mode,
                 "reranker": {
                     "enabled": bool(getattr(self.reranker_engine, "enabled", False)),
                     "model": getattr(self.reranker_engine, "model", ""),
@@ -649,6 +686,9 @@ class GatewayService:
             "just_now_context_max_turns": self.just_now_context_max_turns,
             "just_now_context_budget": self.just_now_context_budget,
             "conversation_turns_max_entries": self.conversation_turns_max_entries,
+            "memory_sentinel_enabled": self.memory_sentinel_enabled,
+            "memory_sentinel_model": self.memory_sentinel_model,
+            "memory_sentinel_context_turns": self.memory_sentinel_context_turns,
             "date_persona_trace_enabled": self.date_persona_trace_enabled,
             "date_persona_trace_budget": self.date_persona_trace_budget,
             "date_persona_trace_max_events": self.date_persona_trace_max_events,
@@ -667,6 +707,7 @@ class GatewayService:
             "current_inner_state_interval_rounds": self.current_inner_state_interval_rounds,
             "direct_render_mode": self.direct_render_mode,
             "retrieval_mode": self.retrieval_mode,
+            "recall_fusion_mode": self.recall_fusion_mode,
             "word_map_hint_enabled": self.word_map_hint_enabled,
             "portrait_memory_enabled": self.portrait_memory_enabled,
             "portrait_memory_budget": self.portrait_memory_budget,
@@ -967,6 +1008,28 @@ class GatewayService:
             self.conversation_turns_max_entries = max(0, int(payload["conversation_turns_max_entries"]))
             self.gateway_cfg["conversation_turns_max_entries"] = self.conversation_turns_max_entries
             updated.append("gateway.conversation_turns_max_entries")
+        if "memory_sentinel_enabled" in payload:
+            self.memory_sentinel_enabled = self._bool_config_value(
+                payload["memory_sentinel_enabled"],
+                True,
+            )
+            self.gateway_cfg["memory_sentinel_enabled"] = self.memory_sentinel_enabled
+            updated.append("gateway.memory_sentinel_enabled")
+        if "memory_sentinel_model" in payload:
+            configured_model = str(payload["memory_sentinel_model"] or "").strip()
+            (
+                self.memory_sentinel_model,
+                self.memory_sentinel_uses_dehydrator,
+            ) = self._resolve_memory_sentinel_model(configured_model)
+            self.gateway_cfg["memory_sentinel_model"] = configured_model
+            updated.append("gateway.memory_sentinel_model")
+        if "memory_sentinel_context_turns" in payload:
+            self.memory_sentinel_context_turns = max(
+                0,
+                min(8, int(payload["memory_sentinel_context_turns"])),
+            )
+            self.gateway_cfg["memory_sentinel_context_turns"] = self.memory_sentinel_context_turns
+            updated.append("gateway.memory_sentinel_context_turns")
         if "date_persona_trace_enabled" in payload:
             self.date_persona_trace_enabled = self._bool_config_value(
                 payload["date_persona_trace_enabled"],
@@ -1055,6 +1118,10 @@ class GatewayService:
             self.retrieval_mode = self._normalize_retrieval_mode(payload["retrieval_mode"])
             self.gateway_cfg["retrieval_mode"] = self.retrieval_mode
             updated.append("gateway.retrieval_mode")
+        if "recall_fusion_mode" in payload:
+            self.recall_fusion_mode = self._normalize_recall_fusion_mode(payload["recall_fusion_mode"])
+            self.gateway_cfg["recall_fusion_mode"] = self.recall_fusion_mode
+            updated.append("gateway.recall_fusion_mode")
         if "word_map_hint_enabled" in payload:
             self.word_map_hint_enabled = self._bool_config_value(payload["word_map_hint_enabled"], False)
             self.gateway_cfg["word_map_hint_enabled"] = self.word_map_hint_enabled
@@ -1731,6 +1798,7 @@ class GatewayService:
         persona_state: dict[str, Any] | None = None
         injected_ids: list[str] | None = None
         query_planner_debug: dict[str, Any] = self._query_planner_debug_base(current_user_query)
+        memory_sentinel_debug: dict[str, Any] = self._memory_sentinel_debug_base(current_user_query)
         skip_broad_dynamic_recall = False
         date_persona_trace_requested = False
 
@@ -1740,14 +1808,29 @@ class GatewayService:
                 current_user_query,
                 session_id,
             )
+            mark_step("targeted_skip_check", stage_started_at)
+            stage_started_at = time.perf_counter()
+            memory_sentinel_debug = await self._route_memory_sentinel(
+                current_user_query,
+                session_id,
+                all_buckets,
+                needs_handoff_first=needs_handoff_first,
+                just_now_context_requested=just_now_context_requested,
+                date_recall_requested=date_recall_requested,
+                targeted_detail_skip=skip_for_targeted_detail,
+            )
+            mark_step("memory_sentinel", stage_started_at)
+            sentinel_route = str(memory_sentinel_debug.get("route") or "")
+            sentinel_skip_broad = sentinel_route in {"tone_only", "skip"}
+            sentinel_search = sentinel_route == "search"
             skip_broad_dynamic_recall = (
                 skip_for_targeted_detail
                 or needs_handoff_first
                 or just_now_context_requested
                 or date_recall_requested
-                or low_signal_auto_recall
+                or sentinel_skip_broad
+                or (low_signal_auto_recall and not sentinel_search)
             )
-            mark_step("targeted_skip_check", stage_started_at)
             if needs_handoff_first:
                 query_planner_debug["skip_reason"] = (
                     "handoff_trigger" if is_handoff_trigger_query else "session_start_handoff"
@@ -1780,6 +1863,8 @@ class GatewayService:
                     all_buckets,
                 )
                 mark_step("date_recall", stage_started_at)
+            elif sentinel_skip_broad:
+                query_planner_debug["skip_reason"] = f"memory_sentinel_{sentinel_route}"
             elif low_signal_auto_recall:
                 query_planner_debug["skip_reason"] = "low_signal_auto_recall"
             if self.persona_engine.enabled and self._should_inject_interval(
@@ -1833,7 +1918,10 @@ class GatewayService:
                         current_user_query,
                         session_id,
                         all_buckets,
-                        search_query=self._entity_priority_recall_search_query(current_user_query),
+                        search_query=self._dynamic_recall_search_query(
+                            current_user_query,
+                            memory_sentinel_debug,
+                        ),
                         include_query_planner_debug=True,
                     )
                     mark_step("dynamic_recall_bucket_select", stage_started_at)
@@ -1878,6 +1966,10 @@ class GatewayService:
                         session_id,
                         all_buckets,
                         grouped_moments,
+                        search_query=self._dynamic_recall_search_query(
+                            current_user_query,
+                            memory_sentinel_debug,
+                        ),
                         include_query_planner_debug=True,
                     )
                     mark_step("dynamic_recall_graph_select", stage_started_at)
@@ -1894,10 +1986,7 @@ class GatewayService:
                 context_mode=context_mode,
             )
             mark_step("format_recalled_memory", stage_started_at)
-            date_persona_trace_requested = (
-                date_recall_requested
-                or self._query_requests_date_persona_trace(current_user_query)
-            )
+            date_persona_trace_requested = self._query_requests_date_persona_trace(current_user_query)
             if needs_handoff_first or just_now_context_requested:
                 date_persona_trace_debug["skip_reason"] = (
                     "just_now_context"
@@ -1998,7 +2087,8 @@ class GatewayService:
                     "memory_detail again. Do not mention this line in the final answer."
                 )
             reliable_dynamic_context = bool(recalled_memory.strip() or related_memory.strip())
-            if not just_now_context_requested and not date_recall_requested and self._should_inject_recent_context(
+            memory_sentinel_blocks_context = str(memory_sentinel_debug.get("route") or "") in {"tone_only", "skip"}
+            if not memory_sentinel_blocks_context and not just_now_context_requested and not date_recall_requested and self._should_inject_recent_context(
                 session_id,
                 current_user_query,
                 has_reliable_dynamic_context=reliable_dynamic_context,
@@ -2166,6 +2256,7 @@ class GatewayService:
                 suppressed_moments=suppressed_moments,
                 suppressed_buckets=suppressed_buckets,
                 query_planner_debug=query_planner_debug,
+                memory_sentinel_debug=memory_sentinel_debug,
             )
             mark_step("build_debug_payload", stage_started_at)
             prepare_timing_debug["total_ms"] = max(0, int((time.perf_counter() - prepare_started_at) * 1000))
@@ -5691,6 +5782,7 @@ class GatewayService:
             "label": "",
             "topic_terms": [],
             "turn_count": 0,
+            "turn_source": "",
             "bucket_count": 0,
             "selected_turn_ids": [],
             "selected_bucket_ids": [],
@@ -5717,8 +5809,9 @@ class GatewayService:
         date_key = hint["date"]
         start_at, end_at = self._date_recall_range(date_key)
         topic_terms = self._date_recall_topic_terms(query_text)
-        turns = self._date_recall_turns_for_range(start_at, end_at, topic_terms)
-        buckets = self._date_recall_buckets_for_date(all_buckets, date_key, topic_terms)
+        turns, turn_source = self._date_recall_turns_for_range(start_at, end_at, topic_terms)
+        include_buckets = bool(topic_terms) or not turns
+        buckets = self._date_recall_buckets_for_date(all_buckets, date_key, topic_terms) if include_buckets else []
         buckets = buckets[: self.date_recall_max_buckets]
         bucket_ids = [str(bucket.get("id") or "") for bucket in buckets if bucket.get("id")]
 
@@ -5728,6 +5821,7 @@ class GatewayService:
                 "label": hint["label"],
                 "topic_terms": topic_terms,
                 "turn_count": len(turns),
+                "turn_source": turn_source,
                 "bucket_count": len(buckets),
                 "selected_turn_ids": [int(turn.get("id") or 0) for turn in turns],
                 "selected_bucket_ids": bucket_ids,
@@ -5744,7 +5838,7 @@ class GatewayService:
         if topic_terms:
             lines.append("topic_filter: " + ", ".join(topic_terms[:8]))
         if turns:
-            lines.append("conversation_turns:")
+            lines.append("chat_transcript:")
             for turn in reversed(turns):
                 lines.extend(self._format_date_recall_turn_lines(turn))
         if buckets:
@@ -5764,7 +5858,10 @@ class GatewayService:
         start_at: datetime,
         end_at: datetime,
         topic_terms: list[str],
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], str]:
+        raw_turns = self._date_recall_raw_turns_for_range(start_at, end_at, topic_terms)
+        if raw_turns:
+            return raw_turns[: self.date_recall_max_turns], "raw_events"
         profile_id = str(getattr(self.persona_engine, "profile_id", "") or "default")
         limit = max(self.date_recall_max_turns * 4, self.date_recall_max_turns)
         turns = self.state_store.list_conversation_turns_between(
@@ -5781,7 +5878,74 @@ class GatewayService:
                     topic_terms,
                 )
             ]
-        return turns[: self.date_recall_max_turns]
+        return turns[: self.date_recall_max_turns], "conversation_turns" if turns else ""
+
+    def _date_recall_raw_turns_for_range(
+        self,
+        start_at: datetime,
+        end_at: datetime,
+        topic_terms: list[str],
+    ) -> list[dict[str, Any]]:
+        limit = max(self.date_recall_max_turns * 12, self.date_recall_max_turns * 4, 80)
+        try:
+            raw_events = self.raw_event_store.list_events_between(
+                start_at=start_at,
+                end_at=end_at,
+                limit=limit,
+            )
+        except Exception:
+            return []
+        if not raw_events:
+            return []
+
+        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        for event in raw_events:
+            metadata = event.get("metadata", {}) if isinstance(event.get("metadata"), dict) else {}
+            session_id = str(event.get("session_id") or event.get("conversation_id") or "")
+            round_value = metadata.get("round_id")
+            round_id = str(round_value).strip() if round_value is not None else ""
+            group_key = (session_id, round_id or f"event:{int(event.get('id') or 0)}")
+            row = grouped.get(group_key)
+            if row is None:
+                row = {
+                    "id": int(event.get("id") or 0),
+                    "session_id": session_id,
+                    "round_id": int(round_value) if round_id.isdigit() else None,
+                    "created_at": str(event.get("created_at") or ""),
+                    "user_text": "",
+                    "assistant_text": "",
+                    "event_ids": [],
+                }
+                grouped[group_key] = row
+            row["event_ids"].append(int(event.get("id") or 0))
+            role = str(event.get("role") or "").strip().lower()
+            text = self._clean_conversation_turn_text(event.get("text", ""))
+            if role == "user" and text:
+                row["user_text"] = f"{row['user_text']} / {text}".strip(" /") if row["user_text"] else text
+            elif role == "assistant" and text:
+                row["assistant_text"] = (
+                    f"{row['assistant_text']} / {text}".strip(" /")
+                    if row["assistant_text"]
+                    else text
+                )
+
+        turns = []
+        for row in grouped.values():
+            combined = str(row.get("user_text") or "") + "\n" + str(row.get("assistant_text") or "")
+            if not combined.strip():
+                continue
+            topic_text = str(row.get("user_text") or "").strip() or combined
+            if topic_terms and not self._date_recall_text_has_topic_terms(topic_text, topic_terms):
+                continue
+            turns.append(row)
+        turns.sort(
+            key=lambda item: (
+                self._parse_iso(item.get("created_at")) or datetime.min,
+                int(item.get("id") or 0),
+            ),
+            reverse=True,
+        )
+        return turns
 
     def _date_recall_buckets_for_date(
         self,
@@ -6163,15 +6327,6 @@ class GatewayService:
             "当时",
             "那次",
             "这次",
-            "的事",
-            "什么事",
-            "发生",
-            "聊",
-            "说",
-            "提",
-            "讲",
-            "讨论",
-            "做了什么",
         )
         return any(marker in text for marker in trace_markers)
 
@@ -6213,7 +6368,13 @@ class GatewayService:
         if selected_events:
             lines.append("turns:")
             for event in selected_events:
-                lines.append(format_persona_event_trace_line(event, excerpt_limit=150))
+                lines.append(
+                    format_persona_event_trace_line(
+                        event,
+                        excerpt_limit=150,
+                        tz=self.gateway_tz,
+                    )
+                )
 
         if len(lines) <= 2:
             debug["skip_reason"] = "no_material"
@@ -6943,6 +7104,7 @@ class GatewayService:
         all_buckets: list[dict],
         grouped_moments: dict[str, list[dict]],
         *,
+        search_query: str = "",
         include_query_planner_debug: bool = False,
     ) -> tuple[list[dict], list[dict], list[dict], list[dict]] | tuple[
         list[dict], list[dict], list[dict], list[dict], dict[str, Any]
@@ -6990,7 +7152,7 @@ class GatewayService:
             )
 
         stage_started_at = time.perf_counter()
-        search_query = self._entity_priority_recall_search_query(query)
+        search_query = search_query or self._entity_priority_recall_search_query(query)
         selected_buckets, suppressed_buckets, query_planner_debug = await self._select_dynamic_buckets(
             query,
             session_id,
@@ -7882,6 +8044,59 @@ class GatewayService:
     def _normalize_retrieval_mode(value: object) -> str:
         mode = str(value or "graph").strip().lower()
         return mode if mode in {"graph", "bucket"} else "graph"
+
+    @staticmethod
+    def _normalize_recall_fusion_mode(value: object) -> str:
+        mode = str(value or "dynamic").strip().lower()
+        return mode if mode in {"dynamic", "legacy"} else "dynamic"
+
+    def _normalized_score_map(self, scores: dict[str, float]) -> dict[str, float]:
+        cleaned = {
+            str(key): max(0.0, self._safe_float(value, 0.0))
+            for key, value in (scores or {}).items()
+            if str(key or "").strip()
+        }
+        if not cleaned:
+            return {}
+        max_score = max(cleaned.values())
+        if max_score <= 0:
+            return {key: 0.0 for key in cleaned}
+        return {key: self._clamp(value / max_score) for key, value in cleaned.items()}
+
+    def _dynamic_alpha_debug(self, semantic_scores: dict[str, float]) -> dict[str, float]:
+        recall_thresholds = self.config.get("recall_thresholds", {})
+        if not isinstance(recall_thresholds, dict):
+            recall_thresholds = {}
+        conf_lo = self._clamp(self._safe_float(recall_thresholds.get("vector_min_score"), 0.50))
+        conf_hi = self._clamp(self.high_confidence_semantic_score)
+        if conf_hi <= conf_lo:
+            conf_hi = min(1.0, conf_lo + 0.01)
+        sorted_scores = sorted(
+            (self._clamp(self._safe_float(score, 0.0)) for score in (semantic_scores or {}).values()),
+            reverse=True,
+        )
+        top1 = sorted_scores[0] if sorted_scores else 0.0
+        top2 = sorted_scores[1] if len(sorted_scores) > 1 else 0.0
+        margin = max(0.0, top1 - top2)
+        margin_ref = 0.08
+        alpha_min = 0.35
+        alpha_max = 0.85
+        confidence_component = self._clamp((top1 - conf_lo) / (conf_hi - conf_lo))
+        margin_component = self._clamp(margin / margin_ref)
+        confidence = self._clamp((confidence_component * 0.7) + (margin_component * 0.3))
+        alpha = round(alpha_min + (alpha_max - alpha_min) * confidence, 4)
+        return {
+            "alpha": alpha,
+            "confidence": round(confidence, 4),
+            "top1": round(top1, 4),
+            "top2": round(top2, 4),
+            "margin": round(margin, 4),
+            "conf_lo": round(conf_lo, 4),
+            "conf_hi": round(conf_hi, 4),
+            "margin_ref": margin_ref,
+            "alpha_min": alpha_min,
+            "alpha_max": alpha_max,
+        }
 
     @staticmethod
     def _bool_config_value(value: Any, default: bool = False) -> bool:
@@ -8786,6 +9001,24 @@ class GatewayService:
             return " ".join(entity_terms[:4])
         return self._normalized_recall_query(query)
 
+    def _dynamic_recall_search_query(self, query: str, sentinel_debug: dict[str, Any] | None = None) -> str:
+        base = self._entity_priority_recall_search_query(query)
+        anchors = []
+        if isinstance(sentinel_debug, dict) and sentinel_debug.get("route") == "search":
+            anchors = self._normalize_planner_terms(sentinel_debug.get("anchors"))
+        if not anchors:
+            return base
+        anchor_text = " ".join(anchors[:6])
+        if not base:
+            return anchor_text
+        existing_key = self._compact_lookup_key(base)
+        extras = [
+            anchor
+            for anchor in anchors[:6]
+            if self._compact_lookup_key(anchor) and self._compact_lookup_key(anchor) not in existing_key
+        ]
+        return " ".join([base, *extras]).strip()
+
     def _recall_query_plan(self, query: str, *, context_mode: str = ""):
         return self.recall_policy.plan_query(query, context_mode=context_mode)
 
@@ -9290,6 +9523,311 @@ class GatewayService:
     ) -> str:
         return await self._build_diffused_memory_block(recalled_buckets, all_buckets)
 
+    def _resolve_memory_sentinel_model(self, configured_model: Any = None) -> tuple[str, bool]:
+        if configured_model is None:
+            configured_model = self.gateway_cfg.get("memory_sentinel_model")
+        explicit_model = str(configured_model or "").strip()
+        if explicit_model:
+            return explicit_model, False
+        model = str(getattr(self.dehydrator, "model", "") or "").strip()
+        if not model:
+            dehy_cfg = self.config.get("dehydration", {})
+            if isinstance(dehy_cfg, dict):
+                model = str(dehy_cfg.get("model") or "").strip()
+        return model, True
+
+    def _memory_sentinel_debug_base(self, query: str) -> dict[str, Any]:
+        return {
+            "enabled": bool(self.memory_sentinel_enabled),
+            "called": False,
+            "route": "",
+            "reason": "",
+            "anchors": [],
+            "confidence": None,
+            "hard_bypass_reason": "",
+            "fallback_used": False,
+            "errors": [],
+            "model": self.memory_sentinel_model,
+            "model_source": "dehydration" if self.memory_sentinel_uses_dehydrator else "gateway",
+            "context_turns": [],
+            "original_query": self._clip_text(str(query or ""), 500),
+        }
+
+    async def _route_memory_sentinel(
+        self,
+        query: str,
+        session_id: str,
+        all_buckets: list[dict],
+        *,
+        needs_handoff_first: bool = False,
+        just_now_context_requested: bool = False,
+        date_recall_requested: bool = False,
+        targeted_detail_skip: bool = False,
+    ) -> dict[str, Any]:
+        debug = self._memory_sentinel_debug_base(query)
+        hard_bypass = self._memory_sentinel_hard_bypass_reason(
+            query,
+            all_buckets,
+            needs_handoff_first=needs_handoff_first,
+            just_now_context_requested=just_now_context_requested,
+            date_recall_requested=date_recall_requested,
+            targeted_detail_skip=targeted_detail_skip,
+        )
+        if hard_bypass:
+            debug["hard_bypass_reason"] = hard_bypass
+            return debug
+        if not self.memory_sentinel_enabled or not str(query or "").strip():
+            return debug
+
+        turns = self._memory_sentinel_recent_turns(session_id)
+        debug["context_turns"] = [
+            {
+                "round_id": turn.get("round_id"),
+                "user_preview": self._clip_text(turn.get("user_text") or "", 120),
+                "assistant_preview": self._clip_text(turn.get("assistant_text") or "", 120),
+            }
+            for turn in turns
+        ]
+        debug["called"] = True
+        plan, error = await self._call_memory_sentinel(query, turns)
+        if error:
+            debug["errors"].append(error)
+            debug["fallback_used"] = True
+            return debug
+        if not plan:
+            debug["errors"].append("memory_sentinel_empty_response")
+            debug["fallback_used"] = True
+            return debug
+        debug.update(plan)
+        return debug
+
+    def _memory_sentinel_hard_bypass_reason(
+        self,
+        query: str,
+        all_buckets: list[dict],
+        *,
+        needs_handoff_first: bool = False,
+        just_now_context_requested: bool = False,
+        date_recall_requested: bool = False,
+        targeted_detail_skip: bool = False,
+    ) -> str:
+        text = str(query or "").strip()
+        if not text:
+            return "empty_query"
+        if needs_handoff_first:
+            return "handoff"
+        if just_now_context_requested:
+            return "just_now"
+        if date_recall_requested:
+            return "date_recall"
+        if targeted_detail_skip:
+            return "targeted_memory_detail"
+        if self._extract_explicit_bucket_ids_from_text(text) or self._extract_explicit_moment_ids_from_text(text):
+            return "explicit_memory_id"
+        normalized = self._normalized_recall_query(text)
+        exact_terms = self._extract_exact_anchor_terms(text, normalized)
+        if exact_terms and not self._memory_sentinel_low_signal_exact_anchor_only(text, exact_terms):
+            return "exact_anchor"
+        entity_terms = self.recall_policy.extract_entity_keywords(text)
+        if entity_terms and not self._memory_sentinel_model_should_review_entity(text, entity_terms):
+            return "entity"
+        if self.recall_policy.requires_topic_evidence(text):
+            return "topic_evidence_marker"
+        if self._query_has_explicit_recall_marker(text):
+            return "explicit_recall_marker"
+        if any(
+            self._is_source_record_bucket(bucket)
+            and self._source_record_explicit_bucket_match_reason(text, bucket)
+            for bucket in all_buckets or []
+        ):
+            return "source_record"
+        return ""
+
+    @staticmethod
+    def _query_has_explicit_recall_marker(query: str) -> bool:
+        text = str(query or "").lower()
+        markers = (
+            "还记得",
+            "记不记得",
+            "之前",
+            "以前",
+            "上次",
+            "那次",
+            "想起",
+            "想起来",
+            "回忆",
+            "记忆",
+            "召回",
+            "检索",
+            "查一下记忆",
+            "remember",
+            "recall",
+            "memory",
+        )
+        return any(marker in text for marker in markers)
+
+    def _memory_sentinel_low_signal_entity_only(self, query: str, entity_terms: list[str]) -> bool:
+        if not entity_terms:
+            return False
+        low_signal_terms = {
+            "ping",
+            "test",
+            "ok",
+            "hi",
+            "hello",
+            "哈哈",
+            "嗯嗯",
+            "测试",
+            "想你",
+            "想你了",
+            "想你了抱抱",
+            "抱抱",
+            "在吗",
+            "哥哥在吗",
+        }
+        keys = [self._compact_lookup_key(term) for term in entity_terms]
+        return bool(keys) and self._auto_recall_low_signal_query(query) and all(key in low_signal_terms for key in keys)
+
+    def _memory_sentinel_low_signal_exact_anchor_only(self, query: str, exact_terms: list[str]) -> bool:
+        if not exact_terms or not self._auto_recall_low_signal_query(query):
+            return False
+        low_signal_terms = {
+            "想你",
+            "想你了",
+            "想你了抱抱",
+            "抱抱",
+            "哥哥在吗",
+            "在吗",
+            "哈哈",
+            "嗯嗯",
+            "哭",
+            "难过",
+        }
+        keys = [self._compact_lookup_key(term) for term in exact_terms]
+        return bool(keys) and all(key in low_signal_terms for key in keys)
+
+    def _memory_sentinel_model_should_review_entity(self, query: str, entity_terms: list[str]) -> bool:
+        if self._memory_sentinel_low_signal_entity_only(query, entity_terms):
+            return True
+        compact = self._compact_lookup_key(query)
+        vague_refs = (
+            "后来",
+            "后来呢",
+            "那件事",
+            "这件事",
+            "那个事",
+            "这事",
+            "那事",
+            "接着",
+            "然后呢",
+        )
+        if any(ref in compact for ref in vague_refs):
+            return True
+        if self._query_looks_emotional_reason_lookup(query):
+            return True
+        return False
+
+    def _memory_sentinel_recent_turns(self, session_id: str) -> list[dict[str, Any]]:
+        if self.memory_sentinel_context_turns <= 0:
+            return []
+        profile_id = str(getattr(self.persona_engine, "profile_id", "") or "default")
+        turns = self.state_store.list_recent_conversation_turns(
+            profile_id=profile_id,
+            session_id=session_id,
+            limit=self.memory_sentinel_context_turns,
+            hours=max(1.0, self.just_now_context_hours or 6.0),
+        )
+        return list(reversed(turns))
+
+    async def _call_memory_sentinel(
+        self,
+        query: str,
+        turns: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        model = self.memory_sentinel_model
+        if not model:
+            return None, "memory_sentinel_model_missing"
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": MEMORY_SENTINEL_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "latest_user_message": query,
+                            "recent_turns": [
+                                {
+                                    "user": self._clip_text(turn.get("user_text") or "", 500),
+                                    "assistant": self._clip_text(turn.get("assistant_text") or "", 500),
+                                }
+                                for turn in turns
+                            ],
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            "temperature": 0,
+            "max_tokens": 220,
+            "stream": False,
+        }
+        if self.memory_sentinel_uses_dehydrator:
+            content, error = await self._call_query_planner_with_dehydrator(payload)
+            if error:
+                return None, error.replace("query_planner", "memory_sentinel")
+            if not content:
+                return None, "memory_sentinel_empty_response"
+            try:
+                return self._parse_memory_sentinel_response(content), None
+            except ValueError as exc:
+                return None, f"memory_sentinel_parse_failed:{exc}"
+
+        try:
+            response = await self._forward_upstream(payload)
+        except Exception as exc:
+            logger.warning("Gateway memory sentinel call failed: %s", exc)
+            return None, f"memory_sentinel_call_failed:{type(exc).__name__}"
+        if response.status_code >= 400:
+            return None, f"memory_sentinel_upstream_status:{response.status_code}"
+        try:
+            body = response.json()
+        except Exception:
+            return None, "memory_sentinel_invalid_upstream_json"
+        content = self._chat_completion_content(body)
+        if not content:
+            return None, "memory_sentinel_empty_response"
+        try:
+            return self._parse_memory_sentinel_response(content), None
+        except ValueError as exc:
+            return None, f"memory_sentinel_parse_failed:{exc}"
+
+    def _parse_memory_sentinel_response(self, content: str) -> dict[str, Any]:
+        text = str(content or "").strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"\s*```$", "", text).strip()
+        if not text.startswith("{"):
+            start = text.find("{")
+            end = text.rfind("}")
+            if start >= 0 and end > start:
+                text = text[start : end + 1]
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError("invalid_json") from exc
+        if not isinstance(raw, dict):
+            raise ValueError("json_root_not_object")
+        route = str(raw.get("route") or "").strip().lower()
+        if route not in {"search", "tone_only", "skip"}:
+            raise ValueError("invalid_route")
+        return {
+            "route": route,
+            "reason": self._clip_text(str(raw.get("reason") or ""), 160),
+            "anchors": self._normalize_planner_terms(raw.get("anchors"))[:6],
+            "confidence": self._clamp(self._safe_float(raw.get("confidence"), 0.0)),
+        }
+
     def _resolve_query_planner_model(self, configured_model: Any = None) -> tuple[str, bool]:
         if configured_model is None:
             configured_model = self.gateway_cfg.get("query_planner_model")
@@ -9421,7 +9959,7 @@ class GatewayService:
         multi_topic = self._query_looks_multi_topic(text)
         if multi_topic:
             return "multi_topic"
-        if not selected_items and self._query_looks_emotional_reason_lookup(text):
+        if self._query_looks_emotional_reason_lookup(text):
             return "emotional_reason_lookup"
         if not selected_items and long_enough:
             return "direct_recall_empty_or_low_confidence"
@@ -9607,14 +10145,15 @@ class GatewayService:
         if client is None:
             return None, "query_planner_dehydration_unavailable"
         completion_options = getattr(self.dehydrator, "_completion_options", None)
+        max_tokens = int(payload.get("max_tokens") or self.query_planner_max_tokens)
         if callable(completion_options):
             options = completion_options(
-                max_tokens=self.query_planner_max_tokens,
+                max_tokens=max_tokens,
                 temperature=0,
             )
         else:
             options = {
-                "max_tokens": self.query_planner_max_tokens,
+                "max_tokens": max_tokens,
                 "temperature": 0,
             }
         try:
@@ -10043,7 +10582,7 @@ class GatewayService:
 
         if not query or self.inject_max_cards <= 0:
             return [], []
-        if self._auto_query_too_vague(query):
+        if self._auto_query_too_vague(query) and not str(search_query or "").strip():
             return [], []
 
         stage_started_at = time.perf_counter()
@@ -10125,6 +10664,20 @@ class GatewayService:
             return [], []
 
         stage_started_at = time.perf_counter()
+        semantic_norms = self._normalized_score_map(semantic_scores)
+        keyword_basis = {
+            str(bucket_id): self._clamp(self._safe_float(score, 0.0))
+            for bucket_id, score in (keyword_scores or {}).items()
+        }
+        for bucket_id, score in (exact_scores or {}).items():
+            key = str(bucket_id)
+            keyword_basis[key] = max(keyword_basis.get(key, 0.0), self._clamp(self._safe_float(score, 0.0)))
+        for bucket_id in lexical_ids:
+            key = str(bucket_id)
+            keyword_basis[key] = max(keyword_basis.get(key, 0.0), 1.0)
+        keyword_norms = self._normalized_score_map(keyword_basis)
+        alpha_debug = self._dynamic_alpha_debug(semantic_scores)
+        alpha = self._safe_float(alpha_debug.get("alpha"), 0.35)
         now = datetime.now()
         recent_ids = self.state_store.get_recent_bucket_ids(session_id, self.skip_recent_rounds)
         scored_candidates = []
@@ -10156,13 +10709,6 @@ class GatewayService:
                         + list((exact_debug.get(bucket_id) or {}).get("terms") or [])
                     )
                 )
-            base_score = (
-                semantic_score * self.semantic_weight
-                + keyword_score * self.keyword_weight
-                + word_map_score * self.word_map_hint_weight
-                + importance_score * self.importance_weight
-                + freshness_score * self.freshness_weight
-            ) * relevance_score
             cooldown_multiplier = self.state_store.get_cooldown_multiplier(
                 session_id=session_id,
                 bucket_id=bucket_id,
@@ -10177,7 +10723,24 @@ class GatewayService:
                     cooldown_multiplier,
                     self.high_confidence_cooldown_floor,
                 )
-            final_score = round(base_score * cooldown_multiplier, 4)
+            vector_norm = self._clamp(semantic_norms.get(bucket_id, 0.0))
+            keyword_norm = self._clamp(keyword_norms.get(bucket_id, 0.0))
+            metadata_adjustment = 0.0
+            cooldown_penalty = 0.0
+            if self.recall_fusion_mode == "dynamic":
+                fusion_score = self._clamp((alpha * vector_norm + (1.0 - alpha) * keyword_norm) * relevance_score)
+                metadata_adjustment = round(0.02 * importance_score + 0.02 * freshness_score, 4)
+                cooldown_penalty = round((1.0 - self._clamp(cooldown_multiplier)) * 0.03, 4)
+                final_score = round(self._clamp(fusion_score + metadata_adjustment - cooldown_penalty), 4)
+            else:
+                fusion_score = (
+                    semantic_score * self.semantic_weight
+                    + keyword_score * self.keyword_weight
+                    + word_map_score * self.word_map_hint_weight
+                    + importance_score * self.importance_weight
+                    + freshness_score * self.freshness_weight
+                ) * relevance_score
+                final_score = round(fusion_score * cooldown_multiplier, 4)
             if lexical_match or exact_match:
                 final_score = max(final_score, self.first_card_min_score)
             scored_candidates.append(
@@ -10199,6 +10762,17 @@ class GatewayService:
                     "importance_score": importance_score,
                     "freshness_score": freshness_score,
                     "cooldown_multiplier": cooldown_multiplier,
+                    "fusion_mode": self.recall_fusion_mode,
+                    "fusion_score": round(fusion_score, 4),
+                    "vector_norm": round(vector_norm, 4),
+                    "keyword_norm": round(keyword_norm, 4),
+                    "dynamic_alpha": alpha if self.recall_fusion_mode == "dynamic" else None,
+                    "dynamic_alpha_confidence": (
+                        alpha_debug.get("confidence") if self.recall_fusion_mode == "dynamic" else None
+                    ),
+                    "metadata_adjustment": metadata_adjustment,
+                    "cooldown_penalty": cooldown_penalty,
+                    "dynamic_alpha_debug": alpha_debug if self.recall_fusion_mode == "dynamic" else {},
                     "planner_lexical_match": lexical_match,
                     "planner_queries": [planner_query] if planner_query else [],
                     "matched_query_terms": matched_query_terms,
@@ -10208,11 +10782,7 @@ class GatewayService:
 
         stage_started_at = time.perf_counter()
         scored_candidates.sort(
-            key=lambda item: self._bucket_recall_rank(
-                query,
-                item["bucket"],
-                item["score"],
-            )
+            key=lambda item: self._bucket_primary_candidate_rank(query, item)
         )
         scored_candidates.sort(key=lambda item: self._dynamic_bucket_priority(item))
         mark("sort_candidates", stage_started_at)
@@ -10280,7 +10850,7 @@ class GatewayService:
             if include_query_planner_debug:
                 return [], [], planner_debug
             return [], []
-        if self._auto_query_too_vague(query):
+        if self._auto_query_too_vague(query) and not str(search_query or "").strip():
             planner_debug["skip_reason"] = "auto_vague_query"
             if include_query_planner_debug:
                 return [], [], planner_debug
@@ -10420,6 +10990,13 @@ class GatewayService:
                 "rerank_score",
                 "planner_lexical_match",
                 "exact_anchor_match",
+                "fusion_mode",
+                "fusion_score",
+                "vector_norm",
+                "keyword_norm",
+                "dynamic_alpha",
+                "metadata_adjustment",
+                "cooldown_penalty",
                 "admission_reason",
             )
             if isinstance(item, dict) and key in item
@@ -10474,14 +11051,38 @@ class GatewayService:
                 new_item["score"] = new_item["combined_score"]
             reranked.append(new_item)
         reranked.sort(
-            key=lambda item: (
-                self._bucket_recall_rank(query, item["bucket"], item.get("score", 0.0))[0],
+            key=lambda item: self._bucket_reranked_candidate_rank(query, item),
+        )
+        return reranked + tail
+
+    def _bucket_primary_candidate_rank(self, query: str, item: dict) -> tuple:
+        if self.recall_fusion_mode == "dynamic":
+            return (
+                not bool(item.get("exact_anchor_match")),
+                not bool(item.get("planner_lexical_match")),
+                -self._safe_float(item.get("score"), 0.0),
+                self._bucket_recall_rank(query, item.get("bucket") or {}, item.get("score", 0.0))[0],
+                -self._safe_float(item.get("semantic_score"), 0.0),
+                -self._safe_float(item.get("keyword_score"), 0.0),
+            )
+        return self._bucket_recall_rank(query, item.get("bucket") or {}, item.get("score", 0.0))
+
+    def _bucket_reranked_candidate_rank(self, query: str, item: dict) -> tuple:
+        if self.recall_fusion_mode == "dynamic":
+            return (
+                not bool(item.get("exact_anchor_match")),
+                not bool(item.get("planner_lexical_match")),
                 item.get("rerank_score") is None,
                 -self._safe_float(item.get("combined_score", item.get("score")), 0.0),
                 -self._safe_float(item.get("score"), 0.0),
-            ),
+                self._bucket_recall_rank(query, item.get("bucket") or {}, item.get("score", 0.0))[0],
+            )
+        return (
+            self._bucket_recall_rank(query, item.get("bucket") or {}, item.get("score", 0.0))[0],
+            item.get("rerank_score") is None,
+            -self._safe_float(item.get("combined_score", item.get("score")), 0.0),
+            -self._safe_float(item.get("score"), 0.0),
         )
-        return reranked + tail
 
     def _bucket_rerank_candidate_priority(self, query: str, item: dict) -> tuple:
         return (
@@ -10516,6 +11117,15 @@ class GatewayService:
             evidence_tier = 4
         bucket_id = str((item.get("bucket") or {}).get("id") or "")
         recent_penalty = bool(recent_ids and bucket_id in recent_ids and evidence_tier != 0)
+        if self.recall_fusion_mode == "dynamic":
+            return (
+                recent_penalty,
+                evidence_tier,
+                -self._safe_float(item.get("score"), 0.0),
+                self._bucket_recall_rank(query, item.get("bucket") or {}, item.get("score", 0.0))[0],
+                -self._safe_float(item.get("rerank_score"), 0.0),
+                -self._safe_float(item.get("semantic_score"), 0.0),
+            )
         return (
             recent_penalty,
             evidence_tier,
@@ -11520,6 +12130,22 @@ class GatewayService:
             "score": self._safe_float(item.get("score"), 0.0),
             "semantic_score": self._safe_float(item.get("semantic_score"), 0.0),
             "keyword_score": self._safe_float(item.get("keyword_score"), 0.0),
+            "fusion_mode": str(item.get("fusion_mode") or ""),
+            "fusion_score": self._safe_float(item.get("fusion_score"), 0.0),
+            "vector_norm": self._safe_float(item.get("vector_norm"), 0.0),
+            "keyword_norm": self._safe_float(item.get("keyword_norm"), 0.0),
+            "dynamic_alpha": (
+                self._safe_float(item.get("dynamic_alpha"), 0.0)
+                if item.get("dynamic_alpha") is not None
+                else None
+            ),
+            "dynamic_alpha_confidence": (
+                self._safe_float(item.get("dynamic_alpha_confidence"), 0.0)
+                if item.get("dynamic_alpha_confidence") is not None
+                else None
+            ),
+            "metadata_adjustment": self._safe_float(item.get("metadata_adjustment"), 0.0),
+            "cooldown_penalty": self._safe_float(item.get("cooldown_penalty"), 0.0),
             "exact_anchor_score": self._safe_float(item.get("exact_anchor_score"), 0.0),
             "exact_anchor_match": bool(item.get("exact_anchor_match")),
             "exact_anchor_terms": list(item.get("exact_anchor_terms") or []),
@@ -11613,6 +12239,7 @@ class GatewayService:
         suppressed_moments: list[dict] | None = None,
         suppressed_buckets: list[dict] | None = None,
         query_planner_debug: dict[str, Any] | None = None,
+        memory_sentinel_debug: dict[str, Any] | None = None,
         date_persona_trace: str = "",
         date_persona_trace_debug: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -11700,6 +12327,7 @@ class GatewayService:
             "dream_context_injected": bool(str(dream_context or "").strip()),
             "dream_context_status": dream_context_status,
             "query_planner_debug": query_planner_debug or self._query_planner_debug_base(query),
+            "memory_sentinel_debug": memory_sentinel_debug or self._memory_sentinel_debug_base(query),
             "memory_detail_recall_debug": self._memory_detail_recall_debug_base(injected_bucket_ids),
             "targeted_memory_detail_debug": targeted_memory_detail_debug
             or self._targeted_memory_detail_debug_base(),

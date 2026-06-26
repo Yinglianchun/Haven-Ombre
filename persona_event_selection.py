@@ -1,11 +1,13 @@
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo
 
 
 _NON_KEY_RE = re.compile(r"[^\w\u4e00-\u9fff]+", re.UNICODE)
 _SPACE_RE = re.compile(r"\s+")
+_TRACE_TZ = ZoneInfo("Asia/Shanghai")
 
 _DROP_TERMS = (
     "小雨",
@@ -157,8 +159,13 @@ def select_persona_events(
     return selected
 
 
-def format_persona_event_trace_line(event: dict[str, Any], *, excerpt_limit: int = 180) -> str:
-    time_label = _time_label(event.get("created_at"))
+def format_persona_event_trace_line(
+    event: dict[str, Any],
+    *,
+    excerpt_limit: int = 180,
+    tz: ZoneInfo | None = _TRACE_TZ,
+) -> str:
+    time_label = _time_label(event.get("created_at"), tz=tz)
     user_excerpt = trim_persona_excerpt(event.get("user_excerpt"), excerpt_limit)
     assistant_excerpt = trim_persona_excerpt(event.get("assistant_excerpt"), excerpt_limit)
     parts = []
@@ -199,9 +206,13 @@ def _keys_similar(left: str, right: str, threshold: float) -> bool:
     return SequenceMatcher(None, left, right).ratio() >= threshold
 
 
-def _time_label(value: Any) -> str:
+def _time_label(value: Any, *, tz: ZoneInfo | None = _TRACE_TZ) -> str:
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return ""
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    if tz is not None:
+        parsed = parsed.astimezone(tz)
     return parsed.strftime("%H:%M")

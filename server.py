@@ -4484,6 +4484,11 @@ def _normalize_retrieval_mode(value: object) -> str:
     return mode if mode in {"graph", "bucket"} else "graph"
 
 
+def _normalize_recall_fusion_mode(value: object) -> str:
+    mode = str(value or "dynamic").strip().lower()
+    return mode if mode in {"dynamic", "legacy"} else "dynamic"
+
+
 def _query_resurface_enabled() -> bool:
     recall_cfg = config.get("recall", {}) if isinstance(config.get("recall", {}), dict) else {}
     return _bool_value(recall_cfg.get("query_resurface_enabled"), False)
@@ -10421,9 +10426,13 @@ async def api_config_get(request):
             "date_persona_trace_include_daily": _bool_value(gateway_cfg.get("date_persona_trace_include_daily"), True),
             "recalled_memory_budget": gateway_cfg.get("recalled_memory_budget", 400),
             "related_memory_budget": gateway_cfg.get("related_memory_budget", 220),
-            "current_inner_state_interval_rounds": gateway_cfg.get("current_inner_state_interval_rounds", 15),
+            "memory_sentinel_enabled": _bool_value(gateway_cfg.get("memory_sentinel_enabled"), True),
+            "memory_sentinel_model": gateway_cfg.get("memory_sentinel_model", ""),
+            "memory_sentinel_context_turns": gateway_cfg.get("memory_sentinel_context_turns", 3),
+            "current_inner_state_interval_rounds": gateway_cfg.get("current_inner_state_interval_rounds", 0),
             "direct_render_mode": _normalize_direct_render_mode(gateway_cfg.get("direct_render_mode", "auto")),
             "retrieval_mode": _normalize_retrieval_mode(gateway_cfg.get("retrieval_mode", "graph")),
+            "recall_fusion_mode": _normalize_recall_fusion_mode(gateway_cfg.get("recall_fusion_mode", "dynamic")),
             "word_map_hint_enabled": _bool_value(gateway_cfg.get("word_map_hint_enabled"), False),
             "portrait_memory_enabled": _bool_value(gateway_cfg.get("portrait_memory_enabled"), False),
             "portrait_memory_budget": gateway_cfg.get("portrait_memory_budget", 360),
@@ -10820,6 +10829,23 @@ async def api_config_update(request):
             gateway_cfg["related_memory_budget"] = max(0, int(g["related_memory_budget"]))
             gateway_hot_update_body["related_memory_budget"] = gateway_cfg["related_memory_budget"]
             updated.append("gateway.related_memory_budget")
+        if "memory_sentinel_enabled" in g:
+            gateway_cfg["memory_sentinel_enabled"] = _bool_value(g["memory_sentinel_enabled"], True)
+            gateway_hot_update_body["memory_sentinel_enabled"] = gateway_cfg["memory_sentinel_enabled"]
+            updated.append("gateway.memory_sentinel_enabled")
+        if "memory_sentinel_model" in g:
+            gateway_cfg["memory_sentinel_model"] = str(g["memory_sentinel_model"] or "").strip()
+            gateway_hot_update_body["memory_sentinel_model"] = gateway_cfg["memory_sentinel_model"]
+            updated.append("gateway.memory_sentinel_model")
+        if "memory_sentinel_context_turns" in g:
+            gateway_cfg["memory_sentinel_context_turns"] = _int_between(
+                g["memory_sentinel_context_turns"],
+                3,
+                0,
+                8,
+            )
+            gateway_hot_update_body["memory_sentinel_context_turns"] = gateway_cfg["memory_sentinel_context_turns"]
+            updated.append("gateway.memory_sentinel_context_turns")
         if "current_inner_state_interval_rounds" in g:
             gateway_cfg["current_inner_state_interval_rounds"] = max(
                 0,
@@ -10837,6 +10863,10 @@ async def api_config_update(request):
             gateway_cfg["retrieval_mode"] = _normalize_retrieval_mode(g["retrieval_mode"])
             gateway_hot_update_body["retrieval_mode"] = gateway_cfg["retrieval_mode"]
             updated.append("gateway.retrieval_mode")
+        if "recall_fusion_mode" in g:
+            gateway_cfg["recall_fusion_mode"] = _normalize_recall_fusion_mode(g["recall_fusion_mode"])
+            gateway_hot_update_body["recall_fusion_mode"] = gateway_cfg["recall_fusion_mode"]
+            updated.append("gateway.recall_fusion_mode")
         if "word_map_hint_enabled" in g:
             gateway_cfg["word_map_hint_enabled"] = _bool_value(g["word_map_hint_enabled"], False)
             gateway_hot_update_body["word_map_hint_enabled"] = gateway_cfg["word_map_hint_enabled"]
@@ -11197,6 +11227,22 @@ async def api_config_update(request):
                     sc_gateway["recalled_memory_budget"] = max(0, int(body["gateway"]["recalled_memory_budget"]))
                 if "related_memory_budget" in body["gateway"]:
                     sc_gateway["related_memory_budget"] = max(0, int(body["gateway"]["related_memory_budget"]))
+                if "memory_sentinel_enabled" in body["gateway"]:
+                    sc_gateway["memory_sentinel_enabled"] = _bool_value(
+                        body["gateway"]["memory_sentinel_enabled"],
+                        True,
+                    )
+                if "memory_sentinel_model" in body["gateway"]:
+                    sc_gateway["memory_sentinel_model"] = str(
+                        body["gateway"]["memory_sentinel_model"] or ""
+                    ).strip()
+                if "memory_sentinel_context_turns" in body["gateway"]:
+                    sc_gateway["memory_sentinel_context_turns"] = _int_between(
+                        body["gateway"]["memory_sentinel_context_turns"],
+                        3,
+                        0,
+                        8,
+                    )
                 if "current_inner_state_interval_rounds" in body["gateway"]:
                     sc_gateway["current_inner_state_interval_rounds"] = max(
                         0,
@@ -11206,6 +11252,10 @@ async def api_config_update(request):
                     sc_gateway["direct_render_mode"] = _normalize_direct_render_mode(body["gateway"]["direct_render_mode"])
                 if "retrieval_mode" in body["gateway"]:
                     sc_gateway["retrieval_mode"] = _normalize_retrieval_mode(body["gateway"]["retrieval_mode"])
+                if "recall_fusion_mode" in body["gateway"]:
+                    sc_gateway["recall_fusion_mode"] = _normalize_recall_fusion_mode(
+                        body["gateway"]["recall_fusion_mode"]
+                    )
                 if "portrait_memory_enabled" in body["gateway"]:
                     sc_gateway["portrait_memory_enabled"] = _bool_value(
                         body["gateway"]["portrait_memory_enabled"],
