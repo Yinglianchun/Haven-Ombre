@@ -6989,6 +6989,33 @@ def test_gateway_query_planner_parser_filters_generic_terms(monkeypatch, test_co
     assert plan["queries"] == []
 
 
+def test_gateway_query_planner_filters_address_terms_from_must_terms(
+    monkeypatch, test_config, bucket_mgr
+):
+    _, service, _, _ = _build_service(monkeypatch, _gateway_config(test_config), bucket_mgr)
+
+    plan = service._parse_query_planner_response(
+        json.dumps(
+            {
+                "should_search": True,
+                "too_vague": False,
+                "queries": [
+                    {
+                        "query": "接上老师的开源项目跟哥哥一起听歌",
+                        "must_terms": ["开源项目", "哥哥", "听歌"],
+                        "intent": "find project listening plan",
+                        "risk": "low",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    assert plan["should_search"] is True
+    assert plan["queries"][0]["must_terms"] == ["开源项目", "听歌"]
+
+
 def test_gateway_query_planner_supplemental_query_recalls_long_message_miss(
     monkeypatch,
     test_config,
@@ -9449,6 +9476,24 @@ def test_gateway_dual_query_view_skips_lexical_routes_when_normalized_empty(
     assert word_map_queries == []
     assert planner_debug["raw_query"] == query
     assert planner_debug["normalized_query"] == ""
+
+
+def test_gateway_dynamic_search_keeps_project_query_when_meal_status_present(
+    monkeypatch, test_config, bucket_mgr
+):
+    query = "嗯，在想你，吃过饭啦 等会儿想把一位很厉害的老师的开源项目接上跟哥哥一起听歌"
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(test_config, query_planner_enabled=False),
+        bucket_mgr,
+    )
+
+    assert service.recall_policy.extract_entity_keywords(query) == []
+    search_query = service._dynamic_recall_search_query(query)
+
+    assert search_query != "吃过饭"
+    assert "开源项目" in search_query
+    assert "听歌" in search_query
 
 
 def test_gateway_semantic_candidates_timeout(

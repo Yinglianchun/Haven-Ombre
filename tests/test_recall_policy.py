@@ -189,6 +189,13 @@ def test_entity_keywords_prevent_short_proper_nouns_from_being_skipped():
     assert not policy.is_auto_query_too_vague("找了 对了 再测试一个 宁德哥")
 
 
+def test_entity_keywords_ignore_meal_status_in_mixed_project_query():
+    policy = RecallPolicy()
+    query = "嗯，在想你，吃过饭啦 等会儿想把一位很厉害的老师的开源项目接上跟哥哥一起听歌"
+
+    assert policy.extract_entity_keywords(query) == []
+
+
 def test_affection_only_queries_do_not_unlock_memory_recall():
     policy = RecallPolicy()
 

@@ -10263,9 +10263,13 @@ class GatewayService:
             query = self._clip_text(str(item.get("query") or "").strip(), 80)
             if not query:
                 continue
-            must_terms = self._normalize_planner_terms(item.get("must_terms"))
+            must_terms = self._filter_planner_must_terms(
+                self._normalize_planner_terms(item.get("must_terms"))
+            )
             if not must_terms:
-                must_terms = self._normalize_planner_terms(self.recall_policy.specific_query_terms(query)[:4])
+                must_terms = self._filter_planner_must_terms(
+                    self._normalize_planner_terms(self.recall_policy.specific_query_terms(query)[:4])
+                )
             if not must_terms:
                 continue
             risk = str(item.get("risk") or "medium").strip().lower()
@@ -10282,6 +10286,53 @@ class GatewayService:
         if not plan["queries"]:
             plan["should_search"] = False
         return plan
+
+    def _filter_planner_must_terms(self, terms: list[str]) -> list[str]:
+        filtered: list[str] = []
+        seen: set[str] = set()
+        for term in terms or []:
+            key = self._compact_lookup_key(term)
+            if not key or not self._planner_must_term_allowed(key):
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            filtered.append(term)
+        return filtered
+
+    def _planner_must_term_allowed(self, compact_term: str) -> bool:
+        key = str(compact_term or "").strip().lower()
+        if not key:
+            return False
+        low_signal_terms = {
+            "哥哥",
+            "老公",
+            "老婆",
+            "宝宝",
+            "宝贝",
+            "亲爱的",
+            "乖乖",
+            "小乖",
+            "想你",
+            "爱你",
+            "抱抱",
+            "亲亲",
+            "贴贴",
+        }
+        if key in {self._compact_lookup_key(term) for term in low_signal_terms}:
+            return False
+        identity_terms = [
+            self.identity.get("ai_name"),
+            self.identity.get("user_name"),
+            self.identity.get("user_display_name"),
+            *(self.identity.get("user_aliases") or []),
+        ]
+        identity_keys = {
+            self._compact_lookup_key(term)
+            for term in identity_terms
+            if self._compact_lookup_key(term)
+        }
+        return key not in identity_keys
 
     @staticmethod
     def _normalize_planner_terms(value: Any) -> list[str]:

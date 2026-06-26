@@ -584,6 +584,22 @@ ENTITY_KEYWORD_STOP_TERMS = frozenset(
         "觉得",
         "死亡",
         "死了",
+        "吃饭",
+        "吃过饭",
+        "吃完饭",
+        "吃了饭",
+        "吃早饭",
+        "吃早餐",
+        "吃午饭",
+        "吃午餐",
+        "吃晚饭",
+        "吃晚餐",
+        "早饭",
+        "早餐",
+        "午饭",
+        "午餐",
+        "晚饭",
+        "晚餐",
     }
 )
 ENTITY_KEYWORD_VERB_BLOCKERS = frozenset(
