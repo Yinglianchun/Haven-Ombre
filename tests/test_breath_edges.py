@@ -87,6 +87,12 @@ class DummyRerankerEngine:
         return results[:top_n] if top_n else results
 
 
+class FailingRerankerEngine(DummyRerankerEngine):
+    async def rerank(self, query: str, documents: list[str], top_n: int | None = None):
+        self.calls.append({"query": query, "documents": documents, "top_n": top_n})
+        raise RuntimeError("reranker unavailable")
+
+
 class DummyWordMapStore:
     enabled = True
 
@@ -1146,6 +1152,60 @@ async def test_breath_debug_rerank_payload_reuses_recall_reranker(patch_breath):
     assert by_bucket["T"]["final_rank"] == 0
     assert by_bucket["T"]["rerank_score"] == 0.98
     assert by_bucket["N"]["final_rank"] > by_bucket["T"]["final_rank"]
+
+
+@pytest.mark.asyncio
+async def test_breath_debug_rerank_disabled_keeps_moment_candidates(patch_breath):
+    import server
+
+    patch_breath(
+        [_bucket("A", "water temple by the sea: direct moment candidate.", importance=8)],
+        search_ids=["A"],
+        reranker_engine=DummyRerankerEngine(enabled=False),
+    )
+
+    payload = await server._build_breath_debug_rerank_payload(
+        "sea",
+        max_candidates=12,
+        max_results=3,
+        max_tokens=200,
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["requested"] is True
+    assert payload["enabled"] is False
+    assert payload["applied"] is False
+    assert payload["skip_reason"] == "reranker_disabled"
+    assert payload["candidate_count"] > 0
+    assert payload["candidates"]
+
+
+@pytest.mark.asyncio
+async def test_breath_debug_rerank_failure_keeps_moment_candidates(patch_breath):
+    import server
+
+    reranker = FailingRerankerEngine(enabled=True)
+    patch_breath(
+        [_bucket("A", "water temple by the sea: direct moment candidate.", importance=8)],
+        search_ids=["A"],
+        reranker_engine=reranker,
+    )
+
+    payload = await server._build_breath_debug_rerank_payload(
+        "sea",
+        max_candidates=12,
+        max_results=3,
+        max_tokens=200,
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["requested"] is True
+    assert payload["enabled"] is True
+    assert payload["applied"] is False
+    assert payload["skip_reason"] == "no_rerank_scores"
+    assert reranker.calls
+    assert payload["candidate_count"] > 0
+    assert payload["candidates"]
 
 
 @pytest.mark.asyncio

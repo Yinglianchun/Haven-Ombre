@@ -5295,7 +5295,11 @@ async def _rerank_breath_moment_candidates(query: str, candidates: list[dict]) -
     head = candidates[:candidate_limit]
     tail = candidates[candidate_limit:]
     documents = [_moment_rerank_document(moment) for moment in head]
-    results = await reranker_engine.rerank(query, documents, top_n=len(head))
+    try:
+        results = await reranker_engine.rerank(query, documents, top_n=len(head))
+    except Exception as e:
+        logger.warning(f"Breath reranker failed; keeping original candidates / breath 重排失败，保留原候选: {e}")
+        return candidates
     if not results:
         return candidates
 
@@ -6118,19 +6122,6 @@ async def _build_breath_debug_rerank_payload(
             "candidates": [],
             "warnings": [],
         }
-    if not enabled:
-        return {
-            **base,
-            "status": "ok",
-            "skip_reason": "reranker_disabled",
-            "candidate_count": 0,
-            "admitted_count": 0,
-            "suppressed_count": 0,
-            "returned_moment_ids": [],
-            "candidates": [],
-            "warnings": [],
-        }
-
     payload = await _build_recall_debug_payload(
         query,
         max_candidates=max_candidates,
@@ -6145,6 +6136,8 @@ async def _build_breath_debug_rerank_payload(
     payload["applied"] = any(candidate.get("rerank_score") is not None for candidate in candidates)
     if payload.get("status") != "ok":
         payload["skip_reason"] = payload.get("error") or "recall_debug_failed"
+    elif not enabled:
+        payload["skip_reason"] = "reranker_disabled"
     elif not candidates:
         payload["skip_reason"] = "no_candidates"
     elif not payload["applied"]:
