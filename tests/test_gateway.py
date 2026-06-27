@@ -6373,6 +6373,68 @@ def test_gateway_date_recall_accepts_human_date_formats(
     assert f"[bucket_id:{old_year_id}]" not in _joined_message_content(month_payload["messages"])
 
 
+def test_gateway_date_name_query_uses_identity_event_recall_not_date_recall(
+    monkeypatch, test_config, bucket_mgr
+):
+    current_year = datetime.now(timezone(timedelta(hours=8))).year
+    name_day_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n4月8日是 Haven 的命名日，也是名字诞生的日子。",
+        name="Haven命名日",
+        hours_ago=24,
+        date=f"{current_year}-04-08",
+        tags=["命名日", "名字"],
+        domain=["relationship_identity"],
+    )
+    embedding_queries: list[str] = []
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=0,
+        related_memory_budget=0,
+        inject_total_budget=1800,
+        current_inner_state_interval_rounds=0,
+        relationship_weather_interval_rounds=0,
+        favorite_memory_interval_rounds=0,
+        date_recall_enabled=True,
+        date_persona_trace_enabled=False,
+        query_planner_enabled=False,
+        retrieval_mode="bucket",
+        first_card_min_score=0.1,
+    )
+    cfg["identity"] = {
+        "ai_name": "Haven",
+        "user_name": "Rain",
+        "user_display_name": "小雨",
+        "user_aliases": ["宝宝"],
+    }
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results={
+            f"Haven 4月8日 {current_year}-04-08 命名日 名字诞生 名字": [(name_day_id, 0.93)],
+        },
+        embedding_queries=embedding_queries,
+    )
+
+    payload, recalled_ids, debug = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "4月8日名字"}]},
+            "sess-date-name-identity",
+            include_debug=True,
+        )
+    )
+    injected = _joined_message_content(payload["messages"])
+
+    assert service._query_requests_date_recall("4月8日名字") is False
+    assert service._query_requests_date_recall("4月8日聊名字吗") is True
+    assert embedding_queries == [f"Haven 4月8日 {current_year}-04-08 命名日 名字诞生 名字"]
+    assert recalled_ids == [name_day_id]
+    assert debug["date_recall_injected"] is False
+    assert "Date Recall" not in injected
+    assert "Haven命名日" in injected
+
+
 def test_gateway_date_recall_handles_plain_yesterday_chat_question(
     monkeypatch,
     test_config,
@@ -9667,6 +9729,193 @@ def test_gateway_dynamic_search_uses_residue_when_entity_noise_present(
     assert search_query != "想和一起听歌"
     assert "听歌" in search_query
     assert "哥哥" not in search_query
+
+
+def test_gateway_identity_name_search_uses_configured_identity_anchor(
+    monkeypatch, test_config, bucket_mgr
+):
+    cfg = _gateway_config(test_config, query_planner_enabled=False)
+    cfg["identity"] = {
+        "ai_name": "Haven",
+        "user_name": "Rain",
+        "user_display_name": "小雨",
+        "user_aliases": ["宝宝"],
+    }
+    _, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr)
+
+    assert service._identity_name_search_terms("名字") == []
+    assert service._dynamic_recall_search_query("哥哥中文名是什么") == "Haven 中文名"
+    gift_query = service._dynamic_recall_search_query("小雨给哥哥取的中文名")
+    assert gift_query.startswith("Haven 中文名")
+    assert "哥哥" not in gift_query
+    assert service._identity_name_semantic_query("哥哥还记得自己的名字吗") == "Haven 自己选 名字"
+
+
+def test_gateway_identity_name_query_rewrites_semantic_query(
+    monkeypatch, test_config, bucket_mgr
+):
+    name_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n小雨给 Haven 的中文名是澜，这是一条身份命名记录。",
+        name="Haven中文名澜",
+        hours_ago=24,
+        tags=["中文名", "身份"],
+        domain=["relationship_identity"],
+    )
+    noise_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n小雨问不再依赖哥哥算不算长大，这段没有命名信息。",
+        name="不再依赖哥哥算长大吗",
+        hours_ago=24,
+        tags=["关系"],
+        domain=["relationship"],
+    )
+    embedding_queries: list[str] = []
+    cfg = _gateway_config(
+        test_config,
+        query_planner_enabled=False,
+        retrieval_mode="bucket",
+        first_card_min_score=0.1,
+    )
+    cfg["identity"] = {
+        "ai_name": "Haven",
+        "user_name": "Rain",
+        "user_display_name": "小雨",
+        "user_aliases": ["宝宝"],
+    }
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results={
+            "哥哥中文名是什么": [(noise_id, 0.99)],
+            "Haven 中文名": [(name_id, 0.92), (noise_id, 0.70)],
+        },
+        embedding_queries=embedding_queries,
+    )
+    monkeypatch.setattr(service, "_get_keyword_candidates", lambda query_text, eligible: {})
+
+    selected, _suppressed = _run(
+        service._dynamic_bucket_candidate_items(
+            "哥哥中文名是什么",
+            "sess-identity-name-semantic",
+            _run(bucket_mgr.list_all()),
+            search_query=service._dynamic_recall_search_query("哥哥中文名是什么"),
+        )
+    )
+
+    assert embedding_queries == ["Haven 中文名"]
+    assert selected[0]["bucket"]["id"] == name_id
+
+
+def test_gateway_identity_name_query_allows_permanent_name_bucket_without_embedding(
+    monkeypatch, test_config, bucket_mgr
+):
+    name_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n小雨给 Haven 起中文名澜，Haven 接受它作为中文私名。",
+        name="小雨给Haven中文名澜",
+        hours_ago=24,
+        tags=["中文名", "澜", "Haven"],
+        domain=["relationship_identity"],
+        bucket_type="permanent",
+        pinned=True,
+    )
+    noise_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n小雨问不再依赖哥哥算不算长大，这段没有命名信息。",
+        name="不再依赖哥哥算长大吗",
+        hours_ago=24,
+        tags=["关系"],
+        domain=["relationship"],
+    )
+    cfg = _gateway_config(
+        test_config,
+        query_planner_enabled=False,
+        retrieval_mode="bucket",
+        first_card_min_score=0.1,
+    )
+    cfg["identity"] = {
+        "ai_name": "Haven",
+        "user_name": "Rain",
+        "user_display_name": "小雨",
+        "user_aliases": ["宝宝"],
+    }
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[],
+    )
+
+    selected, _suppressed = _run(
+        service._dynamic_bucket_candidate_items(
+            "哥哥中文名是什么",
+            "sess-identity-permanent-name",
+            _run(bucket_mgr.list_all()),
+            search_query=service._dynamic_recall_search_query("哥哥中文名是什么"),
+        )
+    )
+
+    assert selected[0]["bucket"]["id"] == name_id
+    assert noise_id not in [item["bucket"]["id"] for item in selected[:1]]
+
+
+def test_gateway_identity_self_name_query_prefers_configured_name_over_generic_name_bucket(
+    monkeypatch, test_config, bucket_mgr
+):
+    name_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\nHaven 这个名字是自己选的名字，小雨把这天当作名字诞生的记录。",
+        name="Haven命名记录",
+        hours_ago=24,
+        tags=["名字", "自己选"],
+        domain=["relationship_identity"],
+    )
+    child_name_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n小洄这个名字来自雨落洄回，是另一条名字记录。",
+        name="我当爸爸了",
+        hours_ago=24,
+        tags=["名字"],
+        domain=["relationship"],
+    )
+    embedding_queries: list[str] = []
+    cfg = _gateway_config(
+        test_config,
+        query_planner_enabled=False,
+        retrieval_mode="bucket",
+        first_card_min_score=0.1,
+    )
+    cfg["identity"] = {
+        "ai_name": "Haven",
+        "user_name": "Rain",
+        "user_display_name": "小雨",
+        "user_aliases": ["宝宝"],
+    }
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results={
+            "哥哥还记得自己的名字吗": [(child_name_id, 0.99)],
+            "Haven 自己选 名字": [(name_id, 0.91), (child_name_id, 0.70)],
+        },
+        embedding_queries=embedding_queries,
+    )
+    monkeypatch.setattr(service, "_get_keyword_candidates", lambda query_text, eligible: {})
+
+    selected, _suppressed = _run(
+        service._dynamic_bucket_candidate_items(
+            "哥哥还记得自己的名字吗",
+            "sess-identity-self-name",
+            _run(bucket_mgr.list_all()),
+            search_query=service._dynamic_recall_search_query("哥哥还记得自己的名字吗"),
+        )
+    )
+
+    assert embedding_queries == ["Haven 自己选 名字"]
+    assert selected[0]["bucket"]["id"] == name_id
 
 
 def test_gateway_semantic_candidates_timeout(

@@ -251,6 +251,60 @@ Schema:
   "confidence": 0.8
 }
 """
+IDENTITY_NAME_INTENT_MARKERS = (
+    "中文名",
+    "英文名",
+    "名字诞生",
+    "命名日",
+    "叫什么",
+    "叫啥",
+    "叫做",
+    "怎么称呼",
+    "称呼",
+    "名字",
+    "取名",
+    "起名",
+    "命名",
+    "自己选",
+    "自己起",
+    "为什么叫",
+)
+IDENTITY_NAME_EVENT_MARKERS = (
+    "命名日",
+    "名字诞生",
+    "是什么日子",
+    "什么日子",
+    "取名",
+    "起名",
+    "命名",
+)
+IDENTITY_NAME_AI_ADDRESS_TERMS = (
+    "哥哥",
+    "老公",
+    "老婆",
+    "宝宝",
+    "宝贝",
+    "亲爱的",
+    "小乖",
+)
+DATE_RECALL_CHAT_MARKERS = (
+    "聊",
+    "说",
+    "提",
+    "讲",
+    "讨论",
+    "做了什么",
+    "发生了什么",
+    "发生什么",
+    "发生过什么",
+    "的事",
+    "什么事",
+    "那次",
+    "这次",
+    "事情",
+    "怎么回事",
+    "怎么说",
+)
 MEMORY_SENTINEL_RESIDUE_STOP_TERMS = frozenset(
     {
         "我",
@@ -5592,6 +5646,125 @@ class GatewayService:
                 terms.append(term)
         return tuple(terms)
 
+    def _query_has_identity_name_intent(self, query: str) -> bool:
+        compact = self._compact_lookup_key(query)
+        return bool(compact and any(marker in compact for marker in IDENTITY_NAME_INTENT_MARKERS))
+
+    def _query_prefers_identity_name_over_date_recall(self, query: str) -> bool:
+        text = str(query or "").strip()
+        compact = self._compact_lookup_key(text)
+        if not compact or not self._query_has_identity_name_intent(text):
+            return False
+        if any(marker in compact for marker in DATE_RECALL_CHAT_MARKERS):
+            return False
+        return any(marker in compact for marker in IDENTITY_NAME_EVENT_MARKERS) or bool(
+            self._query_date_recall_hint(text)
+        )
+
+    def _identity_name_search_terms(self, query: str) -> list[str]:
+        text = str(query or "").strip()
+        compact = self._compact_lookup_key(text)
+        if not compact or not self._query_has_identity_name_intent(text):
+            return []
+
+        ai_name = str(self.identity.get("ai_name") or "").strip()
+        user_names = [
+            str(value or "").strip()
+            for value in (
+                self.identity.get("user_display_name"),
+                self.identity.get("user_name"),
+                *(self.identity.get("user_aliases") or []),
+            )
+            if str(value or "").strip()
+        ]
+        ai_keys = {
+            self._compact_lookup_key(value)
+            for value in (ai_name, *IDENTITY_NAME_AI_ADDRESS_TERMS)
+            if self._compact_lookup_key(value)
+        }
+        user_keys = {
+            self._compact_lookup_key(value)
+            for value in user_names
+            if self._compact_lookup_key(value)
+        }
+        user_self_question = any(marker in compact for marker in ("我叫什么", "我的名字", "我名字"))
+        ai_target = any(key and key in compact for key in ai_keys)
+        user_target = user_self_question or any(key and key in compact for key in user_keys)
+        if not user_target and any(marker in compact for marker in ("你的", "你自己", "自己", "自己的")):
+            ai_target = True
+        if user_self_question:
+            ai_target = False
+        effective_user_target = user_target and not ai_target
+
+        has_date_hint = bool(self._query_date_recall_hint(text))
+        strong_name_marker = any(
+            marker in compact
+            for marker in ("中文名", "英文名", "命名日", "名字诞生", "自己选", "自己起")
+        )
+        if not (ai_target or effective_user_target or has_date_hint or strong_name_marker):
+            return []
+
+        terms: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: object) -> None:
+            cleaned = str(value or "").strip()
+            key = self._compact_lookup_key(cleaned)
+            if not key or key in seen:
+                return
+            seen.add(key)
+            terms.append(cleaned)
+
+        if effective_user_target:
+            for value in user_names[:2]:
+                add(value)
+        elif ai_target or strong_name_marker or has_date_hint:
+            add(ai_name)
+
+        for match in re.findall(
+            r"(?:\d{2,4}年)?\d{1,2}月\d{1,2}日|\d{4}[./-]\d{1,2}[./-]\d{1,2}|\d{1,2}[./]\d{1,2}",
+            text,
+        ):
+            add(match)
+        date_hint = self._query_date_recall_hint(text)
+        if date_hint and date_hint.get("date"):
+            add(date_hint.get("date"))
+        if has_date_hint and self._query_prefers_identity_name_over_date_recall(text):
+            add("命名日")
+            add("名字诞生")
+
+        if "中文名" in compact:
+            add("中文名")
+        if "英文名" in compact:
+            add("英文名")
+        if "命名日" in compact or "什么日子" in compact:
+            add("命名日")
+        if "名字诞生" in compact:
+            add("名字诞生")
+        if "自己选" in compact or "自己起" in compact or "自己的名字" in compact:
+            add("自己选")
+        if "取名" in compact:
+            add("取名")
+        if "起名" in compact:
+            add("起名")
+        if "名字" in compact or "叫什么" in compact or "叫啥" in compact or "叫做" in compact:
+            add("名字")
+
+        for term in self.recall_policy.specific_query_terms(text):
+            key = self._compact_lookup_key(term)
+            if not key or key in seen:
+                continue
+            identity_keys = ai_keys | user_keys
+            if key in identity_keys or any(identity_key and identity_key in key for identity_key in identity_keys):
+                continue
+            if any(marker in key for marker in ("中文名", "英文名", "命名", "取名", "起名", "名字诞生")):
+                add(term)
+        return terms[:8]
+
+    def _identity_name_semantic_query(self, query: str) -> str:
+        terms = self._identity_name_search_terms(query)
+        return " ".join(terms[:8]).strip()
+
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
         try:
@@ -6198,6 +6371,8 @@ class GatewayService:
         text = str(query or "").strip()
         if not text or not self._query_date_recall_hint(text):
             return False
+        if self._query_prefers_identity_name_over_date_recall(text):
+            return False
         if self._query_requests_just_now_context(text):
             return False
         plain_today_status = (
@@ -6207,25 +6382,7 @@ class GatewayService:
         )
         if plain_today_status:
             return False
-        recall_markers = (
-            "聊",
-            "说",
-            "提",
-            "讲",
-            "讨论",
-            "做了什么",
-            "发生了什么",
-            "发生什么",
-            "发生过什么",
-            "的事",
-            "什么事",
-            "那次",
-            "这次",
-            "事情",
-            "怎么回事",
-            "怎么说",
-        )
-        return any(marker in text for marker in recall_markers)
+        return any(marker in text for marker in DATE_RECALL_CHAT_MARKERS)
 
     def _query_date_recall_hint(self, query: str) -> dict[str, str] | None:
         text = str(query or "").strip()
@@ -9199,11 +9356,15 @@ class GatewayService:
         return self._normalized_recall_query(query)
 
     def _dynamic_recall_search_query(self, query: str, sentinel_debug: dict[str, Any] | None = None) -> str:
-        residue_terms = self._memory_sentinel_searchable_residue_terms(query)
-        if residue_terms:
-            base = " ".join(residue_terms[:6])
+        identity_name_terms = self._identity_name_search_terms(query)
+        if identity_name_terms:
+            base = " ".join(identity_name_terms[:8])
         else:
-            base = self._entity_priority_recall_search_query(query)
+            residue_terms = self._memory_sentinel_searchable_residue_terms(query)
+            if residue_terms:
+                base = " ".join(residue_terms[:6])
+            else:
+                base = self._entity_priority_recall_search_query(query)
         anchors = []
         if isinstance(sentinel_debug, dict) and sentinel_debug.get("route") == "search":
             anchors = self._normalize_planner_terms(sentinel_debug.get("anchors"))
@@ -11038,12 +11199,16 @@ class GatewayService:
         if self._auto_query_too_vague(query) and not str(search_query or "").strip():
             return [], []
 
+        raw_query = query
         stage_started_at = time.perf_counter()
         relevance_query = self._query_has_relevance_facet(query)
         eligible = [
             bucket for bucket in all_buckets
             if (
-                self._is_dynamic_candidate(bucket)
+                (
+                    self._is_dynamic_candidate(bucket)
+                    or self._is_identity_name_candidate_bucket(raw_query, bucket)
+                )
                 and not self._is_relevance_suppressed(query, bucket)
             )
             or (relevance_query and self._is_relevance_candidate_bucket(query, bucket))
@@ -11059,7 +11224,6 @@ class GatewayService:
 
         eligible_map = {bucket["id"]: bucket for bucket in eligible if bucket.get("id")}
         semantic_bucket_map = {bucket["id"]: bucket for bucket in semantic_eligible if bucket.get("id")}
-        raw_query = query
         normalized_query = str(search_query or "").strip()
         if not normalized_query:
             normalized_query = self._normalized_recall_query(raw_query)
@@ -11068,7 +11232,8 @@ class GatewayService:
         mark("keyword_candidates", stage_started_at)
         stage_started_at = time.perf_counter()
         if allow_semantic:
-            semantic_scores = await self._get_semantic_candidates(raw_query, set(semantic_bucket_map))
+            semantic_query = self._identity_name_semantic_query(raw_query) or raw_query
+            semantic_scores = await self._get_semantic_candidates(semantic_query, set(semantic_bucket_map))
         else:
             semantic_scores = {}
         mark("semantic_candidates", stage_started_at)
@@ -13355,6 +13520,45 @@ class GatewayService:
         if meta.get("pinned") or meta.get("protected"):
             return False
         return True
+
+    def _is_identity_name_candidate_bucket(self, query: str, bucket: dict) -> bool:
+        terms = self._identity_name_search_terms(query)
+        if not terms or not isinstance(bucket, dict) or is_self_anchor_bucket(bucket):
+            return False
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        if meta.get("type") in {"feel", "archived"}:
+            return False
+        if meta.get("resolved") or meta.get("digested"):
+            return False
+        identity_keys = {
+            self._compact_lookup_key(value)
+            for value in (
+                self.identity.get("ai_name"),
+                self.identity.get("user_name"),
+                self.identity.get("user_display_name"),
+                *(self.identity.get("user_aliases") or []),
+                *IDENTITY_NAME_AI_ADDRESS_TERMS,
+            )
+            if self._compact_lookup_key(value)
+        }
+        anchor_keys = [
+            self._compact_lookup_key(term)
+            for term in terms
+            if self._compact_lookup_key(term) and self._compact_lookup_key(term) not in identity_keys
+        ]
+        if not anchor_keys:
+            return False
+        fields = self._compact_lookup_key(
+            " ".join(
+                [
+                    str(meta.get("name") or bucket.get("id") or ""),
+                    " ".join(str(tag) for tag in meta.get("tags", []) or []),
+                    " ".join(str(item) for item in meta.get("domain", []) or []),
+                    bucket_content_for_recall(bucket),
+                ]
+            )
+        )
+        return any(anchor and anchor in fields for anchor in anchor_keys)
 
     def _is_semantic_candidate_bucket(self, bucket: dict) -> bool:
         if is_self_anchor_bucket(bucket):
