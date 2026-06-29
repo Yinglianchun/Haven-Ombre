@@ -4347,6 +4347,10 @@ async def _format_direct_bucket(
     direct_render_mode: str = "auto",
 ) -> str:
     original = _rendered_bucket_content(bucket)
+    if _is_profile_fact_bucket(bucket):
+        followup = str(_profile_fact_sections(bucket.get("content", "")).get("followup") or "").strip()
+        if followup and followup not in original:
+            original = f"{original}\n\n### followup\n{followup}".strip()
     header = _direct_bucket_header(bucket, moment)
     if _is_source_record_synthetic_moment(moment):
         return await _format_source_record_direct_bucket(
@@ -5038,6 +5042,9 @@ def _format_related_chain_bundle(
 
 def _format_secondary_direct_moment(moment: dict) -> str:
     summary = _diffused_moment_summary(moment)
+    preview = _moment_text(moment, 160)
+    if preview and preview not in summary:
+        summary = f"{summary}；{preview}"
     return (
         f"- [bucket_id:{moment['bucket_id']}] [moment_id:{moment['moment_id']}] "
         f"摘要: {summary}（相关命中，来自同一查询语义。）"
@@ -6149,6 +6156,44 @@ def _secondary_direct_limit(query: str, related_per_memory: int) -> int:
     return _recall_query_plan(query).secondary_direct_limit(related_per_memory)
 
 
+INTIMATE_BODY_SECONDARY_TERMS = frozenset(
+    {
+        "湿润",
+        "发烫",
+        "操哭",
+        "做爱",
+        "性爱",
+        "性事",
+        "色情",
+        "sex",
+        "sexual",
+        "privateintimacy",
+        "private sexual",
+    }
+)
+
+
+def _secondary_direct_suppressed(query: str, moment: dict, query_plan) -> bool:
+    if should_suppress_context_candidate(query, moment, _recall_relevance_options()):
+        return True
+    if not getattr(query_plan, "wants_body_chain", False):
+        return False
+    query_active = active_facets(facets_for_text(query, _recall_relevance_options()))
+    if "intimacy" in query_active:
+        return False
+    meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+    text = " ".join(
+        [
+            str(moment.get("text") or ""),
+            str(meta.get("bucket_name") or ""),
+            " ".join(str(tag) for tag in meta.get("bucket_tags", []) or []),
+            " ".join(str(item) for item in meta.get("bucket_domain", []) or []),
+        ]
+    ).lower()
+    compact = re.sub(r"\s+", "", text)
+    return any(term in text or term in compact for term in INTIMATE_BODY_SECONDARY_TERMS)
+
+
 def _secondary_direct_moments(
     query: str,
     candidates: list[dict],
@@ -6170,7 +6215,7 @@ def _secondary_direct_moments(
             continue
         if moment.get("section") in MOMENT_TEMPERATURE_SECTIONS:
             continue
-        if should_suppress_context_candidate(query, moment, _recall_relevance_options()):
+        if _secondary_direct_suppressed(query, moment, query_plan):
             continue
         has_topic_evidence = _moment_has_query_topic_evidence(query, moment)
         if query_plan.enforce_topic_evidence and not has_topic_evidence:
@@ -7401,7 +7446,7 @@ async def breath(
         related_parts = []
         secondary_moments = _secondary_direct_moments(
             query,
-            returned_moments,
+            moment_candidates,
             displayed_bucket_ids,
             query_plan.secondary_direct_limit(related_per_memory),
             query_plan=query_plan,
@@ -7418,15 +7463,23 @@ async def breath(
             secondary_moment_ids.append(str(moment.get("moment_id") or ""))
             related_budget -= block_tokens
 
+        secondary_bucket_ids = {
+            str(moment.get("bucket_id") or "")
+            for moment in secondary_moments
+            if moment.get("bucket_id")
+        }
+        remaining_related_slots = max(0, int(related_per_memory or 0) - len(secondary_moments))
         related_source_buckets = []
         seen_source_bucket_ids = set()
-        promoted_seed_moments = _promoted_breath_related_seed_moments(
-            query,
-            moment_candidates,
-            displayed_bucket_ids,
-            seed_diagnostics,
-            limit=max(1, related_per_memory),
-        )
+        promoted_seed_moments = []
+        if remaining_related_slots > 0 and not secondary_moments:
+            promoted_seed_moments = _promoted_breath_related_seed_moments(
+                query,
+                moment_candidates,
+                displayed_bucket_ids,
+                seed_diagnostics,
+                limit=max(1, remaining_related_slots),
+            )
         related_seed_bucket_ids = displayed_bucket_ids | {
             str(moment.get("bucket_id") or "")
             for moment in promoted_seed_moments
@@ -7445,15 +7498,17 @@ async def breath(
             related_source_bucket_ids.append(bucket_id)
             seen_source_bucket_ids.add(bucket_id)
 
-        related_block = await _build_mcp_diffused_memory_block(
-            related_source_buckets,
-            all_buckets,
-            max(0, related_budget),
-            related_per_memory,
-            edge_min_confidence,
-            query_text=query,
-            exclude_bucket_ids={str(moment.get("bucket_id") or "") for moment in secondary_moments},
-        )
+        related_block = ""
+        if remaining_related_slots > 0:
+            related_block = await _build_mcp_diffused_memory_block(
+                related_source_buckets,
+                all_buckets,
+                max(0, related_budget),
+                remaining_related_slots,
+                edge_min_confidence,
+                query_text=query,
+                exclude_bucket_ids=secondary_bucket_ids,
+            )
         if related_block:
             related_parts.append(related_block)
         if related_parts:
