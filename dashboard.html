@@ -232,6 +232,23 @@
     background: linear-gradient(145deg, var(--accent-light), var(--accent));
     box-shadow: inset 3px 3px 6px rgba(0,0,0,0.2), inset -2px -2px 4px rgba(255,255,255,0.05);
   }
+  .filter-sort-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    min-width: 48px;
+    padding-inline: 14px;
+    white-space: nowrap;
+    letter-spacing: 0;
+  }
+  .filter-sort-toggle .sort-mode-symbol,
+  .filter-sort-toggle .sort-direction {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+  }
 
   .bucket-tools {
     display: flex;
@@ -282,12 +299,6 @@
     width: 160px;
   }
   .bucket-tools .bulk-hidden { display: none; }
-  .bucket-sort-toggle {
-    width: 38px;
-    min-width: 38px;
-    justify-content: center;
-    font-size: 14px;
-  }
   .bucket-bulk-status {
     font-size: 12px;
     color: var(--text-dim);
@@ -2449,7 +2460,6 @@
 <div class="content" id="list-view">
   <div class="filters" id="filters"></div>
   <div class="bucket-tools" id="bucket-bulk-toolbar">
-    <button type="button" class="bucket-sort-toggle" id="bucket-sort-toggle" onclick="toggleBucketSortMode()" title="按创建时间倒序">⏱↓</button>
     <button type="button" id="bucket-bulk-toggle" onclick="toggleBucketBulkMode()">批量选择</button>
     <button type="button" class="bulk-hidden" data-bulk-action="select-current" onclick="selectCurrentBuckets()">全选当前筛选</button>
     <button type="button" class="bulk-hidden" data-bulk-action="clear" onclick="clearBucketSelection()">清空</button>
@@ -4953,11 +4963,17 @@ function buildFilters() {
   function renderButton(item) {
     return '<button class="filter-btn ' + (item.key === currentFilter ? 'active' : '') + '" data-filter="' + escAttr(item.key) + '">' + esc(item.label) + '</button>';
   }
+  function renderSortButton() {
+    return '<button type="button" class="filter-btn filter-sort-toggle" id="bucket-sort-toggle" onclick="toggleBucketSortMode()" title="按创建时间倒序" aria-label="按创建时间倒序"></button>';
+  }
   filters.innerHTML = '<div class="filter-group">' +
     legacyViewFilters.map(renderButton).join('') +
+    renderSortButton() +
     '</div>';
+  updateBucketSortToggle();
 
   filters.onclick = function(e) {
+    if (e.target.closest('#bucket-sort-toggle')) return;
     var btn = e.target.closest('.filter-btn');
     if (!btn) return;
     filters.querySelectorAll('.filter-btn').forEach(function(b) { b.classList.remove('active'); });
@@ -5044,7 +5060,7 @@ function updateBucketSortToggle() {
   if (!btn) return;
   var isWeight = bucketSortMode === 'weight';
   var direction = bucketSortDescending ? '↓' : '↑';
-  btn.textContent = (isWeight ? '◆' : '⏱') + direction;
+  btn.innerHTML = '<span class="sort-mode-symbol">' + (isWeight ? '◆' : '⏱') + '</span><span class="sort-direction">' + direction + '</span>';
   btn.title = isWeight ? '按权重倒序，点击切换为创建时间倒序' : '按创建时间倒序，点击切换为权重倒序';
   btn.setAttribute('aria-label', btn.title);
 }
