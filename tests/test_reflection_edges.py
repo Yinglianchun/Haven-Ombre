@@ -1070,6 +1070,77 @@ def test_daily_chat_memory_normalization_dedupes_and_skips_nickname_noise(test_c
     assert candidates[0]["kind"] == "project_state"
 
 
+def test_daily_chat_memory_strips_template_shell_from_candidates(test_config):
+    cfg = _no_api_config(test_config)
+    engine = ReflectionEngine(cfg)
+
+    candidates = engine._normalize_daily_chat_memory_candidates(
+        "2026-07-01",
+        [
+            {
+                "should_write": True,
+                "kind": "signal",
+                "title": "小雨与Haven在 2026-07-01 的聊天",
+                "content": "小雨与Haven在 2026-07-01 的聊天里留下一个可复用的暗号或模式信号：笔友名单需要核对，不要把未确认的论坛角色写成确定记忆。",
+                "domain": "relationship",
+                "tags": ["signal"],
+                "confidence": 0.9,
+                "source_event_ids": [301, 302],
+                "source_turn_ids": [9],
+            },
+            {
+                "should_write": True,
+                "kind": "key_event",
+                "title": "2026-07-01 自动记忆",
+                "content": "2026-07-01 发生了一件之后可能需要按日期回看的关键事件：笔友名单需要核对，未确认前不能写入。",
+                "domain": "general",
+                "tags": ["key_event"],
+                "confidence": 0.9,
+                "source_event_ids": [303],
+                "source_turn_ids": [10],
+            },
+        ],
+        [{"id": 9, "raw_event_ids": [301, 302]}, {"id": 10, "raw_event_ids": [303]}],
+    )
+
+    assert all("2026-07-01" not in candidate["title"] for candidate in candidates)
+    assert all("自动记忆" not in candidate["title"] for candidate in candidates)
+    assert all("聊天里留下" not in candidate["content"] for candidate in candidates)
+    assert all("发生了一件之后可能需要" not in candidate["content"] for candidate in candidates)
+    assert candidates[0]["content"].startswith("笔友名单需要核对")
+
+
+def test_daily_chat_memory_pending_list_refreshes_old_template_shell(test_config):
+    cfg = _no_api_config(test_config)
+    engine = ReflectionEngine(cfg)
+    engine._save_daily_chat_memory_pending(
+        [
+            {
+                "id": "old-candidate",
+                "date": "2026-07-01",
+                "status": "pending",
+                "created_at": "2026-07-02T00:00:00+00:00",
+                "candidate": {
+                    "id": "old-candidate",
+                    "date": "2026-07-01",
+                    "kind": "key_event",
+                    "title": "2026-07-01 自动记忆",
+                    "content": "2026-07-01 发生了一件之后可能需要按日期回看的关键事件：笔友名单需要核对，未确认前不能写入。",
+                    "confidence": 0.9,
+                },
+            }
+        ]
+    )
+
+    items = engine.list_daily_chat_memory_pending()
+
+    assert items[0]["candidate"]["title"].startswith("笔友名单需要核对")
+    assert "自动记忆" not in items[0]["candidate"]["title"]
+    assert "2026-07-01" not in items[0]["candidate"]["title"]
+    assert items[0]["candidate"]["content"].startswith("笔友名单需要核对")
+    assert "2026-07-01" not in items[0]["candidate"]["content"]
+
+
 @pytest.mark.asyncio
 async def test_daily_chat_memory_passes_self_anchor_entry_to_model(test_config):
     cfg = _no_api_config(test_config)
@@ -1220,6 +1291,149 @@ async def test_daily_chat_memory_prefers_full_raw_events_by_date(test_config):
     assert bucket["metadata"]["source_conversation_turn_ids"] == []
     assert "project_state" in bucket["metadata"]["tags"]
     assert "project_event" in bucket["metadata"]["tags"]
+
+
+@pytest.mark.asyncio
+async def test_daily_chat_memory_raw_events_cursor_reads_only_new_events(test_config):
+    cfg = _no_api_config(test_config)
+    cfg["identity"] = {
+        "ai_name": "Haven",
+        "user_name": "Xiaoyu",
+        "user_display_name": "池又雨",
+        "user_aliases": ["小雨"],
+    }
+    cfg["reflection"]["daily_chat_memory_mode"] = "review"
+    cfg["reflection"]["daily_chat_memory_turn_limit"] = 0
+    bucket_mgr = BucketManager(cfg)
+    engine = ReflectionEngine(cfg)
+    engine._update_daily_chat_memory_raw_cursor("haven_xiaoyu", 102, "2026-07-02")
+    now = datetime(2026, 7, 2, 23, 59, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    class RawEventStore:
+        def list_events_between(self, *, start_at, end_at, limit):
+            return [
+                {
+                    "id": 101,
+                    "source_event_id": "haven_xiaoyu:daily-chat:1:user",
+                    "role": "user",
+                    "text": "旧项目状态：这段已经读过。",
+                    "created_at": "2026-07-02T18:00:00+08:00",
+                    "conversation_id": "daily-chat",
+                    "session_id": "daily-chat",
+                    "client": "gateway",
+                    "metadata": {"profile_id": "haven_xiaoyu", "round_id": 1},
+                },
+                {
+                    "id": 102,
+                    "source_event_id": "haven_xiaoyu:daily-chat:1:assistant",
+                    "role": "assistant",
+                    "text": "旧项目状态已经处理。",
+                    "created_at": "2026-07-02T18:00:00+08:00",
+                    "conversation_id": "daily-chat",
+                    "session_id": "daily-chat",
+                    "client": "gateway",
+                    "metadata": {"profile_id": "haven_xiaoyu", "round_id": 1},
+                },
+                {
+                    "id": 201,
+                    "source_event_id": "haven_xiaoyu:daily-chat:2:user",
+                    "role": "user",
+                    "text": "新的项目决定：钓鱼 MCP 只从新事件开始读，别重复旧候选。",
+                    "created_at": "2026-07-02T21:00:00+08:00",
+                    "conversation_id": "daily-chat",
+                    "session_id": "daily-chat",
+                    "client": "gateway",
+                    "metadata": {"profile_id": "haven_xiaoyu", "round_id": 2},
+                },
+                {
+                    "id": 202,
+                    "source_event_id": "haven_xiaoyu:daily-chat:2:assistant",
+                    "role": "assistant",
+                    "text": "记住这个项目状态，后续部署按新事件处理。",
+                    "created_at": "2026-07-02T21:00:00+08:00",
+                    "conversation_id": "daily-chat",
+                    "session_id": "daily-chat",
+                    "client": "gateway",
+                    "metadata": {"profile_id": "haven_xiaoyu", "round_id": 2},
+                },
+            ]
+
+    class ConversationTurnStore:
+        def list_conversation_turns_between(self, **kwargs):
+            raise AssertionError("cursor-filtered raw_events should not fall back to conversation_turns")
+
+    class Persona:
+        profile_id = "haven_xiaoyu"
+
+    result = await engine.run_daily_chat_memory(
+        bucket_mgr,
+        conversation_turn_store=ConversationTurnStore(),
+        raw_event_store=RawEventStore(),
+        persona_engine=Persona(),
+        now=now,
+    )
+    pending = engine.list_daily_chat_memory_pending()
+
+    assert result["status"] == "pending"
+    assert result["turns"] == 1
+    assert result["last_raw_event_id"] == 202
+    assert result["cursor_updated"] is True
+    assert pending[0]["candidate"]["source_event_ids"] == [201, 202]
+    assert engine._daily_chat_memory_last_raw_event_id("haven_xiaoyu") == 202
+
+
+@pytest.mark.asyncio
+async def test_daily_chat_memory_raw_events_cursor_skips_when_no_new_events(test_config):
+    cfg = _no_api_config(test_config)
+    cfg["reflection"]["daily_chat_memory_mode"] = "review"
+    bucket_mgr = BucketManager(cfg)
+    engine = ReflectionEngine(cfg)
+    engine._update_daily_chat_memory_raw_cursor("haven_xiaoyu", 202, "2026-07-02")
+    now = datetime(2026, 7, 2, 23, 59, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    class RawEventStore:
+        def list_events_between(self, *, start_at, end_at, limit):
+            return [
+                {
+                    "id": 201,
+                    "role": "user",
+                    "text": "旧项目状态：已经读过。",
+                    "created_at": "2026-07-02T21:00:00+08:00",
+                    "conversation_id": "daily-chat",
+                    "session_id": "daily-chat",
+                    "client": "gateway",
+                    "metadata": {"profile_id": "haven_xiaoyu", "round_id": 2},
+                },
+                {
+                    "id": 202,
+                    "role": "assistant",
+                    "text": "旧项目状态已经处理。",
+                    "created_at": "2026-07-02T21:00:00+08:00",
+                    "conversation_id": "daily-chat",
+                    "session_id": "daily-chat",
+                    "client": "gateway",
+                    "metadata": {"profile_id": "haven_xiaoyu", "round_id": 2},
+                },
+            ]
+
+    class ConversationTurnStore:
+        def list_conversation_turns_between(self, **kwargs):
+            raise AssertionError("no-new raw_events should not fall back to old conversation turns")
+
+    class Persona:
+        profile_id = "haven_xiaoyu"
+
+    result = await engine.run_daily_chat_memory(
+        bucket_mgr,
+        conversation_turn_store=ConversationTurnStore(),
+        raw_event_store=RawEventStore(),
+        persona_engine=Persona(),
+        now=now,
+    )
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "no_new_raw_events"
+    assert result["last_raw_event_id"] == 202
 
 
 @pytest.mark.asyncio

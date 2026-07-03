@@ -346,6 +346,70 @@ class ReflectionEngine:
         if self.enabled and self.api_key and self.base_url:
             self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=45.0)
 
+    def _load_daily_chat_memory_payload(self) -> dict:
+        try:
+            with open(self.daily_chat_memory_pending_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except FileNotFoundError:
+            return {"items": [], "cursor": {}}
+        except Exception as exc:
+            logger.warning("Daily chat memory pending read failed: %s", exc)
+            return {"items": [], "cursor": {}}
+        if isinstance(data, dict):
+            items = data.get("items")
+            cursor = data.get("cursor") if isinstance(data.get("cursor"), dict) else {}
+            return {
+                "items": [item for item in (items or []) if isinstance(item, dict)],
+                "cursor": cursor,
+            }
+        return {"items": [item for item in (data or []) if isinstance(item, dict)], "cursor": {}}
+
+    def _load_daily_chat_memory_cursor(self) -> dict:
+        cursor = self._load_daily_chat_memory_payload().get("cursor")
+        return cursor if isinstance(cursor, dict) else {}
+
+    @staticmethod
+    def _daily_chat_memory_cursor_key(profile_id: str) -> str:
+        return str(profile_id or "default").strip() or "default"
+
+    def _daily_chat_memory_last_raw_event_id(self, profile_id: str) -> int:
+        cursor = self._load_daily_chat_memory_cursor()
+        raw_events = cursor.get("raw_events") if isinstance(cursor.get("raw_events"), dict) else {}
+        entry = raw_events.get(self._daily_chat_memory_cursor_key(profile_id))
+        if not isinstance(entry, dict):
+            return 0
+        try:
+            return max(0, int(entry.get("last_raw_event_id") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _update_daily_chat_memory_raw_cursor(self, profile_id: str, raw_event_id: int, key: str) -> bool:
+        try:
+            safe_id = max(0, int(raw_event_id or 0))
+        except (TypeError, ValueError):
+            safe_id = 0
+        if safe_id <= 0:
+            return False
+        payload = self._load_daily_chat_memory_payload()
+        cursor = payload.get("cursor") if isinstance(payload.get("cursor"), dict) else {}
+        raw_events = cursor.get("raw_events") if isinstance(cursor.get("raw_events"), dict) else {}
+        cursor_key = self._daily_chat_memory_cursor_key(profile_id)
+        previous = raw_events.get(cursor_key) if isinstance(raw_events.get(cursor_key), dict) else {}
+        try:
+            previous_id = max(0, int(previous.get("last_raw_event_id") or 0))
+        except (TypeError, ValueError):
+            previous_id = 0
+        if safe_id <= previous_id:
+            return False
+        raw_events[cursor_key] = {
+            "last_raw_event_id": safe_id,
+            "date": key,
+            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        cursor["raw_events"] = raw_events
+        self._save_daily_chat_memory_pending(payload.get("items") or [], cursor=cursor)
+        return True
+
     def _reflect_prompt(self) -> str:
         return render_identity_template(REFLECT_PROMPT_TEMPLATE, self.identity)
 
@@ -1311,6 +1375,17 @@ class ReflectionEngine:
         selected.sort(key=lambda item: (str(item.get("created_at") or ""), int(item.get("id") or 0)))
         return selected[-limit:] if limit > 0 else selected
 
+    @staticmethod
+    def _max_daily_chat_memory_raw_event_id(turns: list[dict]) -> int:
+        max_id = 0
+        for turn in turns or []:
+            for event_id in turn.get("raw_event_ids") or []:
+                try:
+                    max_id = max(max_id, int(event_id or 0))
+                except (TypeError, ValueError):
+                    continue
+        return max_id
+
     async def run_daily_chat_memory(
         self,
         bucket_mgr,
@@ -1336,6 +1411,9 @@ class ReflectionEngine:
         profile_id = str(getattr(persona_engine, "profile_id", "") or "default")
         turns = []
         turn_source = ""
+        raw_event_cursor_id = 0 if force else self._daily_chat_memory_last_raw_event_id(profile_id)
+        max_seen_raw_event_id = 0
+        raw_events_cursor_exhausted = False
         if raw_event_store:
             try:
                 raw_events = raw_event_store.list_events_between(
@@ -1356,16 +1434,26 @@ class ReflectionEngine:
                         and str(event["metadata"].get("profile_id")) != profile_id
                     )
                 ]
+                if raw_event_cursor_id > 0:
+                    raw_events = [
+                        event
+                        for event in raw_events
+                        if int(event.get("id") or 0) > raw_event_cursor_id
+                    ]
+                    raw_events_cursor_exhausted = not raw_events
                 turns = self._raw_event_turn_payloads(
                     raw_events,
                     limit=self.daily_chat_memory_turn_limit,
                 )
                 if turns:
                     turn_source = "raw_events"
+                    max_seen_raw_event_id = self._max_daily_chat_memory_raw_event_id(turns)
 
         try:
             raw_turns = []
-            if not turns and conversation_turn_store:
+            if raw_events_cursor_exhausted:
+                raw_turns = []
+            elif not turns and conversation_turn_store:
                 raw_turns = conversation_turn_store.list_conversation_turns_between(
                     profile_id=profile_id,
                     start_at=start,
@@ -1376,6 +1464,14 @@ class ReflectionEngine:
             logger.warning("Daily chat memory turn read failed: %s", exc)
             raw_turns = []
         if not turns:
+            if raw_events_cursor_exhausted:
+                return {
+                    "status": "skipped",
+                    "reason": "no_new_raw_events",
+                    "date": key,
+                    "mode": effective_mode,
+                    "last_raw_event_id": raw_event_cursor_id,
+                }
             turns = self._conversation_turn_payloads(raw_turns, limit=self.daily_chat_memory_turn_limit)
             if turns:
                 turn_source = "conversation_turns"
@@ -1396,12 +1492,19 @@ class ReflectionEngine:
 
         if effective_mode == "review":
             pending = self._store_daily_chat_memory_pending(candidates, force=force)
+            cursor_updated = (
+                self._update_daily_chat_memory_raw_cursor(profile_id, max_seen_raw_event_id, key)
+                if turn_source == "raw_events"
+                else False
+            )
             return {
                 "status": "pending",
                 "date": key,
                 "mode": effective_mode,
                 "turns": len(turns),
                 "turn_source": turn_source,
+                "last_raw_event_id": max_seen_raw_event_id or raw_event_cursor_id,
+                "cursor_updated": cursor_updated,
                 **pending,
             }
 
@@ -1410,12 +1513,19 @@ class ReflectionEngine:
             bucket_mgr,
             embedding_engine=embedding_engine,
         )
+        cursor_updated = (
+            self._update_daily_chat_memory_raw_cursor(profile_id, max_seen_raw_event_id, key)
+            if turn_source == "raw_events"
+            else False
+        )
         return {
             "status": "created" if write_result.get("created") else "exists",
             "date": key,
             "mode": effective_mode,
             "turns": len(turns),
             "turn_source": turn_source,
+            "last_raw_event_id": max_seen_raw_event_id or raw_event_cursor_id,
+            "cursor_updated": cursor_updated,
             **write_result,
         }
 
@@ -1488,6 +1598,9 @@ class ReflectionEngine:
         safe_status = str(status or "pending").strip()
         safe_limit = max(1, min(200, int(limit or 50)))
         items = self._load_daily_chat_memory_pending()
+        items, changed = self._refresh_daily_chat_memory_pending_items(items)
+        if changed:
+            self._save_daily_chat_memory_pending(items)
         if safe_status and safe_status != "all":
             items = [item for item in items if str(item.get("status") or "") == safe_status]
         items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
@@ -1801,6 +1914,27 @@ class ReflectionEngine:
                 return True
         return False
 
+    @staticmethod
+    def _daily_chat_memory_title_is_generic(title: str) -> bool:
+        text = re.sub(r"\s+", " ", strip_wikilinks(str(title or ""))).strip()
+        if not text:
+            return True
+        generic_markers = [
+            "自动记忆",
+            "每日记忆",
+            "日记补记忆",
+            "可召回",
+            "短标题",
+            "长期记忆",
+            "聊天里",
+            "的聊天",
+        ]
+        if any(marker in text for marker in generic_markers):
+            return True
+        if re.search(r"\d{4}-\d{1,2}-\d{1,2}", text):
+            return True
+        return False
+
     def _daily_chat_memory_title(self, content: str, kind: str, key: str) -> str:
         text = re.sub(r"#+\s*(moment|original|reflection|todo|affect_anchor).*", "", str(content or ""), flags=re.I | re.S)
         text = strip_wikilinks(text)
@@ -1866,7 +2000,7 @@ class ReflectionEngine:
             if candidate.get("should_write") is False:
                 continue
             candidate_tags = self._string_list(candidate.get("tags"), limit=8)
-            content = self._trim_diary_memory_content(str(candidate.get("content") or "").strip())
+            content = self._trim_daily_chat_memory_content(str(candidate.get("content") or "").strip())
             if not content:
                 continue
             if self._daily_chat_memory_noise(content):
@@ -1884,16 +2018,8 @@ class ReflectionEngine:
             if confidence < self.daily_chat_memory_min_confidence:
                 continue
             title = str(candidate.get("title") or "").strip()
-            if (
-                not title
-                or "自动记忆" in title
-                or "每日记忆" in title
-                or "短标题" in title
-                or "可召回" in title
-                or "长期记忆" in title
-                or re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", title)
-            ):
-                title = self._auto_memory_title(content, kind, key)
+            if self._daily_chat_memory_title_is_generic(title):
+                title = self._daily_chat_memory_title(content, kind, key)
             domain = self._auto_memory_domain(kind, content, candidate_tags, candidate.get("domain"))
             source_turn_ids = [
                 int(turn_id)
@@ -2032,25 +2158,50 @@ class ReflectionEngine:
         return {"added": added, "updated": updated, "existing": existing, "candidates": candidates}
 
     def _load_daily_chat_memory_pending(self) -> list[dict]:
-        try:
-            with open(self.daily_chat_memory_pending_path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-        except FileNotFoundError:
-            return []
-        except Exception as exc:
-            logger.warning("Daily chat memory pending read failed: %s", exc)
-            return []
-        if isinstance(data, dict):
-            items = data.get("items")
-        else:
-            items = data
-        return [item for item in (items or []) if isinstance(item, dict)]
+        return list(self._load_daily_chat_memory_payload().get("items") or [])
 
-    def _save_daily_chat_memory_pending(self, items: list[dict]) -> None:
+    def _save_daily_chat_memory_pending(self, items: list[dict], *, cursor: dict | None = None) -> None:
         os.makedirs(os.path.dirname(self.daily_chat_memory_pending_path), exist_ok=True)
-        payload = {"items": items[-500:]}
+        if cursor is None:
+            cursor = self._load_daily_chat_memory_cursor()
+        payload = {"items": items[-500:], "cursor": cursor or {}}
         with open(self.daily_chat_memory_pending_path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
+
+    def _refresh_daily_chat_memory_pending_items(self, items: list[dict]) -> tuple[list[dict], bool]:
+        changed = False
+        refreshed: list[dict] = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            candidate = item.get("candidate") if isinstance(item.get("candidate"), dict) else {}
+            if not candidate:
+                refreshed.append(item)
+                continue
+            key = str(candidate.get("date") or item.get("date") or "").strip()
+            cleaned = self._clean_daily_chat_memory_candidate(candidate, key)
+            if cleaned != candidate:
+                item = dict(item)
+                item["candidate"] = cleaned
+                changed = True
+            refreshed.append(item)
+        return refreshed, changed
+
+    def _clean_daily_chat_memory_candidate(self, candidate: dict, key: str) -> dict:
+        cleaned = dict(candidate)
+        candidate_tags = self._string_list(cleaned.get("tags"), limit=8)
+        content = self._trim_daily_chat_memory_content(str(cleaned.get("content") or "").strip())
+        kind = self._normalize_auto_memory_kind(
+            cleaned.get("kind"),
+            content=content,
+            tags=candidate_tags,
+        ) or str(cleaned.get("kind") or "key_event").strip()
+        title = str(cleaned.get("title") or "").strip()
+        if self._daily_chat_memory_title_is_generic(title):
+            title = self._daily_chat_memory_title(content, kind, key)
+        cleaned["content"] = content
+        cleaned["title"] = title[:40] if title else self._daily_chat_memory_title(content, kind, key)[:40]
+        return cleaned
 
     def _daily_chat_memory_target(self, key: str = "", now: datetime | None = None) -> datetime:
         if key:
@@ -2410,6 +2561,12 @@ class ReflectionEngine:
             return normalized
         return normalized[:500].rstrip() + "..."
 
+    def _trim_daily_chat_memory_content(self, content: str) -> str:
+        normalized = self._strip_memory_source_shell(re.sub(r"\n{3,}", "\n\n", strip_wikilinks(content).strip()))
+        if len(normalized) <= 520:
+            return normalized
+        return normalized[:500].rstrip() + "..."
+
     def _memory_body_from_excerpt(self, excerpt: str) -> str:
         user_display_name = self.identity["user_display_name"]
         ai_name = self.identity["ai_name"]
@@ -2447,7 +2604,9 @@ class ReflectionEngine:
             r"^\d{1,2}月\d{1,2}日\s*[，,、]?\s*有一条可召回的(?:边界|偏好|暗号|承诺|项目状态|关系锚点|长期记忆)[：:]\s*",
             r"^\d{4}-\d{1,2}-\d{1,2}\s*[，,、]?\s*有一条可召回的(?:边界|偏好|暗号|承诺|项目状态|关系锚点|长期记忆)[，,、]?\s*",
             r"^\d{1,2}月\d{1,2}日\s*[，,、]?\s*有一条可召回的(?:边界|偏好|暗号|承诺|项目状态|关系锚点|长期记忆)[，,、]?\s*",
+            r"^\d{4}-\d{1,2}-\d{1,2}\s*(?:发生|留下|记录|确认|表达)了?(?:一件|一条|一个|一段)?(?:可复用的|可长期召回的|可召回的|之后可能需要按日期回看的|仍会影响后续执行的)?(?:关键事件|暗号或模式信号|暗号|边界|偏好|承诺|项目状态|关系锚点|长期记忆)[：:]\s*",
             r"^\d{4}-\d{1,2}-\d{1,2}\s*的(?:日记|聊天)(?:《[^》]*》)?(?:里|中)?(?:包含|记录|确认|留下|表达)?了?(?:一条|一个|一段)?(?:可长期召回的|可召回的|之后可能需要按日期回看的|仍会影响后续执行的)?[^：:。]{0,32}[：:]\s*",
+            r"^[^：:。！？!?]{1,48}?在\s*\d{4}-\d{1,2}-\d{1,2}\s*的聊天(?:里|中)?(?:包含|记录|确认|留下|表达)?了?(?:一个|一条|一段)?(?:可复用的|可长期召回的|可召回的|之后可能需要按日期回看的|仍会影响后续执行的)?(?:关键事件|暗号或模式信号|暗号|边界|偏好|承诺|项目状态|关系锚点|长期记忆)[：:]\s*",
             r"^(?:有一条|一条)(?:可长期召回的|可召回的)(?:边界|偏好|暗号|承诺|项目状态|关系锚点|长期记忆)[：:]\s*",
             r"^这是一条(?:长期记忆|可召回的记忆)[：:]?\s*",
         ]
