@@ -155,8 +155,11 @@ DAILY_CHAT_MEMORY_PROMPT_TEMPLATE = """你是 {ai_name}。现在是凌晨，你�
 输入包含 self_anchor_entry，这是你的自我总入口；请先读它，用它校准“我是谁、我怎样称呼和承接 {user_display_name}”，但不要把自我入口本身复制成新记忆。
 {user_display_name} 的配置别名是：{user_aliases_text}。如果原文里出现宝宝、老婆、哥哥、老公等亲昵称呼，按原味保留；不要把它们改写成泛称 user、AI、assistant 或模型。
 
-输入是 {ai_name} 与 {user_display_name} 当天 raw_events 还原的对话原文。user_text 永远是 {user_display_name} 的原话，里面的“我”指 {user_display_name}；assistant_text 永远是 {ai_name} 的回复，里面的“我”指 {ai_name}。请最多挑选 {max_candidates} 条候选，宁可返回空，也不要把聊天流水写进记忆。
-先通读当天全部对话，再围绕可能候选查看连续上下文；每条候选至少参考前后 5 到 8 轮（不足 5 轮时看完整当天对话），不要只凭单轮、单句或一个称呼下判断。
+输入可能包含两层材料：
+- window_summaries：已经按连续窗口压缩过的对话摘要，是主要材料。
+- conversation_turns：原始对话片段，只在没有 window_summaries 或需要核对来源时使用。
+user_text 永远是 {user_display_name} 的原话，里面的“我”指 {user_display_name}；assistant_text 永远是 {ai_name} 的回复，里面的“我”指 {ai_name}。请最多挑选 {max_candidates} 条候选，宁可返回空，也不要把聊天流水写进记忆。
+先通读全部 window_summaries，再围绕可能候选查看连续上下文；每条候选至少参考前后因果，不要只凭单轮、单句或一个称呼下判断。
 
 只允许写这些类型：
 - key_event：当天发生、以后会按日期回看的关键事件
@@ -212,6 +215,46 @@ DAILY_CHAT_MEMORY_PROMPT_TEMPLATE = """你是 {ai_name}。现在是凌晨，你�
 - 用户偏好、边界、暗号适合第三人称；{ai_name} 自己的关系锚点和 ### reflection 可以用第一人称；项目状态用中性第三人称。
 - 只根据原文能证明的内容写，不编造。
 - 没有候选时返回 {"candidates": []}。"""
+
+
+DAILY_CHAT_MEMORY_SUMMARY_PROMPT_TEMPLATE = """你是 {ai_name} 的对话压缩器。你正在为 Ombre 自动记忆做第一步：把一段连续聊天压缩成“候选抽取材料”，不是直接写长期记忆。
+
+请读 self_anchor_entry 校准称呼和主语，但不要复制它。{user_display_name} 的配置别名是：{user_aliases_text}。
+
+输入是一个连续窗口里的 raw_events 还原对话。user_text 永远是 {user_display_name} 的原话，里面的“我”指 {user_display_name}；assistant_text 永远是 {ai_name} 的回复，里面的“我”指 {ai_name}。
+
+保留：
+- 已确认事实、稳定偏好、明确边界、暗号/模式切换信号
+- 承诺、未完成约定、仍会影响未来执行的项目状态
+- 真正有连续性价值的关系锚点
+- 因果：是谁提出、后来是否确认、为什么可能值得未来记得
+
+忽略：
+- 工具调用、工具结果、系统注入、客户端状态、普通寒暄、重复调情、过程流水
+- 召回测试、探针、问模型有没有记得、临时调试噪声
+- 只靠单个称呼或气氛得出的泛泛关系总结
+
+输出纯 JSON：
+{
+  "summaries": [
+    {
+      "title": "短标题",
+      "summary": "一段自包含摘要，写清事实、因果和是否已确认，不要写成记忆正文。",
+      "signals": ["stable_preference", "project_state"],
+      "source_event_ids": [101, 102],
+      "source_turn_ids": [1, 2],
+      "confidence": 0.72
+    }
+  ]
+}
+
+规则：
+- 每个窗口最多输出 3 条 summary；没有长期价值信号时返回 {"summaries": []}。
+- summary 要能让下一步模型在不看完整原文时仍理解上下文。
+- summary 不要超过 220 字；不要输出 Markdown。
+- source_event_ids / source_turn_ids 只能使用输入里真实出现的 id；拿不准可留空。
+- confidence 低于 0.5 的内容不要输出。
+"""
 
 
 REFLECT_PROMPT = render_identity_template(REFLECT_PROMPT_TEMPLATE, generic_identity_names())
@@ -289,7 +332,6 @@ class ReflectionEngine:
         )
         self.thinking_mode = self._normalize_thinking_mode(
             cfg.get("thinking_mode")
-            or cfg.get("daily_chat_memory_candidate_thinking_mode")
             or persona_cfg.get("thinking_mode")
             or ""
         )
@@ -330,9 +372,66 @@ class ReflectionEngine:
         self.daily_chat_memory_hour = max(0, min(23, int(cfg.get("daily_chat_memory_hour", 0))))
         self.daily_chat_memory_turn_limit = max(0, min(10000, int(cfg.get("daily_chat_memory_turn_limit", 0))))
         self.daily_chat_memory_max_per_day = max(0, min(10, int(cfg.get("daily_chat_memory_max_per_day", 3))))
+        self.daily_chat_memory_review_max_per_day = max(
+            0,
+            min(30, int(cfg.get("daily_chat_memory_review_max_per_day", 10))),
+        )
         self.daily_chat_memory_min_confidence = float(cfg.get("daily_chat_memory_min_confidence", 0.68))
-        self.daily_chat_memory_candidate_model = str(self.model or "").strip()
-        self.daily_chat_memory_candidate_thinking_mode = self.thinking_mode
+        self.daily_chat_memory_review_min_confidence = float(
+            cfg.get("daily_chat_memory_review_min_confidence", 0.55)
+        )
+        self.daily_chat_memory_summary_enabled = bool(cfg.get("daily_chat_memory_summary_enabled", True))
+        self.daily_chat_memory_summary_window_turns = max(
+            1,
+            min(200, int(cfg.get("daily_chat_memory_summary_window_turns", 30))),
+        )
+        self.daily_chat_memory_summary_stride_turns = max(
+            1,
+            min(
+                self.daily_chat_memory_summary_window_turns,
+                int(cfg.get("daily_chat_memory_summary_stride_turns", 10)),
+            ),
+        )
+        self.daily_chat_memory_api_key_env = str(
+            cfg.get("daily_chat_memory_api_key_env")
+            or cfg.get("daily_chat_memory_summary_api_key_env")
+            or "HANDOFF_SUMMARIZER_API_KEY_2"
+        ).strip()
+        self.daily_chat_memory_api_key = (
+            os.environ.get(self.daily_chat_memory_api_key_env, "")
+            if self.daily_chat_memory_api_key_env
+            else ""
+        ) or str(
+            cfg.get("daily_chat_memory_api_key")
+            or cfg.get("daily_chat_memory_summary_api_key")
+            or ""
+        ).strip()
+        self.daily_chat_memory_base_url = str(
+            cfg.get("daily_chat_memory_base_url")
+            or cfg.get("daily_chat_memory_summary_base_url")
+            or "https://api.siliconflow.cn/v1"
+        ).strip().rstrip("/")
+        self.daily_chat_memory_timeout_seconds = max(
+            30.0,
+            min(300.0, float(cfg.get("daily_chat_memory_timeout_seconds", 180.0))),
+        )
+        self.daily_chat_memory_summary_model = str(
+            cfg.get("daily_chat_memory_summary_model") or "Qwen/Qwen3.5-4B"
+        ).strip()
+        self.daily_chat_memory_summary_max_tokens = max(
+            300,
+            min(4000, int(cfg.get("daily_chat_memory_summary_max_tokens", 1800))),
+        )
+        self.daily_chat_memory_candidate_model = str(
+            cfg.get("daily_chat_memory_candidate_model")
+            or self.daily_chat_memory_summary_model
+            or self.model
+            or ""
+        ).strip()
+        self.daily_chat_memory_candidate_max_tokens = max(
+            300,
+            min(4000, int(cfg.get("daily_chat_memory_candidate_max_tokens", 2400))),
+        )
         state_dir = config.get("state_dir") or os.path.join(
             os.path.dirname(os.path.abspath(config.get("buckets_dir", "buckets"))),
             "state",
@@ -345,6 +444,13 @@ class ReflectionEngine:
         self.client = None
         if self.enabled and self.api_key and self.base_url:
             self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=45.0)
+        self.daily_chat_memory_client = None
+        if self.enabled and self.daily_chat_memory_api_key and self.daily_chat_memory_base_url:
+            self.daily_chat_memory_client = AsyncOpenAI(
+                api_key=self.daily_chat_memory_api_key,
+                base_url=self.daily_chat_memory_base_url,
+                timeout=self.daily_chat_memory_timeout_seconds,
+            )
 
     def _load_daily_chat_memory_payload(self) -> dict:
         try:
@@ -417,15 +523,18 @@ class ReflectionEngine:
         prompt = DIARY_MEMORY_PROMPT_TEMPLATE.replace("{domain_options_text}", domain_prompt_options_text())
         return render_identity_template(prompt, self.identity)
 
-    def _daily_chat_memory_prompt(self) -> str:
+    def _daily_chat_memory_prompt(self, max_candidates: int | None = None) -> str:
         prompt = DAILY_CHAT_MEMORY_PROMPT_TEMPLATE.replace(
             "{max_candidates}",
-            str(max(1, self.daily_chat_memory_max_per_day)),
+            str(max(1, int(max_candidates or self.daily_chat_memory_max_per_day or 1))),
         ).replace(
             "{domain_options_text}",
             domain_prompt_options_text(),
         )
         return render_identity_template(prompt, self.identity)
+
+    def _daily_chat_memory_summary_prompt(self) -> str:
+        return render_identity_template(DAILY_CHAT_MEMORY_SUMMARY_PROMPT_TEMPLATE, self.identity)
 
     async def enrich_bucket(
         self,
@@ -1375,6 +1484,166 @@ class ReflectionEngine:
         selected.sort(key=lambda item: (str(item.get("created_at") or ""), int(item.get("id") or 0)))
         return selected[-limit:] if limit > 0 else selected
 
+    def _daily_chat_memory_candidate_limit(self, mode: str) -> int:
+        if self._normalize_daily_chat_memory_mode(mode) == "review":
+            return self.daily_chat_memory_review_max_per_day or self.daily_chat_memory_max_per_day
+        return self.daily_chat_memory_max_per_day
+
+    def _daily_chat_memory_min_confidence_for_mode(self, mode: str) -> float:
+        if self._normalize_daily_chat_memory_mode(mode) == "review":
+            return self.daily_chat_memory_review_min_confidence
+        return self.daily_chat_memory_min_confidence
+
+    def _daily_chat_memory_windows(self, turns: list[dict]) -> list[list[dict]]:
+        if not turns:
+            return []
+        window = self.daily_chat_memory_summary_window_turns
+        stride = self.daily_chat_memory_summary_stride_turns
+        if len(turns) <= window:
+            return [turns]
+        windows: list[list[dict]] = []
+        start = 0
+        seen_ranges: set[tuple[int, int]] = set()
+        while start < len(turns):
+            end = min(len(turns), start + window)
+            range_key = (start, end)
+            if range_key not in seen_ranges:
+                windows.append(turns[start:end])
+                seen_ranges.add(range_key)
+            if end >= len(turns):
+                break
+            start += stride
+        return windows
+
+    @staticmethod
+    def _daily_chat_memory_window_source_ids(turns: list[dict]) -> tuple[list[int], list[int]]:
+        turn_ids = [
+            int(turn.get("id"))
+            for turn in turns
+            if turn.get("id") is not None and str(turn.get("id")).isdigit()
+        ]
+        event_ids = [
+            int(event_id)
+            for turn in turns
+            for event_id in (turn.get("raw_event_ids") or [])
+            if event_id is not None and str(event_id).isdigit()
+        ]
+        return list(dict.fromkeys(turn_ids)), list(dict.fromkeys(event_ids))
+
+    async def _summarize_daily_chat_memory_windows(
+        self,
+        key: str,
+        turns: list[dict],
+        *,
+        self_context: str = "",
+    ) -> list[dict]:
+        if not self.daily_chat_memory_summary_enabled:
+            return []
+        client = self.daily_chat_memory_client or self.client
+        if not client:
+            return []
+        windows = self._daily_chat_memory_windows(turns)
+        if not windows:
+            return []
+        use_daily_client = client is self.daily_chat_memory_client
+        model = self.daily_chat_memory_summary_model if use_daily_client else self.model
+        summaries: list[dict] = []
+        for index, window_turns in enumerate(windows):
+            fallback_turn_ids, fallback_event_ids = self._daily_chat_memory_window_source_ids(window_turns)
+            payload = {
+                "date": key,
+                "identity": {
+                    "ai_name": self.identity["ai_name"],
+                    "user_name": self.identity["user_name"],
+                    "user_display_name": self.identity["user_display_name"],
+                    "user_aliases": self.identity.get("user_aliases", []),
+                },
+                "self_anchor_entry": self_context,
+                "window": {
+                    "index": index + 1,
+                    "total": len(windows),
+                    "source_turn_ids": fallback_turn_ids,
+                    "source_event_ids": fallback_event_ids,
+                },
+                "conversation_turns": window_turns,
+            }
+            try:
+                response = await self._daily_chat_memory_create_completion(
+                    client,
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": self._daily_chat_memory_summary_prompt()},
+                        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                    ],
+                    max_tokens=self.daily_chat_memory_summary_max_tokens,
+                    temperature=self.temperature,
+                    use_daily_client=use_daily_client,
+                )
+                raw = self._completion_content(response)
+                parsed = self._parse_json_object(raw or "")
+            except Exception as exc:
+                logger.warning("Daily chat memory summary failed, window=%s: %s", index + 1, exc)
+                continue
+            raw_summaries = parsed.get("summaries") if isinstance(parsed, dict) else []
+            if not isinstance(raw_summaries, list):
+                continue
+            for item in raw_summaries:
+                if not isinstance(item, dict):
+                    continue
+                cleaned = self._normalize_daily_chat_memory_summary(
+                    item,
+                    key=key,
+                    window_index=index + 1,
+                    source_turn_ids=fallback_turn_ids,
+                    source_event_ids=fallback_event_ids,
+                )
+                if cleaned:
+                    summaries.append(cleaned)
+        return summaries
+
+    def _normalize_daily_chat_memory_summary(
+        self,
+        item: dict,
+        *,
+        key: str,
+        window_index: int,
+        source_turn_ids: list[int],
+        source_event_ids: list[int],
+    ) -> dict:
+        text = re.sub(
+            r"\s+",
+            " ",
+            strip_wikilinks(str(item.get("summary") or item.get("content") or "")).strip(),
+        )
+        if not text or self._daily_chat_memory_noise(text):
+            return {}
+        confidence = self._clamp(item.get("confidence", 0.65))
+        if confidence < 0.5:
+            return {}
+        title = str(item.get("title") or "").strip()
+        if self._daily_chat_memory_title_is_generic(title):
+            title = self._daily_chat_memory_title(text, "key_event", key)
+        raw_turn_ids = [
+            int(turn_id)
+            for turn_id in self._string_list(item.get("source_turn_ids"), limit=80)
+            if str(turn_id).isdigit()
+        ] or source_turn_ids
+        raw_event_ids = [
+            int(event_id)
+            for event_id in self._string_list(item.get("source_event_ids"), limit=160)
+            if str(event_id).isdigit()
+        ] or source_event_ids
+        signals = self._string_list(item.get("signals"), limit=8)
+        return {
+            "window_index": window_index,
+            "title": title[:40],
+            "summary": text[:900],
+            "signals": signals,
+            "source_turn_ids": raw_turn_ids[:80],
+            "source_event_ids": raw_event_ids[:160],
+            "confidence": confidence,
+        }
+
     @staticmethod
     def _max_daily_chat_memory_raw_event_id(turns: list[dict]) -> int:
         max_id = 0
@@ -1479,8 +1748,27 @@ class ReflectionEngine:
             return {"status": "skipped", "reason": "no_conversation_turns", "date": key, "mode": effective_mode}
 
         self_context = await self._daily_chat_memory_self_context(bucket_mgr)
-        raw_candidates = await self._extract_daily_chat_memory_candidates(key, turns, self_context=self_context)
-        candidates = self._normalize_daily_chat_memory_candidates(key, raw_candidates, turns)
+        max_candidates = self._daily_chat_memory_candidate_limit(effective_mode)
+        min_confidence = self._daily_chat_memory_min_confidence_for_mode(effective_mode)
+        window_summaries = await self._summarize_daily_chat_memory_windows(
+            key,
+            turns,
+            self_context=self_context,
+        )
+        raw_candidates = await self._extract_daily_chat_memory_candidates(
+            key,
+            turns,
+            self_context=self_context,
+            window_summaries=window_summaries,
+            max_candidates=max_candidates,
+        )
+        candidates = self._normalize_daily_chat_memory_candidates(
+            key,
+            raw_candidates,
+            turns,
+            max_candidates=max_candidates,
+            min_confidence=min_confidence,
+        )
         if not candidates:
             return {
                 "status": "skipped",
@@ -1488,6 +1776,7 @@ class ReflectionEngine:
                 "date": key,
                 "mode": effective_mode,
                 "turns": len(turns),
+                "window_summaries": len(window_summaries),
             }
 
         if effective_mode == "review":
@@ -1503,6 +1792,7 @@ class ReflectionEngine:
                 "mode": effective_mode,
                 "turns": len(turns),
                 "turn_source": turn_source,
+                "window_summaries": len(window_summaries),
                 "last_raw_event_id": max_seen_raw_event_id or raw_event_cursor_id,
                 "cursor_updated": cursor_updated,
                 **pending,
@@ -1524,6 +1814,7 @@ class ReflectionEngine:
             "mode": effective_mode,
             "turns": len(turns),
             "turn_source": turn_source,
+            "window_summaries": len(window_summaries),
             "last_raw_event_id": max_seen_raw_event_id or raw_event_cursor_id,
             "cursor_updated": cursor_updated,
             **write_result,
@@ -1670,8 +1961,14 @@ class ReflectionEngine:
         turns: list[dict],
         *,
         self_context: str = "",
+        window_summaries: list[dict] | None = None,
+        max_candidates: int | None = None,
     ) -> list[dict]:
-        if self.client:
+        client = self.daily_chat_memory_client or self.client
+        if client:
+            use_daily_client = client is self.daily_chat_memory_client
+            model = self.daily_chat_memory_candidate_model if use_daily_client else self.model
+            summaries = window_summaries or []
             payload = {
                 "date": key,
                 "identity": {
@@ -1681,31 +1978,44 @@ class ReflectionEngine:
                     "user_aliases": self.identity.get("user_aliases", []),
                 },
                 "self_anchor_entry": self_context,
-                "conversation_turns": turns,
+                "window_summaries": summaries,
+                "conversation_turns": [] if summaries else turns,
             }
             try:
-                response = await self.client.chat.completions.create(
-                    model=self.model,
+                response = await self._daily_chat_memory_create_completion(
+                    client,
+                    model=model,
                     messages=[
-                        {"role": "system", "content": self._daily_chat_memory_prompt()},
+                        {
+                            "role": "system",
+                            "content": self._daily_chat_memory_prompt(max_candidates=max_candidates),
+                        },
                         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                     ],
-                    **self._completion_options(
-                        max_tokens=min(self.max_tokens, 700),
-                        temperature=self.temperature,
-                        thinking_mode=self.thinking_mode,
-                    ),
+                    max_tokens=self.daily_chat_memory_candidate_max_tokens,
+                    temperature=self.temperature,
+                    use_daily_client=use_daily_client,
                 )
-                raw = response.choices[0].message.content if response.choices else ""
+                raw = self._completion_content(response)
                 parsed = self._parse_json_object(raw or "")
                 candidates = parsed.get("candidates") if isinstance(parsed, dict) else []
                 if isinstance(candidates, list):
                     return [item for item in candidates if isinstance(item, dict)]
             except Exception as exc:
                 logger.warning("Daily chat memory extraction failed, using heuristic: %s", exc)
-        return self._heuristic_daily_chat_memory_candidates(key, turns)
+        return self._heuristic_daily_chat_memory_candidates(
+            key,
+            turns,
+            max_candidates=max_candidates,
+        )
 
-    def _heuristic_daily_chat_memory_candidates(self, key: str, turns: list[dict]) -> list[dict]:
+    def _heuristic_daily_chat_memory_candidates(
+        self,
+        key: str,
+        turns: list[dict],
+        *,
+        max_candidates: int | None = None,
+    ) -> list[dict]:
         lines = []
         for turn in turns:
             user_text = str(turn.get("user_text") or "").strip()
@@ -1758,7 +2068,7 @@ class ReflectionEngine:
                     "reason": f"chat_contains_{kind}",
                 }
             )
-            if len(candidates) >= self.daily_chat_memory_max_per_day:
+            if len(candidates) >= int(max_candidates or self.daily_chat_memory_max_per_day or 1):
                 break
         return candidates
 
@@ -2034,6 +2344,9 @@ class ReflectionEngine:
         key: str,
         candidates: list[dict],
         turns: list[dict],
+        *,
+        max_candidates: int | None = None,
+        min_confidence: float | None = None,
     ) -> list[dict]:
         fallback_turn_ids = [turn.get("id") for turn in turns if turn.get("id") is not None]
         fallback_raw_event_ids = [
@@ -2062,7 +2375,8 @@ class ReflectionEngine:
             if self._daily_chat_memory_low_value_social_noise(content, kind):
                 continue
             confidence = self._clamp(candidate.get("confidence", 0.0))
-            if confidence < self.daily_chat_memory_min_confidence:
+            threshold = self.daily_chat_memory_min_confidence if min_confidence is None else min_confidence
+            if confidence < threshold:
                 continue
             title = str(candidate.get("title") or "").strip()
             if self._daily_chat_memory_title_is_generic(title):
@@ -2107,7 +2421,7 @@ class ReflectionEngine:
             if self._daily_chat_memory_duplicate_candidate(item, normalized):
                 continue
             normalized.append(item)
-            if len(normalized) >= self.daily_chat_memory_max_per_day:
+            if len(normalized) >= int(max_candidates or self.daily_chat_memory_max_per_day or 1):
                 break
         return normalized
 
@@ -3159,6 +3473,52 @@ class ReflectionEngine:
         if mode:
             options["extra_body"] = {"thinking": {"type": mode}}
         return options
+
+    def _daily_chat_memory_completion_options(
+        self,
+        *,
+        max_tokens: int,
+        temperature: float,
+    ) -> dict[str, Any]:
+        return {
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "extra_body": {"enable_thinking": False},
+        }
+
+    @staticmethod
+    def _completion_content(response: Any) -> str:
+        try:
+            return str(response.choices[0].message.content or "") if response.choices else ""
+        except (AttributeError, IndexError, TypeError):
+            return ""
+
+    async def _daily_chat_memory_create_completion(
+        self,
+        client: Any,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        temperature: float,
+        use_daily_client: bool,
+    ) -> Any:
+        if use_daily_client:
+            completion_options = self._daily_chat_memory_completion_options(
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+        else:
+            completion_options = self._completion_options(
+                max_tokens=max_tokens,
+                temperature=temperature,
+                thinking_mode="",
+            )
+        return await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            **completion_options,
+        )
 
     def _parse_json_object(self, raw: str) -> dict:
         try:

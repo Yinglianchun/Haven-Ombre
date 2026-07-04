@@ -36,6 +36,22 @@ def test_load_config_defaults_relationship_weather_off(tmp_path):
     assert config["reflection"]["daily_chat_memory_hour"] == 0
     assert config["reflection"]["daily_chat_memory_turn_limit"] == 0
     assert config["reflection"]["daily_chat_memory_max_per_day"] == 3
+    assert config["reflection"]["daily_chat_memory_min_confidence"] == 0.68
+    assert config["reflection"]["daily_chat_memory_review_max_per_day"] == 10
+    assert config["reflection"]["daily_chat_memory_review_min_confidence"] == 0.55
+    assert config["reflection"]["daily_chat_memory_summary_enabled"] is True
+    assert config["reflection"]["daily_chat_memory_summary_window_turns"] == 30
+    assert config["reflection"]["daily_chat_memory_summary_stride_turns"] == 10
+    assert config["reflection"]["daily_chat_memory_api_key_env"] == "HANDOFF_SUMMARIZER_API_KEY_2"
+    assert config["reflection"]["daily_chat_memory_base_url"] == "https://api.siliconflow.cn/v1"
+    assert config["reflection"]["daily_chat_memory_timeout_seconds"] == 180
+    assert config["reflection"]["daily_chat_memory_summary_model"] == "Qwen/Qwen3.5-4B"
+    assert config["reflection"]["daily_chat_memory_summary_max_tokens"] == 1800
+    assert config["reflection"]["daily_chat_memory_candidate_model"] == "Qwen/Qwen3.5-4B"
+    assert config["reflection"]["daily_chat_memory_candidate_max_tokens"] == 2400
+    assert "daily_chat_memory_summary_thinking_mode" not in config["reflection"]
+    assert "daily_chat_memory_candidate_thinking_mode" not in config["reflection"]
+    assert "daily_chat_memory_thinking_budget" not in config["reflection"]
     assert config["reflection"]["memory_affect_anchor_enabled"] is True
     assert config["reflection"]["relationship_weather_affect_anchor_enabled"] is True
     assert config["portrait"]["enabled"] is True

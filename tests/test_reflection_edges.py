@@ -53,6 +53,20 @@ class RecordingChatClient:
         return SimpleNamespace(choices=[choice])
 
 
+class SequencedChatClient:
+    def __init__(self, contents: list[str]):
+        self.calls = []
+        self.contents = list(contents)
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    async def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        content = self.contents.pop(0) if self.contents else '{"candidates":[]}'
+        message = SimpleNamespace(content=content)
+        choice = SimpleNamespace(message=message)
+        return SimpleNamespace(choices=[choice])
+
+
 class DummyPersonaEngine:
     enabled = True
     profile_id = "haven_xiaoyu"
@@ -81,6 +95,8 @@ def _no_api_config(test_config: dict) -> dict:
         "base_url": "",
         "model": "",
         "timezone": "Asia/Shanghai",
+        "daily_chat_memory_api_key_env": "__OMBRE_TEST_NO_DAILY_CHAT_KEY__",
+        "daily_chat_memory_api_key": "",
     }
     return test_config
 
@@ -948,7 +964,8 @@ def test_daily_chat_memory_prompt_uses_self_and_domain_context(test_config):
     assert "你是 Haven" in prompt
     assert "self_anchor_entry" in prompt
     assert "宝宝、老婆" in prompt
-    assert "5 到 8 轮" in prompt
+    assert "window_summaries" in prompt
+    assert "连续上下文" in prompt
     assert "同一件事、同一项目、同一承诺只能输出 1 条" in prompt
     assert "普通称呼或昵称不算" in prompt
     assert "project" in prompt
@@ -1268,6 +1285,7 @@ async def test_daily_chat_memory_passes_self_anchor_entry_to_model(test_config):
         )
     )
     engine.client = client
+    engine.daily_chat_memory_client = None
 
     raw = await engine._extract_daily_chat_memory_candidates(
         "2026-05-21",
@@ -1385,6 +1403,143 @@ async def test_daily_chat_memory_prefers_full_raw_events_by_date(test_config):
     assert bucket["metadata"]["source_conversation_turn_ids"] == []
     assert "project_state" in bucket["metadata"]["tags"]
     assert "project_event" in bucket["metadata"]["tags"]
+
+
+@pytest.mark.asyncio
+async def test_daily_chat_memory_summarizes_overlapping_windows_for_review(test_config, monkeypatch):
+    cfg = _no_api_config(test_config)
+    cfg["identity"] = {
+        "ai_name": "Haven",
+        "user_name": "Xiaoyu",
+        "user_display_name": "小雨",
+        "user_aliases": ["宝宝"],
+    }
+    cfg["reflection"]["daily_chat_memory_mode"] = "review"
+    cfg["reflection"]["daily_chat_memory_turn_limit"] = 0
+    cfg["reflection"]["daily_chat_memory_review_max_per_day"] = 10
+    cfg["reflection"]["daily_chat_memory_review_min_confidence"] = 0.55
+    cfg["reflection"]["daily_chat_memory_summary_window_turns"] = 30
+    cfg["reflection"]["daily_chat_memory_summary_stride_turns"] = 10
+    monkeypatch.setenv("HANDOFF_SUMMARIZER_API_KEY_2", "test-key")
+    bucket_mgr = BucketManager(cfg)
+    engine = ReflectionEngine(cfg)
+    engine.daily_chat_memory_client = SequencedChatClient(
+        [
+            json.dumps(
+                {
+                    "summaries": [
+                        {
+                            "title": "自动记忆窗口因果",
+                            "summary": "小雨提出自动记忆候选太少，后来确认需要先压缩连续上下文再抽候选，避免窗口边界断掉因果。",
+                            "signals": ["project_state"],
+                            "source_event_ids": [39, 40, 41, 42],
+                            "confidence": 0.72,
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps({"summaries": []}, ensure_ascii=False),
+            json.dumps(
+                {
+                    "summaries": [
+                        {
+                            "title": "review候选放宽",
+                            "summary": "小雨确认待确认候选可以多一点，auto 保守不变，review 可以放宽数量和置信度。",
+                            "signals": ["stable_preference"],
+                            "source_event_ids": [61, 62],
+                            "confidence": 0.7,
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "should_write": True,
+                            "kind": "project_state",
+                            "title": "自动记忆先压缩再抽取",
+                            "content": "小雨确认自动记忆应先把连续聊天压缩成自包含摘要，再从摘要抽多条待确认候选；review 模式可以放宽数量和置信度，auto 仍保持保守。",
+                            "domain": "project",
+                            "tags": ["project_state"],
+                            "importance": 5,
+                            "confidence": 0.6,
+                            "source_event_ids": [39, 40, 41, 42, 61, 62],
+                            "reason": "review_candidates_need_more_context",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    now = datetime(2026, 7, 3, 23, 59, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    events = []
+    for round_id in range(1, 46):
+        event_base = round_id * 2 - 1
+        user_text = f"第 {round_id} 轮普通聊天。"
+        assistant_text = f"第 {round_id} 轮回复。"
+        if round_id == 20:
+            user_text = "自动记忆候选太保守了，要不要先压缩连续上下文，避免边界断因果？"
+            assistant_text = "可以，先压缩窗口，再从摘要抽候选。"
+        if round_id == 31:
+            user_text = "待确认候选可以多一点，auto 还是保守。"
+            assistant_text = "review 放宽，auto 不动。"
+        for role, text, event_id in (
+            ("user", user_text, event_base),
+            ("assistant", assistant_text, event_base + 1),
+        ):
+            events.append(
+                {
+                    "id": event_id,
+                    "role": role,
+                    "text": text,
+                    "created_at": f"2026-07-03T20:{round_id:02d}:00+08:00",
+                    "conversation_id": "daily-chat",
+                    "session_id": "daily-chat",
+                    "client": "gateway",
+                    "metadata": {"profile_id": "haven_xiaoyu", "round_id": round_id},
+                }
+            )
+
+    class RawEventStore:
+        def list_events_between(self, *, start_at, end_at, limit):
+            return events
+
+    class ConversationTurnStore:
+        def list_conversation_turns_between(self, **kwargs):
+            raise AssertionError("raw_events should be used for summary windows")
+
+    class Persona:
+        profile_id = "haven_xiaoyu"
+
+    result = await engine.run_daily_chat_memory(
+        bucket_mgr,
+        conversation_turn_store=ConversationTurnStore(),
+        raw_event_store=RawEventStore(),
+        persona_engine=Persona(),
+        now=now,
+    )
+
+    assert result["status"] == "pending"
+    assert result["window_summaries"] == 2
+    assert result["added"] == 1
+    calls = engine.daily_chat_memory_client.calls
+    assert len(calls) == 4
+    assert all(call["model"] == "Qwen/Qwen3.5-4B" for call in calls)
+    assert all(call["extra_body"] == {"enable_thinking": False} for call in calls)
+    first_summary_payload = json.loads(calls[0]["messages"][1]["content"])
+    assert first_summary_payload["window"]["source_event_ids"] == list(range(1, 61))
+    extraction_payload = json.loads(calls[-1]["messages"][1]["content"])
+    assert extraction_payload["conversation_turns"] == []
+    assert len(extraction_payload["window_summaries"]) == 2
+    assert "review" in extraction_payload["window_summaries"][1]["summary"]
+    assert "auto" in extraction_payload["window_summaries"][1]["summary"]
+    pending = engine.list_daily_chat_memory_pending()
+    assert pending[0]["candidate"]["source_event_ids"] == [39, 40, 41, 42, 61, 62]
 
 
 @pytest.mark.asyncio
