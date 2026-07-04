@@ -470,6 +470,9 @@ class ReflectionEngine:
             80,
             min(1000, int(cfg.get("daily_activity_summary_max_tokens", 320))),
         )
+        self.dehydration_base_url = str(dehy_cfg.get("base_url") or "").strip().rstrip("/")
+        self.dehydration_model = str(dehy_cfg.get("model") or "").strip()
+        self.dehydration_api_key = str(dehy_cfg.get("api_key") or os.environ.get("OMBRE_API_KEY", "")).strip()
         state_dir = config.get("state_dir") or os.path.join(
             os.path.dirname(os.path.abspath(config.get("buckets_dir", "buckets"))),
             "state",
@@ -488,6 +491,13 @@ class ReflectionEngine:
                 api_key=self.daily_chat_memory_api_key,
                 base_url=self.daily_chat_memory_base_url,
                 timeout=self.daily_chat_memory_timeout_seconds,
+            )
+        self.daily_activity_summary_dehydration_client = None
+        if self.enabled and self.dehydration_api_key and self.dehydration_base_url and self.dehydration_model:
+            self.daily_activity_summary_dehydration_client = AsyncOpenAI(
+                api_key=self.dehydration_api_key,
+                base_url=self.dehydration_base_url,
+                timeout=45.0,
             )
 
     def _load_daily_chat_memory_payload(self) -> dict:
@@ -1776,8 +1786,13 @@ class ReflectionEngine:
             return {"status": "skipped", "reason": "no_conversation_turns", "date": key}
 
         item = await self._extract_daily_activity_summary(key, turns)
-        if not item and self.daily_chat_memory_client and self.client:
-            item = await self._extract_daily_activity_summary(key, turns, use_daily_client=False)
+        if not item and self._daily_activity_summary_dehydration_retry_available():
+            item = await self._extract_daily_activity_summary(
+                key,
+                turns,
+                client_override=self.daily_activity_summary_dehydration_client,
+                model_override=self.dehydration_model,
+            )
         if not item:
             item = self._fallback_daily_activity_summary(key, turns)
         if not item:
@@ -1803,15 +1818,21 @@ class ReflectionEngine:
         turns: list[dict],
         *,
         use_daily_client: bool | None = None,
+        client_override: Any = None,
+        model_override: str = "",
     ) -> dict:
-        if use_daily_client is False:
+        if client_override is not None:
+            client = client_override
+        elif use_daily_client is False:
             client = self.client
         else:
             client = self.daily_chat_memory_client or self.client
         if not client:
             return {}
         use_daily_client = client is self.daily_chat_memory_client
-        model = self.daily_chat_memory_summary_model if use_daily_client else self.model
+        model = str(model_override or "").strip() or (
+            self.daily_chat_memory_summary_model if use_daily_client else self.model
+        )
         fallback_turn_ids, fallback_event_ids = self._daily_chat_memory_window_source_ids(turns)
         payload = {
             "date": key,
@@ -1847,6 +1868,18 @@ class ReflectionEngine:
             turns,
             source_turn_ids=fallback_turn_ids,
             source_event_ids=fallback_event_ids,
+        )
+
+    def _daily_activity_summary_dehydration_retry_available(self) -> bool:
+        if not self.daily_activity_summary_dehydration_client:
+            return False
+        first_model = self.daily_chat_memory_summary_model if self.daily_chat_memory_client else self.model
+        first_base_url = self.daily_chat_memory_base_url if self.daily_chat_memory_client else self.base_url
+        first_api_key = self.daily_chat_memory_api_key if self.daily_chat_memory_client else self.api_key
+        return (
+            self.dehydration_model != str(first_model or "").strip()
+            or self.dehydration_base_url != str(first_base_url or "").strip().rstrip("/")
+            or self.dehydration_api_key != str(first_api_key or "").strip()
         )
 
     def _normalize_daily_activity_summary(

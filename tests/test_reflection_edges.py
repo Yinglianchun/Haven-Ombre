@@ -1486,12 +1486,17 @@ async def test_daily_activity_summary_prefers_raw_events_not_auto_memory_candida
 
 
 @pytest.mark.asyncio
-async def test_daily_activity_summary_retries_primary_client_when_daily_returns_empty(test_config):
+async def test_daily_activity_summary_retries_dehydration_client_when_first_model_returns_empty(test_config):
     cfg = _no_api_config(test_config)
     engine = ReflectionEngine(cfg)
-    engine.model = "dehydration-model"
-    engine.daily_chat_memory_client = RecordingChatClient("")
-    engine.client = RecordingChatClient(
+    engine.model = "cheap-model"
+    engine.base_url = "https://cheap.example/v1"
+    engine.api_key = "cheap-key"
+    engine.client = RecordingChatClient("")
+    engine.dehydration_model = "dehydration-model"
+    engine.dehydration_base_url = "https://dehy.example/v1"
+    engine.dehydration_api_key = "dehy-key"
+    engine.daily_activity_summary_dehydration_client = RecordingChatClient(
         json.dumps(
             {
                 "summary": "小雨和 Haven 排查了 handoff 与自动记忆夜间调度，并决定空返回时复用脱水模型。",
@@ -1542,8 +1547,8 @@ async def test_daily_activity_summary_retries_primary_client_when_daily_returns_
     assert item["confidence"] == 0.71
     assert item["source_event_ids"] == [501, 502]
     assert "脱水模型" in item["text"]
-    assert engine.daily_chat_memory_client.calls[0]["model"] == "Qwen/Qwen3.5-4B"
-    assert engine.client.calls[0]["model"] == "dehydration-model"
+    assert engine.client.calls[0]["model"] == "cheap-model"
+    assert engine.daily_activity_summary_dehydration_client.calls[0]["model"] == "dehydration-model"
 
 
 @pytest.mark.asyncio
