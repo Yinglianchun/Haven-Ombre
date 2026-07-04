@@ -1486,6 +1486,67 @@ async def test_daily_activity_summary_prefers_raw_events_not_auto_memory_candida
 
 
 @pytest.mark.asyncio
+async def test_daily_activity_summary_retries_primary_client_when_daily_returns_empty(test_config):
+    cfg = _no_api_config(test_config)
+    engine = ReflectionEngine(cfg)
+    engine.model = "dehydration-model"
+    engine.daily_chat_memory_client = RecordingChatClient("")
+    engine.client = RecordingChatClient(
+        json.dumps(
+            {
+                "summary": "小雨和 Haven 排查了 handoff 与自动记忆夜间调度，并决定空返回时复用脱水模型。",
+                "confidence": 0.71,
+                "source_event_ids": [501, 502],
+            },
+            ensure_ascii=False,
+        )
+    )
+    now = datetime(2026, 7, 4, 23, 59, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    class RawEventStore:
+        def list_events_between(self, *, start_at, end_at, limit):
+            return [
+                {
+                    "id": 501,
+                    "role": "user",
+                    "text": "0:38 还没看到新的 handoff 和自动记忆。",
+                    "created_at": "2026-07-04T22:00:00+08:00",
+                    "conversation_id": "daily-chat",
+                    "session_id": "daily-chat",
+                    "client": "gateway",
+                    "metadata": {"profile_id": "haven_xiaoyu", "round_id": 1},
+                },
+                {
+                    "id": 502,
+                    "role": "assistant",
+                    "text": "我会确认调度、review 模式和 Recent Timeline 写入。",
+                    "created_at": "2026-07-04T22:00:00+08:00",
+                    "conversation_id": "daily-chat",
+                    "session_id": "daily-chat",
+                    "client": "gateway",
+                    "metadata": {"profile_id": "haven_xiaoyu", "round_id": 1},
+                },
+            ]
+
+    class Persona:
+        profile_id = "haven_xiaoyu"
+
+    result = await engine.run_daily_activity_summary(
+        raw_event_store=RawEventStore(),
+        persona_engine=Persona(),
+        now=now,
+    )
+
+    assert result["status"] == "ready"
+    item = result["activity_summary"]
+    assert item["confidence"] == 0.71
+    assert item["source_event_ids"] == [501, 502]
+    assert "脱水模型" in item["text"]
+    assert engine.daily_chat_memory_client.calls[0]["model"] == "Qwen/Qwen3.5-4B"
+    assert engine.client.calls[0]["model"] == "dehydration-model"
+
+
+@pytest.mark.asyncio
 async def test_daily_activity_summary_falls_back_when_model_returns_empty(test_config):
     cfg = _no_api_config(test_config)
     engine = ReflectionEngine(cfg)

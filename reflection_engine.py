@@ -1776,6 +1776,8 @@ class ReflectionEngine:
             return {"status": "skipped", "reason": "no_conversation_turns", "date": key}
 
         item = await self._extract_daily_activity_summary(key, turns)
+        if not item and self.daily_chat_memory_client and self.client:
+            item = await self._extract_daily_activity_summary(key, turns, use_daily_client=False)
         if not item:
             item = self._fallback_daily_activity_summary(key, turns)
         if not item:
@@ -1795,8 +1797,17 @@ class ReflectionEngine:
             "activity_summary": item,
         }
 
-    async def _extract_daily_activity_summary(self, key: str, turns: list[dict]) -> dict:
-        client = self.daily_chat_memory_client or self.client
+    async def _extract_daily_activity_summary(
+        self,
+        key: str,
+        turns: list[dict],
+        *,
+        use_daily_client: bool | None = None,
+    ) -> dict:
+        if use_daily_client is False:
+            client = self.client
+        else:
+            client = self.daily_chat_memory_client or self.client
         if not client:
             return {}
         use_daily_client = client is self.daily_chat_memory_client
