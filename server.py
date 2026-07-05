@@ -523,7 +523,13 @@ async def _fetch_gateway_injection_debug(
     if session_id:
         params["session_id"] = session_id
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        timeout_seconds = float(os.environ.get("OMBRE_GATEWAY_DEBUG_TIMEOUT_SECONDS", "30"))
+    except (TypeError, ValueError):
+        timeout_seconds = 30.0
+    timeout_seconds = max(5.0, min(90.0, timeout_seconds))
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
             response = await client.get(
                 debug_url,
                 headers={"Authorization": f"Bearer {token}"},

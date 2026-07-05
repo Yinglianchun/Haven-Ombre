@@ -5860,6 +5860,17 @@ class GatewayService:
             body_read_started_at = time.perf_counter()
             body = await upstream_response.aread()
             await upstream_response.aclose()
+            error_preview = self._clip_text(body.decode("utf-8", errors="replace"), 600)
+            if error_preview:
+                logger.info(
+                    "Gateway Anthropic upstream error body | upstream=%s model=%s upstream_model=%s "
+                    "status=%s body=%s",
+                    upstream.get("name"),
+                    model,
+                    route["upstream_model"],
+                    upstream_response.status_code,
+                    error_preview,
+                )
             logger.info(
                 "Gateway stream timing | session=%s route=%s upstream=%s model=%s upstream_model=%s "
                 "status=%s error_response=true header_ms=%s body_read_ms=%s total_ms=%s",
