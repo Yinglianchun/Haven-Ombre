@@ -65,6 +65,7 @@ DEFAULT_WORD_MAP_STOPWORDS = {
     "favorite",
     "feel",
     "from_daily_chat",
+    "interaction_pattern",
     "key_event",
     "memory",
     "moment",

@@ -512,6 +512,10 @@ def test_word_map_excludes_structural_tags_and_identity_names(tmp_path):
                     "stable_preference",
                     "from_daily_chat",
                     "daily_chat_extract",
+                    "relationship_weather",
+                    "daily_impression",
+                    "commitment",
+                    "interaction_pattern",
                     "emotional_echo",
                     "profile_fact",
                     "flavor_soft",
@@ -525,6 +529,7 @@ def test_word_map_excludes_structural_tags_and_identity_names(tmp_path):
                     "relationship_event",
                     "stable_preference",
                     "from_daily_chat",
+                    "interaction_pattern",
                     "咖啡机",
                     "testai_favorite",
                     "haven_favorite",
@@ -542,6 +547,10 @@ def test_word_map_excludes_structural_tags_and_identity_names(tmp_path):
     assert "stable_preference" not in terms
     assert "from_daily_chat" not in terms
     assert "daily_chat_extract" not in terms
+    assert "relationship_weather" not in terms
+    assert "daily_impression" not in terms
+    assert "commitment" not in terms
+    assert "interaction_pattern" not in terms
     assert "emotional_echo" not in terms
     assert "profile_fact" not in terms
     assert "flavor_soft" not in terms
