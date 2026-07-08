@@ -997,7 +997,7 @@ df0a41d Expose recall modes in dashboard config
 
 - 本地全量测试：`447 passed, 7 skipped`。
 - VPS `/opt/Ombre-Brain` 已部署到 `5f045bb`。
-- `http://8.136.154.242:18001/health` 和 `http://8.136.154.242:18002/health` 正常。
+- `http://127.0.0.1:18001/health` 和 `http://127.0.0.1:18002/health` 正常。
 - 从 live `ombre-brain` 容器调用 `server.api_config_update()` 发送同值参数，返回 `gateway_hot_reloaded`，并包含 `memory_diffusion.top_k / chain_walk_enabled / chain_max_hops`。
 
 ## 2026-06-04 追加：query breath 默认不随机漂旧记忆

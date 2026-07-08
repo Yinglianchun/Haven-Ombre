@@ -111,8 +111,8 @@ Duplicate local: 0
 ## 常用检查命令
 
 ```bash
-curl -fsS http://8.136.154.242:18001/health
-curl -fsS http://8.136.154.242:18002/health
+curl -fsS http://127.0.0.1:18001/health
+curl -fsS http://127.0.0.1:18002/health
 ```
 
 ```bash
