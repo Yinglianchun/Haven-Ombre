@@ -188,6 +188,8 @@ DEFAULT_CONFLICTS = {
 CAREER_GENERIC_DIRECT_TERMS = frozenset({"工作"})
 _FACETS_FOR_TEXT_CACHE: dict[tuple[int, str], tuple[tuple[str, float], ...]] = {}
 _FACETS_FOR_TEXT_CACHE_MAX = 512
+_FACETS_FOR_NODE_CACHE: dict[tuple, tuple[tuple[str, float], ...]] = {}
+_FACETS_FOR_NODE_CACHE_MAX = 2048
 _CONTENT_TERMS_CACHE: dict[tuple[int, str], tuple[str, ...]] = {}
 _CONTENT_TERMS_CACHE_MAX = 512
 PROTECTED_PHRASE_MAX_CHARS = 48
@@ -531,22 +533,38 @@ def facets_for_node(
             0.5,
         ),
     )
+    numeric_facets = _numeric_facets(meta.get("annotation_facets"))
+    section = _normalize_section(node.get("section") or meta.get("section") or "")
+    marks_old = _metadata_marks_old(meta)
+    cache_key = (
+        id(options),
+        fields,
+        tuple(sorted(numeric_facets.items())),
+        section,
+        marks_old,
+    )
+    cached = _FACETS_FOR_NODE_CACHE.get(cache_key)
+    if cached is not None:
+        return dict(cached)
     scores = _facet_scores(fields, options)
-    for facet, value in _numeric_facets(meta.get("annotation_facets")).items():
+    for facet, value in numeric_facets.items():
         if facet in options.blocked_facets:
             continue
         scores[facet] = max(scores.get(facet, 0.0), value)
 
-    section = _normalize_section(node.get("section") or meta.get("section") or "")
     for facet in options.section_hints.get(section, ()):
         if facet in options.blocked_facets:
             continue
         scores[facet] = max(scores.get(facet, 0.0), 0.6)
 
-    if _metadata_marks_old(meta):
+    if marks_old:
         scores["old_or_resolved"] = 1.0
 
-    return {facet: round(min(1.0, score), 3) for facet, score in scores.items()}
+    result = {facet: round(min(1.0, score), 3) for facet, score in scores.items()}
+    if len(_FACETS_FOR_NODE_CACHE) >= _FACETS_FOR_NODE_CACHE_MAX:
+        _FACETS_FOR_NODE_CACHE.clear()
+    _FACETS_FOR_NODE_CACHE[cache_key] = tuple(result.items())
+    return result
 
 
 def active_facets(facets: dict[str, float], threshold: float = 0.45) -> set[str]:

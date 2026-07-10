@@ -818,12 +818,39 @@ class GatewayService:
         if self.http_client and not getattr(self.http_client, "is_closed", False):
             await self.http_client.aclose()
 
-    def warm_recall_runtime(self) -> None:
+    async def warm_recall_runtime(self) -> None:
         started_at = time.perf_counter()
         self._recall_query_plan("记忆检索预热")
+        query_plan_ms = max(0, int((time.perf_counter() - started_at) * 1000))
+        stage_started_at = time.perf_counter()
+        all_buckets = await self._list_gateway_buckets(include_archive=False)
+        list_buckets_ms = max(0, int((time.perf_counter() - stage_started_at) * 1000))
+        stage_started_at = time.perf_counter()
+        moments, _grouped, edges = self._refresh_moment_graph(all_buckets)
+        moment_graph_ms = max(0, int((time.perf_counter() - stage_started_at) * 1000))
+        stage_started_at = time.perf_counter()
+        lexical_buckets = self.bucket_mgr.warm_lexical_profiles(all_buckets)
+        lexical_profiles_ms = max(0, int((time.perf_counter() - stage_started_at) * 1000))
+        stage_started_at = time.perf_counter()
+        for bucket in all_buckets:
+            facets_for_node(self._bucket_relevance_node(bucket), self.relevance_options)
+        for moment in moments:
+            facets_for_node(moment, self.relevance_options)
+        relevance_facets_ms = max(0, int((time.perf_counter() - stage_started_at) * 1000))
         logger.info(
-            "Gateway recall runtime warmed | latency_ms=%s",
+            "Gateway recall runtime warmed | latency_ms=%s query_plan_ms=%s list_buckets_ms=%s "
+            "moment_graph_ms=%s lexical_profiles_ms=%s relevance_facets_ms=%s buckets=%s "
+            "lexical_buckets=%s moments=%s edges=%s",
             max(0, int((time.perf_counter() - started_at) * 1000)),
+            query_plan_ms,
+            list_buckets_ms,
+            moment_graph_ms,
+            lexical_profiles_ms,
+            relevance_facets_ms,
+            len(all_buckets),
+            lexical_buckets,
+            len(moments),
+            len(edges),
         )
 
     async def health_payload(self) -> dict:
@@ -20268,7 +20295,7 @@ def create_gateway_app(
     @asynccontextmanager
     async def lifespan(app: Starlette):
         app.state.gateway_service = service
-        service.warm_recall_runtime()
+        await service.warm_recall_runtime()
         yield
         await service.close()
 

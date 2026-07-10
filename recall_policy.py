@@ -2263,6 +2263,10 @@ class RecallPolicy:
         raw = str(query or "").strip()
         if not raw:
             return []
+        return list(self._locatable_query_terms_cached(raw))
+
+    @lru_cache(maxsize=512)
+    def _locatable_query_terms_cached(self, raw: str) -> tuple[str, ...]:
         output: list[str] = []
         seen: set[str] = set()
         content_term_keys = {
@@ -2331,7 +2335,7 @@ class RecallPolicy:
         for term in self._event_place_locatable_terms(raw, specific_terms):
             add(term, force=True)
 
-        return output[:8]
+        return tuple(output[:8])
 
     def _pos_structural_locatable_terms(
         self,
@@ -2560,6 +2564,10 @@ class RecallPolicy:
 
     def specific_query_terms(self, query: str) -> list[str]:
         raw = str(query or "")
+        return list(self._specific_query_terms_cached(raw))
+
+    @lru_cache(maxsize=512)
+    def _specific_query_terms_cached(self, raw: str) -> tuple[str, ...]:
         terms = list(content_terms_for_query(raw, self.options))
         topic_key = recall_topic_query(raw, self.options)
         allow_single_cjk_terms = {
@@ -2598,7 +2606,7 @@ class RecallPolicy:
             seen = {existing.lower() for existing in kept}
             seen.add(key)
             kept.append(cleaned)
-        return kept
+        return tuple(kept)
 
     def moment_has_topic_evidence(self, query: str, moment: dict) -> bool:
         taste_terms = self._short_taste_query_terms(query)
