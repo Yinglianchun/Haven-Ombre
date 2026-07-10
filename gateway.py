@@ -11173,8 +11173,7 @@ class GatewayService:
                 return True, ""
             return False, "query_topic_evidence_missing"
         if why == "explicit_edge":
-            strong_edge_floor = max(self.diffusion_inject_min_confidence + 0.2, 0.80)
-            if path_len <= 1 and confidence >= strong_edge_floor:
+            if explicit_edge_axis_bypass:
                 return True, ""
             return False, "query_topic_evidence_missing"
         return False, "unknown_diffusion_reason"

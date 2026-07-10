@@ -2583,6 +2583,17 @@ class RecallPolicy:
         raw = str(query or "")
         return list(self._specific_query_terms_cached(raw))
 
+    def _topic_evidence_terms(self, query: str) -> list[str]:
+        terms: list[str] = []
+        for term in self.specific_query_terms(query):
+            key = self._compact_entity_keyword(term)
+            if not key:
+                continue
+            if re.fullmatch(r"[\u4e00-\u9fff]", key):
+                continue
+            terms.append(term)
+        return terms
+
     @lru_cache(maxsize=512)
     def _specific_query_terms_cached(self, raw: str) -> tuple[str, ...]:
         terms = list(content_terms_for_query(raw, self.options))
@@ -2627,7 +2638,7 @@ class RecallPolicy:
 
     def moment_has_topic_evidence(self, query: str, moment: dict) -> bool:
         taste_terms = self._short_taste_query_terms(query)
-        terms = self.specific_query_terms(query)
+        terms = self._topic_evidence_terms(query)
         if not terms:
             return False
         meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
@@ -2654,7 +2665,7 @@ class RecallPolicy:
 
     def bucket_has_topic_evidence(self, query: str, bucket: dict) -> bool:
         taste_terms = self._short_taste_query_terms(query)
-        terms = self.specific_query_terms(query)
+        terms = self._topic_evidence_terms(query)
         if not terms:
             return False
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}

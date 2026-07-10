@@ -17,6 +17,7 @@ from memory_relevance import (
     facets_for_node,
     memory_relevance_options_from_config,
 )
+from query_terms import GENERIC_LEXICAL_STOPWORDS
 from utils import strip_wikilinks
 
 
@@ -488,6 +489,8 @@ class MemoryMomentStore:
         for row in rows:
             alias = dict(row)
             alias_key = str(alias.get("alias_key") or "")
+            if alias_key in GENERIC_RETRIEVAL_ALIAS_STOP_KEYS:
+                continue
             matched_terms = [
                 text
                 for text, key in query_terms
@@ -853,11 +856,23 @@ def _retrieval_alias_key(value: Any) -> str:
     return re.sub(r"[\W_]+", "", normalized, flags=re.UNICODE)
 
 
+GENERIC_RETRIEVAL_ALIAS_STOP_KEYS = frozenset(
+    {
+        *GENERIC_RETRIEVAL_ALIAS_KEYS,
+        *(
+            _retrieval_alias_key(term)
+            for term in GENERIC_LEXICAL_STOPWORDS
+            if _retrieval_alias_key(term)
+        ),
+    }
+)
+
+
 def _valid_retrieval_alias(alias_text: str) -> bool:
     alias_key = _retrieval_alias_key(alias_text)
     if len(alias_key) < 3 or len(alias_text) > MAX_RETRIEVAL_ALIAS_CHARS:
         return False
-    if alias_key in GENERIC_RETRIEVAL_ALIAS_KEYS:
+    if alias_key in GENERIC_RETRIEVAL_ALIAS_STOP_KEYS:
         return False
     if len(re.findall(r"[A-Za-z0-9]+", alias_text)) > 14:
         return False
@@ -912,7 +927,7 @@ def _retrieval_alias_query_terms(query: Any) -> list[tuple[str, str]]:
     for candidate in candidates:
         text = _clean_retrieval_alias_text(candidate)
         key = _retrieval_alias_key(text)
-        if len(key) < 2 or key in seen:
+        if len(key) < 2 or key in seen or key in GENERIC_RETRIEVAL_ALIAS_STOP_KEYS:
             continue
         seen.add(key)
         terms.append((text, key))
