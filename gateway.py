@@ -2244,6 +2244,31 @@ class GatewayService:
         allow_rerank = self._truthy_header(
             str(body.get("allow_rerank")) if body.get("allow_rerank") is not None else None
         )
+        recall_mode = str(body.get("recall_mode") or "fast").strip().lower()
+        if recall_mode in {"gateway", "parity"}:
+            recall_mode = "full"
+        if recall_mode not in {"fast", "full"}:
+            return JSONResponse({"error": "recall_mode must be fast or full"}, status_code=400)
+        max_context_chars = bounded_int(
+            body.get("max_context_chars"),
+            default=4200,
+            floor=400,
+            ceiling=12000,
+        )
+
+        if recall_mode == "full":
+            return await self._handle_hook_recall_full(
+                query=query,
+                session_id=session_id,
+                messages=messages,
+                model=model,
+                max_cards=max_cards,
+                max_chars=max_chars,
+                max_context_chars=max_context_chars,
+                include_diffused=include_diffused,
+                include_context_debug=include_context_debug,
+                include_debug=include_debug,
+            )
 
         try:
             cards, recalled_ids, debug_payload = await self._hook_recall_fast_cards(
@@ -2278,6 +2303,88 @@ class GatewayService:
             "notes": cards,
             "additional_context": self._render_hook_recall_additional_context(cards),
             "recalled_ids": list(recalled_ids or []),
+            "debug": minimal_debug,
+        }
+        if include_debug:
+            debug = dict(debug_payload)
+            if not include_context_debug:
+                for key in (
+                    "stable_context",
+                    "dynamic_context",
+                    "recalled_memory",
+                    "diffused_memory",
+                    "just_now_context",
+                    "date_recall",
+                    "date_persona_trace",
+                    "targeted_memory_detail",
+                    "dream_context",
+                ):
+                    debug.pop(key, None)
+            response["debug"] = {**debug, **minimal_debug}
+        return JSONResponse(response)
+
+    async def _handle_hook_recall_full(
+        self,
+        *,
+        query: str,
+        session_id: str,
+        messages: list[dict[str, Any]],
+        model: str,
+        max_cards: int,
+        max_chars: int,
+        max_context_chars: int,
+        include_diffused: bool,
+        include_context_debug: bool,
+        include_debug: bool,
+    ) -> JSONResponse:
+        """Run the normal Gateway recall pipeline without forwarding upstream."""
+        try:
+            _forward_payload, recalled_ids, debug_payload = await self.prepare_payload(
+                {
+                    "model": model,
+                    "messages": messages,
+                    "stream": False,
+                },
+                session_id,
+                include_debug=True,
+                debug_detail="compact",
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except RuntimeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503)
+
+        cards = self._hook_recall_cards_from_debug(
+            debug_payload,
+            max_cards=max_cards,
+            max_chars=max_chars,
+            include_diffused=include_diffused,
+        )
+        dynamic_context = self._clip_text(
+            str(debug_payload.get("dynamic_context") or "").strip(),
+            max_context_chars,
+        )
+        additional_context = self._render_hook_recall_full_additional_context(dynamic_context)
+        recalled_ids = list(recalled_ids or debug_payload.get("injected_bucket_ids") or [])
+        minimal_debug = {
+            "mode": "full_gateway",
+            "query": query,
+            "candidate_count": len(debug_payload.get("recalled_moment_debug") or [])
+            + len(debug_payload.get("suppressed_candidates") or []),
+            "recalled_bucket_ids": list(debug_payload.get("recalled_bucket_ids") or []),
+            "diffused_bucket_ids": list(debug_payload.get("diffused_bucket_ids") or []),
+            "just_now_context_injected": bool(debug_payload.get("just_now_context_injected")),
+            "date_recall_injected": bool(debug_payload.get("date_recall_injected")),
+            "prepare_timing_debug": dict(debug_payload.get("prepare_timing_debug") or {}),
+        }
+        response: dict[str, Any] = {
+            "ok": True,
+            "query": query,
+            "session_id": session_id,
+            "cards": cards,
+            "notes": cards,
+            "additional_context": additional_context,
+            "recalled_ids": recalled_ids,
             "debug": minimal_debug,
         }
         if include_debug:
@@ -19100,6 +19207,20 @@ class GatewayService:
                 parts.extend(f"  {line}" for line in text.splitlines())
             parts.append("[/memory_card]")
         return "\n".join(parts).strip()
+
+    @staticmethod
+    def _render_hook_recall_full_additional_context(dynamic_context: str) -> str:
+        text = str(dynamic_context or "").strip()
+        if not text:
+            return ""
+        return "\n".join(
+            [
+                "[Ombre Gateway Full Recall]",
+                "Full Gateway recall context for this turn; no response-generation request was forwarded.",
+                text,
+                "[/Ombre Gateway Full Recall]",
+            ]
+        )
 
     def _inject_context_messages(
         self,
