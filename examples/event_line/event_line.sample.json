@@ -1,0 +1,23 @@
+{
+  "events": [
+    {
+      "id": "evt_demo000001",
+      "title": "示例：项目交付",
+      "status": "active",
+      "created": "2026-07-01",
+      "last_updated": "2026-07-03",
+      "entries": [
+        {
+          "date": "2026-07-01",
+          "text": "立项并拆分里程碑，进度初始化。",
+          "progress": 10
+        },
+        {
+          "date": "2026-07-03",
+          "text": "完成核心模块联调，等待验收。",
+          "progress": 55
+        }
+      ]
+    }
+  ]
+}
