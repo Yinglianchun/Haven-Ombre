@@ -70,23 +70,6 @@ import:
 write_path:
   semantic_search_timeout_seconds: 3  # Timeout for write-time semantic lookup / 写入时语义查找超时秒数
 
-# --- Automatic write gate / 自动写入门卫 ---
-# Only applies to grow(auto=true) or sources such as Operit/workflow/worker.
-# 只作用于 grow(auto=true) 或 Operit/workflow/worker 等自动总结来源。
-# Low surprise is logged but not written; medium surprise stays pending; high
-# surprise or repeated pending candidates may pass into normal grow().
-# 低意外度只记日志；中意外度 pending；高意外度或重复出现才进入普通 grow()。
-memory_write_gate:
-  enabled: true
-  auto_sources: ["operit", "workflow", "worker", "auto"]
-  pending_threshold: 0.42
-  grow_threshold: 0.72
-  duplicate_similarity: 0.88
-  repeat_similarity: 0.82
-  repeat_promote_count: 2
-  candidate_log: "memory_write_candidates.jsonl"
-  max_recent_candidates: 120
-
 # --- Dehydration API / 脱水压缩 API 配置 ---
 # Uses a cheap LLM for intelligent compression; auto-degrades to local
 # keyword extraction if API is unavailable
@@ -732,6 +715,8 @@ portrait:
   source_excerpt_chars: 900
   recent_continuity_days: 3
   persona_events_limit: 24
+  window_shadow_limit: 4            # read the latest sequential window self-narratives for persona/relationship only
+  window_shadow_chars: 2400         # max characters from each shadow; the full original remains in its own SQLite store
   recent_buffer_max: 24
   staging_pool_max: 24
   candidate_max: 40

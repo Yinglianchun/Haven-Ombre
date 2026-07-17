@@ -147,17 +147,6 @@ def load_config(config_path: str = None) -> dict:
         "write_path": {
             "semantic_search_timeout_seconds": 3,
         },
-        "memory_write_gate": {
-            "enabled": True,
-            "auto_sources": ["operit", "workflow", "worker", "auto"],
-            "pending_threshold": 0.42,
-            "grow_threshold": 0.72,
-            "duplicate_similarity": 0.88,
-            "repeat_similarity": 0.82,
-            "repeat_promote_count": 2,
-            "candidate_log": "memory_write_candidates.jsonl",
-            "max_recent_candidates": 120,
-        },
         "identity": {
             "ai_name": "AI",
             "user_name": "User",

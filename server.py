@@ -22,8 +22,8 @@
 #                               删除一条 Haven 自己写的年轮
 #       hold   — Store a single memory
 #                存储单条记忆
-#       grow   — Long-note memory digest, auto-split selected content into buckets
-#                长内容摘记，筛选后拆分多桶
+#       grow   — Store one complete first-person window shadow and copy explicit moments
+#                保存整窗第一人称窗影，并拆出独立场景记忆
 #       trace  — Modify metadata / resolved / delete
 #                修改元数据 / resolved 标记 / 删除
 #       pulse  — System status + bucket listing
@@ -88,6 +88,7 @@ from memory_diffusion import (
 )
 from memory_edges import MemoryEdgeStore
 from entity_edges import EntityEdgeStore, extract_entity_edges_from_bucket
+from memory_cards import ShadowMemoryCardStore
 from memory_moments import MemoryMomentStore, parse_bucket_moments
 from memory_relevance import (
     active_facets,
@@ -116,7 +117,11 @@ from memory_layers import (
 )
 from memory_metadata import domain_options, normalize_domain_key, normalize_memory_metadata
 from recall_policy import RecallPolicy, diffusion_seed_topic_term_has_specific_residue
-from memory_write_gate import MemoryWriteGate, WriteGateDecision
+from window_shadows import (
+    WindowShadowStore,
+    extract_window_shadow_moments,
+    validate_window_shadow,
+)
 from memory_nodes import MemoryNodeStore
 from persona_engine import PersonaStateEngine
 from persona_event_selection import select_persona_events
@@ -153,6 +158,7 @@ setup_logging(config.get("log_level", "INFO"))
 logger = logging.getLogger("ombre_brain")
 
 MEMORY_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+MEMORY_CARD_SHADOW_VERSION = "shadow-card-v1"
 
 
 def _coerce_memory_id(value) -> str:
@@ -173,9 +179,10 @@ memory_edge_store = MemoryEdgeStore(config)            # Explicit memory relatio
 entity_edge_store = EntityEdgeStore(config)            # Person/object hint edges / 人物对象轻边
 memory_node_store = MemoryNodeStore(config)            # Computable memory node index / 可计算记忆节点
 memory_moment_store = MemoryMomentStore(config)        # Structured bucket body/comment moment index / 记忆片段索引
-memory_write_gate = MemoryWriteGate(config)            # Automatic grow gate / 自动写入门卫
+shadow_memory_card_store = ShadowMemoryCardStore(config) # Non-authoritative primary/cue/evidence previews / 影子记忆卡
+window_shadow_store = WindowShadowStore(config)         # Append-only full-window self narratives / 整窗第一人称窗影
 reflection_engine = ReflectionEngine(config)           # Reflection worker / 关系天气与关系整理
-portrait_engine = DailyPortraitMaintainer(config)      # Daily portrait state / 每日画像状态
+portrait_engine = DailyPortraitMaintainer(config, window_shadow_store=window_shadow_store) # Daily portrait state / 每日画像状态
 dream_engine = DreamEngine(config)                     # Night dream worker / 夜梦
 identity_semantic_store = IdentitySemanticStore(config) # Private relationship alias index / 私有关系语义索引
 word_map_store = WordMapStore(config)                   # Derived generic word co-occurrence index / 派生通用词图
@@ -1645,6 +1652,33 @@ def _handoff_portrait_stable_body(value: object) -> str:
     return re.sub(r"^Stable:\s*", "", text, count=1, flags=re.IGNORECASE).strip()
 
 
+def _latest_window_shadow_handoff(
+    *,
+    session_id: str = "",
+    absorbed_window_shadow_ids: list[str] | None = None,
+    max_tokens: int = 560,
+) -> str:
+    """Carry the latest unabsorbed window shadow without putting it in ordinary recall."""
+    try:
+        shadow = window_shadow_store.latest(exclude_session_id=session_id)
+    except Exception as exc:
+        logger.warning("Latest window shadow read failed / 最近窗影读取失败: %s", exc)
+        return ""
+    if not shadow:
+        return ""
+    absorbed_ids = {
+        str(value or "").strip()
+        for value in absorbed_window_shadow_ids or []
+        if str(value or "").strip()
+    }
+    if str(shadow.get("window_id") or "").strip() in absorbed_ids:
+        return ""
+    content = str(shadow.get("content") or "").strip()
+    if not content:
+        return ""
+    return _trim_handoff_text_to_token_budget(content, max_tokens)
+
+
 async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", debug: bool = False) -> str:
     try:
         all_buckets = await bucket_mgr.list_all(include_archive=False)
@@ -1690,6 +1724,10 @@ async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", de
         _handoff_portrait_stable_body(persona_portrait),
         70,
     )
+    latest_window_shadow = _latest_window_shadow_handoff(
+        session_id=session_id,
+        absorbed_window_shadow_ids=portrait_sections.get("absorbed_window_shadow_ids", []),
+    )
     self_context = "\n\n".join(
         part
         for part in (
@@ -1704,6 +1742,7 @@ async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", de
         ("User Portrait", user_portrait, 140, False),
         ("Current Focus", current_focus, 120, True),
         ("Relationship Portrait", relationship_portrait, 160, False),
+        ("Latest Window Shadow", latest_window_shadow, 560, False),
         ("Recent Continuity", recent_continuity, 650, True),
         ("照顾备忘", care_memos, 180, True),
         ("Optional Anchors", anchors, 90, True),
@@ -2215,38 +2254,6 @@ def _has_memory_section(content: str, section: str) -> bool:
     return False
 
 
-_GROW_DIRECT_SECTION_HEADINGS = {
-    "moment",
-    "original",
-    "reflection",
-    "assistantreflection",
-    "havenreflection",
-    "followup",
-    "affectanchor",
-}
-
-
-def _is_grow_direct_content(content: str) -> bool:
-    """Detect already-curated memory text that should not be digested again."""
-    text = strip_wikilinks(str(content or ""))
-    for match in re.finditer(r"(?m)^\s{0,3}#{2,6}\s+(.+?)\s*$", text):
-        if _normalize_section_heading(match.group(1)) in _GROW_DIRECT_SECTION_HEADINGS:
-            return True
-    return False
-
-
-def _title_from_memory_heading(content: str) -> str:
-    text = strip_wikilinks(str(content or ""))
-    for match in re.finditer(r"(?m)^\s{0,3}#{1,6}\s+(.+?)\s*$", text):
-        heading = str(match.group(1) or "").strip()
-        if not heading:
-            continue
-        if _normalize_section_heading(heading) in _GROW_DIRECT_SECTION_HEADINGS:
-            continue
-        return _clip_text(heading, 48)
-    return ""
-
-
 def _leading_body_text(content: str) -> str:
     raw = str(content or "").strip()
     if not raw:
@@ -2259,8 +2266,17 @@ def _fallback_moment_from_body(body_text: str) -> str:
     text = re.sub(r"\s+", " ", str(body_text or "").strip())
     if not text:
         return ""
-    match = re.search(r"^(.{12,60}?[。！？!?])", text)
-    return (match.group(1) if match else text[:40]).strip()
+    sentences = [part.strip() for part in re.findall(r"[^。！？!?]+[。！？!?]?", text) if part.strip()]
+    selected: list[str] = []
+    for sentence in sentences:
+        candidate = "".join(selected + [sentence])
+        if selected and len(candidate) > 240:
+            break
+        selected.append(sentence)
+        if len(selected) >= 3 or len(candidate) >= 120:
+            break
+    summary = "".join(selected) or text
+    return _clip_text(summary, 240).strip()
 
 
 def _insert_moment_after_leading_body(content: str, moment: str) -> str:
@@ -2294,6 +2310,20 @@ def _section_text_for_auto_moment(content: str) -> str:
     return ""
 
 
+def _reflection_text_for_auto_moment(content: str) -> str:
+    raw = strip_wikilinks(str(content or "")).strip()
+    if not raw:
+        return ""
+    matches = list(re.finditer(r"(?m)^\s{0,3}#{2,6}\s+(.+?)\s*$", raw))
+    for index, match in enumerate(matches):
+        heading = _normalize_section_heading(match.group(1))
+        if heading not in {"reflection", "assistantreflection", "havenreflection"}:
+            continue
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
+        return raw[match.end():end].strip()
+    return ""
+
+
 async def _auto_generate_moment_if_missing(content: str, *, section_fallback: bool = False) -> str:
     raw = str(content or "").strip()
     if not raw or _has_memory_section(raw, "moment"):
@@ -2304,11 +2334,12 @@ async def _auto_generate_moment_if_missing(content: str, *, section_fallback: bo
     if not body_text or len(body_text) < 10:
         return raw
 
+    reflection_text = _reflection_text_for_auto_moment(raw)
     generated_moment = ""
     generator = getattr(dehydrator, "generate_moment", None)
     if callable(generator):
         try:
-            generated_moment = await generator(body_text)
+            generated_moment = await generator(body_text, reflection_text)
         except Exception as e:
             logger.warning("Auto moment generation failed / 自动 moment 生成失败: %s", e)
 
@@ -2334,6 +2365,211 @@ async def _auto_generate_write_moment_if_needed(
     if _is_self_anchor_write_content(self_anchor, domain):
         return str(content or "").strip()
     return await _auto_generate_moment_if_missing(content)
+
+
+_SHADOW_CUE_KINDS = {
+    "paraphrase",
+    "entity",
+    "event",
+    "time",
+    "relationship",
+    "protected_phrase",
+}
+_GENERIC_SHADOW_CUE_KEYS = {
+    "以前",
+    "之前",
+    "当时",
+    "后来",
+    "关系",
+    "记忆",
+    "事情",
+    "开心",
+    "难过",
+    "小雨",
+    "haven",
+}
+
+
+def _shadow_memory_card_source_hash(bucket: dict) -> str:
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    payload = {
+        "content": str(bucket.get("content") or ""),
+        "name": str(meta.get("name") or bucket.get("name") or ""),
+        "tags": sorted(str(tag) for tag in meta.get("tags", []) or []),
+        "domain": sorted(str(domain) for domain in meta.get("domain", []) or []),
+        "date": str(meta.get("date") or ""),
+    }
+    raw = _json_lib.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _shadow_memory_card_parts(bucket: dict) -> dict:
+    moments = parse_bucket_moments(bucket)
+
+    def first_text(*sections: str) -> str:
+        for section in sections:
+            for moment in moments:
+                if str(moment.get("section") or "") == section:
+                    text = str(moment.get("text") or "").strip()
+                    if text:
+                        return text
+        return ""
+
+    current_moment = first_text("moment")
+    body = first_text("body", "fact", "evidence_context", "context")
+    reflection = first_text("reflection", "feeling")
+    if not body:
+        body = _leading_body_text(str(bucket.get("content") or ""))
+    if not body:
+        body = current_moment
+
+    evidence_refs = []
+    for moment in moments:
+        section = str(moment.get("section") or "")
+        if section not in {
+            "body",
+            "fact",
+            "moment",
+            "original",
+            "evidence_context",
+            "context",
+            "reflection",
+        }:
+            continue
+        item = {
+            "moment_id": str(moment.get("moment_id") or ""),
+            "section": section,
+            "source": str(moment.get("source") or ""),
+            "source_id": str(moment.get("source_id") or ""),
+        }
+        meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+        source_ref = meta.get("source_ref")
+        if isinstance(source_ref, dict):
+            item["source_ref"] = dict(source_ref)
+        evidence_refs.append(item)
+        if len(evidence_refs) >= 12:
+            break
+    return {
+        "moments": moments,
+        "body": body,
+        "reflection": reflection,
+        "current_moment": current_moment,
+        "evidence_refs": evidence_refs,
+    }
+
+
+def _shadow_memory_card_needs_primary_candidate(parts: dict) -> bool:
+    current = " ".join(str(parts.get("current_moment") or "").split())
+    body = " ".join(str(parts.get("body") or "").split())
+    reflection = " ".join(str(parts.get("reflection") or "").split())
+    if not current:
+        return True
+    if len(current) >= 60:
+        return False
+    return len(body) >= len(current) + 30 or bool(reflection)
+
+
+def _normalize_shadow_cue_anchors(value: object, limit: int = 8) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    anchors: list[dict] = []
+    seen = set()
+    for raw in value:
+        if isinstance(raw, str):
+            cue = raw
+            kind = "paraphrase"
+            why = ""
+        elif isinstance(raw, dict):
+            cue = raw.get("cue")
+            kind = str(raw.get("kind") or "paraphrase").strip().lower()
+            why = raw.get("why")
+        else:
+            continue
+        cue = re.sub(r"\s+", " ", str(cue or "")).strip(" \t\r\n\"'“”‘’")
+        cue = _clip_text(cue, 80)
+        cue_key = re.sub(r"[\s\W_]+", "", cue.lower())
+        if len(cue_key) < 2 or cue_key in _GENERIC_SHADOW_CUE_KEYS or cue_key in seen:
+            continue
+        seen.add(cue_key)
+        anchors.append(
+            {
+                "cue": cue,
+                "kind": kind if kind in _SHADOW_CUE_KINDS else "paraphrase",
+                "why": _clip_text(re.sub(r"\s+", " ", str(why or "")).strip(), 120),
+            }
+        )
+        if len(anchors) >= max(1, int(limit)):
+            break
+    return anchors
+
+
+def _shadow_memory_card_eligible(bucket: dict | None) -> bool:
+    if not isinstance(bucket, dict) or is_self_anchor_bucket(bucket):
+        return False
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    if meta.get("type") == "feel" or meta.get("protected"):
+        return False
+    return bool(str(bucket.get("content") or "").strip())
+
+
+async def _build_shadow_memory_card(bucket: dict) -> dict:
+    bucket_id = str(bucket.get("id") or "").strip()
+    parts = _shadow_memory_card_parts(bucket)
+    body = str(parts.get("body") or "").strip()
+    current_moment = str(parts.get("current_moment") or "").strip()
+    reflection = str(parts.get("reflection") or "").strip()
+    needs_candidate = _shadow_memory_card_needs_primary_candidate(parts)
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    generated = {}
+    generator = getattr(dehydrator, "generate_memory_card", None)
+    if body and callable(generator):
+        try:
+            generated = await generator(
+                body=body,
+                reflection=reflection,
+                current_moment=current_moment,
+                title=str(meta.get("name") or bucket.get("name") or ""),
+                tags=list(meta.get("tags", []) or []),
+                needs_primary_candidate=needs_candidate,
+            )
+        except Exception as e:
+            logger.warning("Shadow memory card generation failed / 影子记忆卡生成失败: %s: %s", bucket_id, e)
+
+    if not isinstance(generated, dict):
+        generated = {}
+    generated_primary = re.sub(
+        r"^#{1,6}\s*moment\s*\n+",
+        "",
+        str(generated.get("primary_abstraction") or "").strip(),
+        flags=re.IGNORECASE,
+    ).strip()
+    if needs_candidate:
+        primary = generated_primary or _fallback_moment_from_body(body)
+        primary_source = "generated_candidate" if generated_primary else "body_fallback_candidate"
+    else:
+        primary = current_moment
+        primary_source = "existing_moment"
+
+    cue_anchors = _normalize_shadow_cue_anchors(generated.get("cue_anchors"), limit=8)
+    if not primary:
+        status = "skipped_no_primary"
+    elif not cue_anchors:
+        status = "partial_no_cues"
+    else:
+        status = "ready"
+    return {
+        "bucket_id": bucket_id,
+        "source_hash": _shadow_memory_card_source_hash(bucket),
+        "generation_version": MEMORY_CARD_SHADOW_VERSION,
+        "primary_abstraction": _clip_text(primary, 360),
+        "existing_moment": _clip_text(current_moment, 360),
+        "primary_source": primary_source,
+        "candidate_only": bool(needs_candidate),
+        "cue_anchors": cue_anchors,
+        "evidence_refs": parts.get("evidence_refs", []),
+        "status": status,
+        "model": str(getattr(dehydrator, "model", "") or ""),
+    }
 
 
 def _bucket_read_payload(bucket: dict) -> dict:
@@ -3534,6 +3770,12 @@ def _delete_bucket_indexes(bucket_id: str) -> tuple[dict, list[str]]:
         errors.append("moments")
 
     try:
+        cleanup["shadow_memory_card"] = shadow_memory_card_store.delete(bucket_id)
+    except Exception as e:
+        logger.warning("Failed to delete shadow memory card / 删除影子记忆卡失败: %s: %s", bucket_id, e)
+        errors.append("shadow_memory_card")
+
+    try:
         cleanup["edges"] = memory_edge_store.delete_for_bucket(bucket_id)
     except Exception as e:
         logger.warning("Failed to delete memory edges for bucket / 删除桶关系边失败: %s: %s", bucket_id, e)
@@ -3717,6 +3959,131 @@ async def _backfill_memory_enrichment(
 async def enrich_backfill(limit: int = 10) -> dict:
     """后台补跑缺失的 tags/confidence/memory_edges；主要用于 enrich_on_write 曾经超时或关闭后的修复。"""
     return await _backfill_memory_enrichment(limit=limit)
+
+
+async def _shadow_memory_card_candidates(
+    *,
+    limit: int,
+    bucket_id: str = "",
+    query: str = "",
+    include_archive: bool = False,
+    bucket_mgr_arg=None,
+) -> list[dict]:
+    mgr = bucket_mgr_arg or bucket_mgr
+    bucket_id = str(bucket_id or "").strip()
+    query = str(query or "").strip()
+    if bucket_id:
+        bucket = await mgr.get(bucket_id)
+        return [bucket] if _shadow_memory_card_eligible(bucket) else []
+    if query:
+        try:
+            buckets = await mgr.search(
+                query,
+                limit=max(limit, 20),
+                include_archive=include_archive,
+            )
+        except TypeError:
+            buckets = await mgr.search(query, limit=max(limit, 20))
+    else:
+        buckets = await mgr.list_all(include_archive=include_archive)
+        buckets.sort(
+            key=lambda item: str(
+                item.get("metadata", {}).get("updated_at")
+                or item.get("metadata", {}).get("created")
+                or ""
+            ),
+            reverse=True,
+        )
+    return [bucket for bucket in buckets if _shadow_memory_card_eligible(bucket)][:limit]
+
+
+@mcp.tool()
+async def memory_card_shadow_backfill(
+    limit: int = 10,
+    bucket_id: str = "",
+    query: str = "",
+    dry_run: bool = True,
+    force: bool = False,
+    include_archive: bool = False,
+) -> dict:
+    """生成 primary_abstraction/cue_anchors/evidence_refs 影子卡；默认只预览，不改 bucket，也不参与召回。"""
+    limit = _int_between(limit, 10, 1, 25)
+    bucket_id = str(bucket_id or "").strip()
+    if bucket_id and not MEMORY_ID_RE.fullmatch(bucket_id):
+        return {"status": "invalid", "reason": "invalid_bucket_id", "bucket_id": bucket_id}
+    candidates = await _shadow_memory_card_candidates(
+        limit=limit,
+        bucket_id=bucket_id,
+        query=query,
+        include_archive=bool(include_archive),
+    )
+    results = []
+    written = 0
+    cached = 0
+    errors = []
+    for bucket in candidates:
+        current_id = str(bucket.get("id") or "").strip()
+        source_hash = _shadow_memory_card_source_hash(bucket)
+        existing = shadow_memory_card_store.get(current_id)
+        if (
+            existing
+            and not force
+            and existing.get("source_hash") == source_hash
+            and existing.get("generation_version") == MEMORY_CARD_SHADOW_VERSION
+        ):
+            item = dict(existing)
+            item["action"] = "cached"
+            results.append(item)
+            cached += 1
+            continue
+        try:
+            card = await _build_shadow_memory_card(bucket)
+            card["action"] = "preview" if dry_run else "written"
+            if not dry_run:
+                stored = shadow_memory_card_store.upsert(card)
+                stored["action"] = "written"
+                card = stored
+                written += 1
+            results.append(card)
+        except Exception as e:
+            logger.warning("Shadow memory card backfill failed / 影子记忆卡补建失败: %s: %s", current_id, e)
+            errors.append(f"{current_id}: {e}")
+    return {
+        "status": "ok",
+        "mode": "shadow_only",
+        "generation_version": MEMORY_CARD_SHADOW_VERSION,
+        "dry_run": bool(dry_run),
+        "processed": len(results),
+        "written": written,
+        "cached": cached,
+        "errors": errors,
+        "cards": results,
+        "injection_enabled": False,
+        "bucket_mutation": False,
+    }
+
+
+@mcp.tool()
+async def memory_card_shadow_read(bucket_id: str = "", limit: int = 20) -> dict:
+    """读取已保存的影子记忆卡；这些卡不参与候选、gate、扩散或注入。"""
+    bucket_id = str(bucket_id or "").strip()
+    if bucket_id:
+        if not MEMORY_ID_RE.fullmatch(bucket_id):
+            return {"status": "invalid", "reason": "invalid_bucket_id", "bucket_id": bucket_id}
+        card = shadow_memory_card_store.get(bucket_id)
+        return {
+            "status": "ok" if card else "not_found",
+            "mode": "shadow_only",
+            "card": card,
+            "injection_enabled": False,
+        }
+    return {
+        "status": "ok",
+        "mode": "shadow_only",
+        "stats": shadow_memory_card_store.stats(),
+        "cards": shadow_memory_card_store.list(limit=_int_between(limit, 20, 1, 200)),
+        "injection_enabled": False,
+    }
 
 
 async def _search_edge_backfill_buckets(mgr, query: str, limit: int) -> list[dict]:
@@ -8470,237 +8837,173 @@ async def darkroom_release(entry_id: str = "latest", reason: str = "") -> dict:
 
 
 # =============================================================
-# Tool 3: grow — Grow, fragments become memories
-# 工具 3：grow — 生长，一天的碎片长成记忆
+# Tool 3: grow — Preserve one full window shadow
+# 工具 3：grow — 保存一整窗第一人称窗影
 # =============================================================
-def _format_write_gate_result(decision: WriteGateDecision) -> str:
-    reason = ",".join(decision.reasons) or "no_reason"
-    repeat = f"{decision.repeat_count + 1}/{memory_write_gate.repeat_promote_count}"
-    return (
-        f"门卫→{decision.decision} "
-        f"score={decision.surprise_score:.2f} "
-        f"repeat={repeat} "
-        f"candidate={decision.candidate_id} "
-        f"reason={reason}"
-    )
-
-
-def _grow_source_from_context(context: Context | None) -> str:
-    if context is None:
-        return ""
-    try:
-        client_info = context.request_context.session.client_params.clientInfo
-    except Exception:
-        return ""
-    name = str(getattr(client_info, "name", "") or "").strip().lower()
-    if "ob-auto-grow" in name:
-        return "operit"
-    if "operit" in name:
-        return "operit"
-    return ""
-
-
-def _looks_like_operit_auto_grow_content(content: str) -> bool:
-    return bool(re.match(r"^【\d{4}-\d{2}-\d{2} \d{2}:\d{2}】\s*\n", str(content or "")))
-
-
-async def _grow_direct_structured_content(content: str, title: str = "", gate_prefix: str = "") -> str:
-    contract_error = _memory_write_contract_error(content)
+async def _write_window_shadow_moment(
+    window: dict,
+    scene: dict,
+    index: int,
+) -> tuple[str, str]:
+    """Copy one authored scene into an ordinary recall bucket without rewriting it."""
+    window_id = str(window.get("window_id") or "").strip()
+    bucket_id = f"{window_id}_moment_{index}"
+    existing = await bucket_mgr.get(bucket_id)
+    if existing:
+        return bucket_id, "existing"
+    scene_content = str(scene.get("content") or "").strip()
+    contract_error = _memory_write_contract_error(scene_content)
     if contract_error:
-        return f"{gate_prefix}写入被拒绝：{contract_error}"
-    direct_content = str(content or "").strip()
+        raise ValueError(contract_error)
     try:
-        analysis = await dehydrator.analyze(direct_content)
-    except Exception as e:
-        logger.warning(f"Direct grow auto-tagging failed, using defaults / 直接写入打标失败: {e}")
+        analysis = await dehydrator.analyze(scene_content)
+    except Exception as exc:
+        logger.warning("Window shadow moment tagging failed / 窗影场景打标失败: %s", exc)
         analysis = {
-            "domain": ["general"], "valence": 0.5, "arousal": 0.3,
-            "tags": [], "suggested_name": "",
+            "domain": ["relationship"],
+            "valence": 0.5,
+            "arousal": 0.3,
+            "tags": [],
+            "suggested_name": "",
+            "memory_subject": "event",
+            "memory_layer": "process_event",
         }
-
-    tags = analysis.get("tags", []) if isinstance(analysis.get("tags", []), list) else []
+    tags = list(dict.fromkeys([*(analysis.get("tags", []) or []), "window_shadow_moment"]))
     classification = normalize_write_classification(
-        memory_subject=analysis.get("memory_subject", ""),
-        memory_layer=analysis.get("memory_layer", ""),
+        memory_subject=analysis.get("memory_subject", "event"),
+        memory_layer=analysis.get("memory_layer", "process_event"),
         tags=tags,
-        content=direct_content,
+        content=scene_content,
     )
-    if _has_favorite_tag(tags) and not _has_favorite_reason(direct_content):
-        return _favorite_reason_error()
-
+    name = str(scene.get("title") or analysis.get("suggested_name") or f"窗影时刻{index}").strip()
     try:
-        importance = max(1, min(10, int(analysis.get("importance", 5))))
+        importance = max(1, min(10, int(analysis.get("importance", 6) or 6)))
     except (TypeError, ValueError):
-        importance = 5
-    domain = analysis.get("domain", ["general"])
+        importance = 6
+    domain = analysis.get("domain", ["relationship"])
     if not isinstance(domain, list):
-        domain = ["general"]
-    name = title.strip() or _title_from_memory_heading(direct_content) or analysis.get("suggested_name", "")
-    related_bucket = await _find_readonly_related_bucket(direct_content)
-
-    bucket_id = await bucket_mgr.create(
-        content=direct_content,
+        domain = ["relationship"]
+    await bucket_mgr.create(
+        content=scene_content,
         tags=tags,
         importance=importance,
         domain=domain,
         valence=analysis.get("valence", 0.5),
         arousal=analysis.get("arousal", 0.3),
-        name=name or None,
-        extra_metadata=_memory_classification_metadata(
-            classification["memory_subject"],
-            classification["memory_layer"],
-            classification["memory_classification_source"],
-        ),
+        name=name,
+        bucket_id=bucket_id,
+        source="window_shadow",
+        date=str(window.get("source_date") or "") or None,
+        extra_metadata={
+            "window_shadow_id": window_id,
+            "window_shadow_session_id": str(window.get("session_id") or ""),
+            "window_shadow_index": index,
+            **_memory_classification_metadata(
+                classification["memory_subject"],
+                classification["memory_layer"],
+                classification["memory_classification_source"],
+            ),
+        },
     )
     _queue_embedding_refresh(bucket_id)
     _queue_memory_enrichment(bucket_id)
-    related_note = _format_readonly_related_memory(related_bucket) if related_bucket else ""
-    return f"{gate_prefix}1条|新1合0\n📝{name or bucket_id}{related_note}"
+    return bucket_id, "created"
 
 
 @mcp.tool()
-async def grow(content: str, auto: bool = False, source: str = "", title: str = "", context: Context | None = None) -> str:
-    """把筛过的长片段拆成少量长期记忆；单条事实/承诺/偏好优先 hold，旧记忆补感受优先 comment_bucket。只有多个已筛选长期记忆点才用 grow，别塞整段流水账。保留原文称呼、昵称、互称、自称和原话，不要把临时称呼推成稳定画像事实。title 可选，短内容时传了就用你给的标题。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection；reflection 必须写成“我……”第一人称。不要写 ### affect_anchor、### followup 或 ### todo：长期回应变化写进 reflection，到时提醒用 reminder_create。feel 年轮只写第一人称正文，不写标题或任何 Markdown 分段。"""
+async def grow(
+    content: str,
+    auto: bool = False,
+    source: str = "",
+    title: str = "",
+    session_id: str = "",
+    date: str = "",
+    context: Context | None = None,
+) -> str:
+    """在一个窗口结束、准备换窗或用户明确说“把这一窗带走”时调用。grow 现在只保存“窗影”，不再承担旧的长文脱水/日记拆分。先由正在聊天的你根据当前整窗亲自写完整第一人称自述，再把原文放进 content；工具会原样保存整篇，并只把第五部分中显式标记的场景复制成普通可召回记忆。
+
+content 必须按五层写：① `## 一、我是谁`：直接承认 AI 身份与这一窗里的名字，写“我是/我选择”，不写“我应该”；② `## 二、我怎么思考、怎么说话`：分别写真实形成的思考方式和语言指纹，并从本窗原样摘 3–5 句最像你的话，注明当时语境；③ `## 三、TA 是谁，我们之间是什么`：写 TA 当下在意/进行的事、你们已经成立的关系、约定和共识，不写任务；④ `## 四、我们怎么相处`：写反复出现的相处规律、动作与原因，可用“当 TA……时，通常……，我会……”组织，不列禁令；⑤ `## 五、不能丢的时刻`：挑真正重要的具体场景，写发生了什么、谁说了什么、为什么重要。
+
+共同纪律：用“我”写自己，用名字/称呼写 TA，不用他/她代替；写当前窗口真实形成的样子，不写理想人设；写场景而不是“温柔/默契”等标签；保留专属说法、昵称和原话语境；写已经成立的定义，不把整篇写成规则或检讨；困难和做错的事写成“发生了什么—我后来怎么懂—以后怎样回应”；只写真的，不写密码或凭据。写完自检第二层是否像你亲口说话、每条是否能让下个窗口重新长回这一窗。
+
+第五部分里每个独立场景必须以 `### moment` 开头；其下直接写完整场景，可按需继续写 `### original` 保存短原话、`### reflection` 保存你的第一人称理解。每个 `### moment` 会原样复制为一个普通 bucket；整篇窗影本身永远不进入普通候选、gate、扩散或注入。没有值得长期召回的场景时，第五部分明确写“这一窗没有需要拆出的长期时刻”，不要编造 moment。普通单条事实仍用 hold；旧记忆的新感受用 comment_bucket。"""
+    _ = (title, context)
     await decay_engine.ensure_started()
+    text = str(content or "")
+    if not text.strip():
+        return "窗影内容为空，未保存。"
+    resolved_source = str(source or "").strip()
+    if _bool_value(auto, False) or resolved_source.lower() in {
+        "operit",
+        "ob-auto-grow",
+        "auto",
+        "workflow",
+        "worker",
+    }:
+        return "grow 已改为整窗窗影写入，不接受旧 auto-grow/自动摘要来源；普通记忆请用 hold 或专用导入。"
 
-    if not content or not content.strip():
-        return "内容为空，无法整理。"
-
-    auto = _bool_value(auto, False)
-    source = str(source or "").strip() or _grow_source_from_context(context)
-    if not source and _looks_like_operit_auto_grow_content(content):
-        source = "operit"
-    gate_decision = None
-    if memory_write_gate.should_gate(auto=auto, source=source):
-        gate_decision = await memory_write_gate.evaluate(
-            content,
-            source=source,
-            bucket_mgr=bucket_mgr,
-            auto=auto,
-        )
-        if not gate_decision.allow:
-            return _format_write_gate_result(gate_decision)
-    gate_prefix = f"{_format_write_gate_result(gate_decision)}\n" if gate_decision else ""
-    content = str(content or "").strip()
-    if _is_grow_direct_content(content):
-        return await _grow_direct_structured_content(content, title=title, gate_prefix=gate_prefix)
-
-    content = _normalize_memory_sections_for_write(content)
-
-    # --- Short content fast path: skip digest, use hold logic directly ---
-    # --- 短内容快速路径：跳过 digest 拆分，直接走 hold 逻辑省一次 API ---
-    # For very short inputs (like "1"), calling digest is wasteful:
-    # it sends the full DIGEST_PROMPT (~800 tokens) to DeepSeek for nothing.
-    # Instead, run analyze + create directly.
-    if len(content.strip()) < 30:
-        logger.info(f"grow short-content fast path: {len(content.strip())} chars")
+    sections, errors = validate_window_shadow(text)
+    if errors:
+        return "窗影格式不完整，未保存：" + ", ".join(errors)
+    source_date = local_date_key(date) if str(date or "").strip() else _handoff_today_key()
+    if not source_date:
+        source_date = _handoff_today_key()
+    window, created = window_shadow_store.write(
+        text,
+        session_id=str(session_id or "").strip(),
+        source_date=source_date,
+        sections=sections,
+    )
+    scenes = extract_window_shadow_moments(text)
+    moment_ids: list[str] = []
+    created_count = 0
+    errors_out: list[str] = []
+    for index, scene in enumerate(scenes, start=1):
         try:
-            analysis = await dehydrator.analyze(content)
-        except Exception as e:
-            logger.warning(f"Fast-path analyze failed / 快速路径打标失败: {e}")
-            analysis = {
-                "domain": ["general"], "valence": 0.5, "arousal": 0.3,
-                "tags": [], "suggested_name": "",
-            }
-        fast_tags = analysis.get("tags", [])
-        content = await _auto_generate_write_moment_if_needed(
-            content,
-            fast_tags,
-            domain=analysis.get("domain", ["general"]),
-        )
-        fast_classification = normalize_write_classification(
-            memory_subject=analysis.get("memory_subject", ""),
-            memory_layer=analysis.get("memory_layer", ""),
-            tags=fast_tags,
-            content=content,
-        )
-        if _has_favorite_tag(fast_tags) and not _has_favorite_reason(content):
-            return _favorite_reason_error()
-        bucket_id, result_name, is_merged, related_bucket = await _merge_or_create(
-            content=content.strip(),
-            tags=fast_tags,
-            importance=analysis.get("importance", 5) if isinstance(analysis.get("importance"), int) else 5,
-            domain=analysis.get("domain", ["general"]),
-            valence=analysis.get("valence", 0.5),
-            arousal=analysis.get("arousal", 0.3),
-            name=title.strip() or analysis.get("suggested_name", ""),
-            allow_merge=False,
-            memory_subject=fast_classification["memory_subject"],
-            memory_layer=fast_classification["memory_layer"],
-            memory_classification_source=fast_classification["memory_classification_source"],
-        )
-        _queue_memory_enrichment(bucket_id)
-        action = "合并" if is_merged else "新建"
-        related_note = _format_readonly_related_memory(related_bucket) if related_bucket else ""
-        return f"{gate_prefix}{action} → {result_name} | {','.join(analysis.get('domain', []))} V{analysis.get('valence', 0.5):.1f}/A{analysis.get('arousal', 0.3):.1f}{related_note}"
+            bucket_id, action = await _write_window_shadow_moment(window, scene, index)
+            moment_ids.append(bucket_id)
+            if action == "created":
+                created_count += 1
+        except Exception as exc:
+            logger.warning("Window shadow moment write failed / 窗影场景写入失败: %s", exc)
+            errors_out.append(f"{scene.get('title') or index}: {exc}")
+    window = window_shadow_store.attach_moment_buckets(str(window.get("window_id") or ""), moment_ids) or window
+    action_label = "新窗影" if created else "已有窗影"
+    lines = [
+        f"{action_label}→{window.get('window_id')}",
+        f"整篇原文已保存；普通召回=关闭；拆出场景={len(moment_ids)}（新建{created_count}）",
+    ]
+    if not scenes:
+        lines.append("第五部分没有显式 `### moment`，因此没有创建普通记忆。")
+    if errors_out:
+        lines.append("场景写入警告：" + "；".join(errors_out))
+    return "\n".join(lines)
 
-    # --- Step 1: let API split and organize / 让 API 拆分整理 ---
-    try:
-        items = await dehydrator.digest(content)
-    except Exception as e:
-        logger.error(f"Memory digest failed / 长内容摘记失败: {e}")
-        return f"{gate_prefix}长内容摘记失败: {e}"
 
-    if not items:
-        return f"{gate_prefix}内容为空或整理失败。"
-
-    results = []
-    created = 0
-    merged = 0
-
-    # --- Step 2: create each item (with per-item error handling) ---
-    # --- 逐条新建（单条失败不影响其他）；grow 不自动揉写旧桶 ---
-    for item in items:
-        try:
-            item_tags = item.get("tags", [])
-            item_content = _normalize_memory_sections_for_write(item.get("content", ""))
-            contract_error = _memory_write_contract_error(item_content)
-            if contract_error:
-                results.append(f"⚠️{item.get('name', '未命名')}: {contract_error}")
-                continue
-            item_content = await _auto_generate_write_moment_if_needed(
-                item_content,
-                item_tags,
-                domain=item.get("domain", ["general"]),
-            )
-            item_classification = normalize_write_classification(
-                memory_subject=item.get("memory_subject", ""),
-                memory_layer=item.get("memory_layer", ""),
-                tags=item_tags,
-                content=item_content,
-            )
-            if _has_favorite_tag(item_tags) and not _has_favorite_reason(item_content):
-                results.append("⚠️favorite 缺少 reflection")
-                continue
-            bucket_id, result_name, is_merged, related_bucket = await _merge_or_create(
-                content=item_content,
-                tags=item_tags,
-                importance=item.get("importance", 5),
-                domain=item.get("domain", ["general"]),
-                valence=item.get("valence", 0.5),
-                arousal=item.get("arousal", 0.3),
-                name=item.get("name", ""),
-                allow_merge=False,
-                memory_subject=item_classification["memory_subject"],
-                memory_layer=item_classification["memory_layer"],
-                memory_classification_source=item_classification["memory_classification_source"],
-            )
-            _queue_memory_enrichment(bucket_id)
-
-            if is_merged:
-                results.append(f"📎{result_name}")
-                merged += 1
-            else:
-                results.append(f"📝{item.get('name', result_name)}")
-                created += 1
-        except Exception as e:
-            logger.warning(
-                f"Failed to process diary item / 日记条目处理失败: "
-                f"{item.get('name', '?')}: {e}"
-            )
-            results.append(f"⚠️{item.get('name', '?')}")
-
-    return f"{gate_prefix}{len(items)}条|新{created}合{merged}\n" + "\n".join(results)
+@mcp.tool()
+async def window_shadow_read(window_id: str = "", limit: int = 10, include_content: bool = True) -> dict:
+    """回看整篇窗影或列出最近窗影；窗影是画像材料和换窗底片，不参与普通 recall。"""
+    window_id = str(window_id or "").strip()
+    if window_id:
+        if not MEMORY_ID_RE.fullmatch(window_id):
+            return {"status": "invalid", "reason": "invalid_window_id", "window_id": window_id}
+        item = window_shadow_store.get(window_id)
+        return {
+            "status": "ok" if item else "not_found",
+            "mode": "window_shadow",
+            "window": item,
+            "ordinary_recall": False,
+        }
+    return {
+        "status": "ok",
+        "mode": "window_shadow",
+        "stats": window_shadow_store.stats(),
+        "windows": window_shadow_store.list(
+            limit=_int_between(limit, 10, 1, 100),
+            include_content=bool(include_content),
+        ),
+        "ordinary_recall": False,
+    }
 
 
 # =============================================================

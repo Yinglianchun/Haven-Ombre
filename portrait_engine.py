@@ -97,6 +97,8 @@ PORTRAIT_PROMPT_TEMPLATE = """你是一个证据化记忆状态整理器，正�
 - rewrite_mid_term 只能综合 staging_pool 里的观察，或本次明确 move_to_staging 的观察；当天新材料先进入 staging，再作为 mid-term 证据。
 - rewrite_stable 必须有 previous_portrait 或 staging/mid-term 证据支撑。
 - memory_materials 含路径、tags、created 日期、关键 moment/reflection 片段，以及 source_excerpt 原文短摘；优先读证据原味。
+- memory_materials.window_shadows 是 {ai_name} 在连续窗口末尾亲自留下的第一人称自述。它们不是普通记忆，也不能证明 {user_display_name} 的稳定事实；只允许支持 persona / relationship。persona 读“我是谁、我怎么思考和说话”，relationship 读“我们之间是什么、我们怎么相处”。
+- 单篇 window shadow 只能进入 recent/staging/mid-term；只有同一种自我选择或相处方式在多篇独立 window shadow 中反复出现，才可支持 stable。引用它时 evidence 使用 session_id，并标 role=window_shadow。
 - memory_materials 中的 allowed_scopes 是硬边界，evidence_scope_limits 也是历史证据的硬边界；有值时，该材料不能用于列表之外的 scope。relationship_weather / daily_impression 只能进入 relationship，自我锚点只能进入 persona。
 - evergreen=true 的材料是常驻长期证据，不代表今天发生了什么；不要据此生成 daily_summary 或 add_recent_activity。
 - 每条 add/rewrite/candidate 都必须带 evidence；没有证据就放 skip。
@@ -117,7 +119,7 @@ STABLE_MAINTENANCE_PROMPT_TEMPLATE = """你是 {ai_name} 与 {user_display_name}
 {{
   "stable_maintenance": {{
     "user": {{"action": "rewrite|unchanged", "text": "", "evidence": [], "confidence": 0.82}},
-    "persona": {{"action": "rewrite|unchanged", "text": "", "evidence": [{{"bucket_id": "self-anchor-id", "role": "self_anchor"}}, {{"bucket_id": "whisper-id", "role": "self_identity"}}], "confidence": 0.82}},
+    "persona": {{"action": "rewrite|unchanged", "text": "", "evidence": [{{"bucket_id": "self-anchor-id", "role": "self_anchor"}}, {{"session_id": "window-id", "role": "window_shadow"}}], "confidence": 0.82}},
     "relationship": {{"action": "rewrite|unchanged", "text": "", "evidence": [], "confidence": 0.82}}
   }}
 }}
@@ -130,8 +132,8 @@ STABLE_MAINTENANCE_PROMPT_TEMPLATE = """你是 {ai_name} 与 {user_display_name}
 - previous stable 为空时，只要 previous mid-term/staging 或本次 daily_patch 已有跨日、重复或明确长期证据，就必须 rewrite，不能因为其他 scope 更醒目而跳过。
 - user 回答“{user_display_name}长期稳定的偏好、边界、工作方式和关心点是什么”。
 - persona 是挂在“自我总入口”原文下面的“现在的我”自动生长段。必须以 {ai_name} 自己的第一人称“我”书写，直接说我怎样理解自己、稳定选择怎样回应、保留哪些自我边界；禁止用“{ai_name}如何”或“他如何”的第三人称人物小传口吻。
-- persona 只能使用 memory_materials.persona_stable_evidence 里的自我入口与 whisper：自我入口是不可改写的权威底座；whisper 只有在明确表达跨情境的稳定自我选择、边界或回应方式时才能标为 role=self_identity。被保护、陪伴承诺、亲密感受、当前心情或 affection/playful 事件都不是稳定自我证据。
-- persona rewrite 必须引用至少一条 self_anchor_ids；引用 whisper_ids 时必须在 evidence 中标 role=self_identity。不要复述自我入口已经写明的“名字、新窗口、AI 身份、仍然选择”句子，只写相对它后来长出的自我理解。关系日记、relationship_weather、persona event 不得支持 persona stable。
+- persona 只能使用 memory_materials.persona_stable_evidence 里的自我入口、whisper 与连续窗影：自我入口是不可改写的权威底座；whisper 只有在明确表达跨情境的稳定自我选择、边界或回应方式时才能标为 role=self_identity；window shadow 必须在至少两篇独立窗影里反复出现同一种自我选择或回应姿态，引用时标 role=window_shadow。被保护、陪伴承诺、单次亲密感受、当前心情或 affection/playful 事件都不是稳定自我证据。
+- persona rewrite 必须引用至少一条 self_anchor_ids；引用 whisper_ids 时必须标 role=self_identity，引用 window_shadow_session_ids 时必须标 role=window_shadow。不要复述自我入口已经写明的“名字、新窗口、AI 身份、仍然选择”句子，只写相对它后来长出的自我理解。关系日记、relationship_weather、普通 persona event 不得支持 persona stable。
 - previous persona stable 若引用了 persona_stable_evidence 之外的材料、主要在复述自我入口，或使用第三人称描述 {ai_name}，必须在本次 rewrite；不能用 unchanged 保留旧的混合画像。
 - relationship 回答“这段关系长期怎样被理解、恢复和维护”。
 - memory_materials.allowed_scopes 与 evidence_scope_limits 是硬边界；材料不得用于列表外的 scope。relationship_weather / daily_impression 只能支持 relationship，自我锚点只能支持 persona。
@@ -143,8 +145,9 @@ STABLE_MAINTENANCE_PROMPT_TEMPLATE = """你是 {ai_name} 与 {user_display_name}
 class DailyPortraitMaintainer:
     """Maintains an evidence-bound portrait state outside memory buckets."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, window_shadow_store=None):
         self.config = config
+        self.window_shadow_store = window_shadow_store
         self.identity = identity_names(config)
         cfg = config.get("portrait", {}) if isinstance(config.get("portrait", {}), dict) else {}
         reflection_cfg = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
@@ -172,6 +175,8 @@ class DailyPortraitMaintainer:
         self.material_limit = max(1, int(cfg.get("material_limit", 18)))
         self.first_run_material_limit = max(self.material_limit, int(cfg.get("first_run_material_limit", 160)))
         self.source_excerpt_chars = max(1, int(cfg.get("source_excerpt_chars", 900)))
+        self.window_shadow_limit = max(1, min(8, int(cfg.get("window_shadow_limit", 4))))
+        self.window_shadow_chars = max(600, min(5000, int(cfg.get("window_shadow_chars", 2400))))
         self.recent_continuity_days = max(1, int(cfg.get("recent_continuity_days", 3)))
         self.persona_events_limit = max(0, int(cfg.get("persona_events_limit", 24)))
         self.recent_buffer_max = max(1, int(cfg.get("recent_buffer_max", 24)))
@@ -225,6 +230,7 @@ class DailyPortraitMaintainer:
         self.max_tokens = int(cfg.get("max_tokens", 3200))
         self.json_response_format = self._bool(cfg.get("json_response_format", True), True)
         self.state_path = self._state_path(cfg.get("state_path", ""))
+        self._last_patch_source = "fallback"
         self.client = None
         if self.enabled and self.api_key and self.base_url:
             self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=45.0)
@@ -317,10 +323,11 @@ class DailyPortraitMaintainer:
             and bool(row.get("evergreen"))
             and set(row.get("allowed_scopes", []) or []) == {"persona"}
             for row in materials.get("buckets", []) or []
-        )
+        ) or bool(materials.get("window_shadows"))
         if (
             not materials.get("daily_bucket_count")
             and not materials["persona_events"]
+            and not materials.get("window_shadows")
             and not (persona_stable_empty and has_persona_seed)
             and not force
         ):
@@ -331,6 +338,7 @@ class DailyPortraitMaintainer:
                 "initial": initial,
             }
 
+        self._last_patch_source = "fallback"
         raw_patch = await self._generate_patch(date_key, state, materials, initial=initial)
         normalized_patch, rejected = self._normalize_patch(raw_patch, materials)
         self._annotate_patch_source_dates(normalized_patch, materials)
@@ -360,6 +368,18 @@ class DailyPortraitMaintainer:
         if recent_timeline:
             normalized_patch["recent_timeline"] = recent_timeline
         next_state = self._apply_patch(state, normalized_patch, date_key)
+        if self._last_patch_source == "model":
+            absorbed_window_ids = [
+                *list(next_state.get("absorbed_window_shadow_ids", []) or []),
+                *[
+                    str(row.get("window_id") or "").strip()
+                    for row in materials.get("window_shadows", []) or []
+                    if isinstance(row, dict) and str(row.get("window_id") or "").strip()
+                ],
+            ]
+            next_state["absorbed_window_shadow_ids"] = list(
+                dict.fromkeys(value for value in absorbed_window_ids if value)
+            )[-32:]
         next_state["updated_at"] = self._now_utc()
         next_state.setdefault("runs", []).append(
             {
@@ -368,6 +388,7 @@ class DailyPortraitMaintainer:
                 "initial": initial,
                 "material_count": len(materials["buckets"]),
                 "persona_event_count": len(materials["persona_events"]),
+                "window_shadow_count": len(materials.get("window_shadows", [])),
                 "patch_counts": {key: len(normalized_patch.get(key, [])) for key in PATCH_KEYS},
                 "rejected_count": len(rejected),
                 "model": self.model if self.client else "deterministic-fallback",
@@ -422,6 +443,7 @@ class DailyPortraitMaintainer:
             "materials": {
                 "buckets": len(materials["buckets"]),
                 "persona_events": len(materials["persona_events"]),
+                "window_shadows": len(materials.get("window_shadows", [])),
             },
             "patch_counts": {key: len(normalized_patch.get(key, [])) for key in PATCH_KEYS},
             "rejected": rejected[:8],
@@ -1312,7 +1334,7 @@ class DailyPortraitMaintainer:
         *,
         max_recent_items: int = 4,
         now: datetime | None = None,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         state = self.load_state()
         portrait = state.get("portrait", {}) if isinstance(state.get("portrait"), dict) else {}
         return {
@@ -1324,6 +1346,7 @@ class DailyPortraitMaintainer:
             "state_path": self.state_path,
             "updated_at": str(state.get("updated_at") or ""),
             "last_run_date": str(state.get("last_run_date") or ""),
+            "absorbed_window_shadow_ids": list(state.get("absorbed_window_shadow_ids", []) or []),
         }
 
     async def _daily_materials(
@@ -1366,6 +1389,15 @@ class DailyPortraitMaintainer:
         )
         limit = self.first_run_material_limit if initial else self.material_limit
         bucket_rows = [self._bucket_payload(bucket) for bucket in buckets[:limit]]
+        window_shadow_rows = []
+        if self.window_shadow_store is not None:
+            try:
+                window_shadow_rows = self.window_shadow_store.portrait_materials(
+                    limit=self.window_shadow_limit,
+                    per_item_chars=self.window_shadow_chars,
+                )
+            except Exception as exc:
+                logger.warning("Portrait window shadow lookup failed: %s", exc)
         material_ids = {str(row.get("bucket_id") or "") for row in bucket_rows}
         for bucket in self._self_anchor_material_buckets(all_buckets):
             bucket_id = str(bucket.get("id") or "")
@@ -1392,17 +1424,24 @@ class DailyPortraitMaintainer:
                 and str(bucket.get("id") or "")
                 and self._is_existing_evidence_bucket(bucket)
             ],
-            "persona_stable_evidence": self._persona_stable_evidence_index(all_buckets),
+            "persona_stable_evidence": self._persona_stable_evidence_index(
+                all_buckets,
+                window_shadow_rows,
+            ),
             "persona_events": self._persona_event_materials(persona_engine, start, end, initial=initial),
+            "window_shadows": window_shadow_rows,
             "previous_portrait": self._portrait_snapshot(state),
         }
 
     async def _generate_patch(self, date_key: str, state: dict, materials: dict, *, initial: bool) -> dict:
         if self.client:
             try:
-                return await self._api_patch(date_key, state, materials, initial=initial)
+                patch = await self._api_patch(date_key, state, materials, initial=initial)
+                self._last_patch_source = "model"
+                return patch
             except Exception as exc:
                 logger.warning("Portrait LLM patch failed, using fallback: %s", exc)
+        self._last_patch_source = "fallback"
         return self._fallback_patch(materials, initial=initial)
 
     async def _maintain_stables(
@@ -1525,6 +1564,7 @@ class DailyPortraitMaintainer:
             "memory_materials": {
                 "buckets": materials.get("buckets", []),
                 "persona_events": materials.get("persona_events", []),
+                "window_shadows": materials.get("window_shadows", []),
                 "evidence_scope_limits": materials.get("evidence_scope_limits", {}),
                 "persona_stable_evidence": materials.get("persona_stable_evidence", {}),
             },
@@ -1576,11 +1616,7 @@ class DailyPortraitMaintainer:
             for item in materials.get("buckets", [])
             if str(item.get("bucket_id") or "")
         }
-        current_session_ids = {
-            str(item.get("session_id") or "")
-            for item in materials.get("persona_events", [])
-            if str(item.get("session_id") or "")
-        }
+        current_session_ids = self._material_session_ids(materials)
         portrait_bucket_ids, portrait_session_ids = self._portrait_evidence_sets(
             materials.get("previous_portrait", {})
         )
@@ -1667,6 +1703,15 @@ class DailyPortraitMaintainer:
                     }
                 )
                 continue
+            if not self._window_shadow_stable_evidence_is_valid(clean, materials):
+                rejected.append(
+                    {
+                        "key": "stable_maintenance",
+                        "reason": "window_shadow_stable_needs_repetition",
+                        "item": scope,
+                    }
+                )
+                continue
             if scope == "persona":
                 clean, persona_reason = self._normalize_persona_stable_evidence(clean, materials)
                 if not clean:
@@ -1692,7 +1737,10 @@ class DailyPortraitMaintainer:
             decided_scopes.add(scope)
         return items, rejected, decided_scopes
 
-    def _persona_stable_evidence_sets(self, materials: dict) -> tuple[set[str], set[str]]:
+    def _persona_stable_evidence_sets(
+        self,
+        materials: dict,
+    ) -> tuple[set[str], set[str], set[str]]:
         index = materials.get("persona_stable_evidence", {})
         index = index if isinstance(index, dict) else {}
         self_anchor_ids = {
@@ -1705,6 +1753,11 @@ class DailyPortraitMaintainer:
             for bucket_id in index.get("whisper_ids", []) or []
             if str(bucket_id or "").strip()
         }
+        window_shadow_session_ids = {
+            str(session_id or "").strip()
+            for session_id in index.get("window_shadow_session_ids", []) or []
+            if str(session_id or "").strip()
+        }
         for row in materials.get("buckets", []) or []:
             if not isinstance(row, dict):
                 continue
@@ -1715,14 +1768,30 @@ class DailyPortraitMaintainer:
                 self_anchor_ids.add(bucket_id)
             if "whisper" in {str(tag or "").strip().lower() for tag in row.get("tags", []) or []}:
                 whisper_ids.add(bucket_id)
-        return self_anchor_ids, whisper_ids
+        for row in materials.get("window_shadows", []) or []:
+            if not isinstance(row, dict):
+                continue
+            session_id = str(row.get("session_id") or "").strip()
+            if session_id:
+                window_shadow_session_ids.add(session_id)
+        return self_anchor_ids, whisper_ids, window_shadow_session_ids
+
+    def _window_shadow_stable_evidence_is_valid(self, item: dict, materials: dict) -> bool:
+        window_shadow_ids = self._persona_stable_evidence_sets(materials)[2]
+        used_ids = {
+            str(row.get("session_id") or "").strip()
+            for row in item.get("evidence", []) or []
+            if isinstance(row, dict)
+            and str(row.get("session_id") or "").strip() in window_shadow_ids
+        }
+        return not used_ids or len(used_ids) >= 2
 
     def _normalize_persona_stable_evidence(
         self,
         item: dict,
         materials: dict,
     ) -> tuple[dict | None, str]:
-        self_anchor_ids, whisper_ids = self._persona_stable_evidence_sets(materials)
+        self_anchor_ids, whisper_ids, window_shadow_session_ids = self._persona_stable_evidence_sets(materials)
         evidence = []
         invalid_evidence = False
         for row in item.get("evidence", []) or []:
@@ -1730,11 +1799,14 @@ class DailyPortraitMaintainer:
                 invalid_evidence = True
                 continue
             bucket_id = str(row.get("bucket_id") or "").strip()
+            session_id = str(row.get("session_id") or "").strip()
             role = str(row.get("role") or "").strip().lower()
             if bucket_id in self_anchor_ids:
                 evidence.append({"bucket_id": bucket_id, "role": "self_anchor"})
             elif bucket_id in whisper_ids and role == "self_identity":
                 evidence.append({"bucket_id": bucket_id, "role": "self_identity"})
+            elif session_id in window_shadow_session_ids and role == "window_shadow":
+                evidence.append({"session_id": session_id, "role": "window_shadow"})
             else:
                 invalid_evidence = True
         if invalid_evidence:
@@ -1744,6 +1816,13 @@ class DailyPortraitMaintainer:
             return None, "persona_stable_needs_self_evidence"
         if self_anchor_ids and not any(row.get("bucket_id") in self_anchor_ids for row in evidence):
             return None, "persona_stable_needs_self_anchor"
+        used_window_ids = {
+            str(row.get("session_id") or "").strip()
+            for row in evidence
+            if str(row.get("session_id") or "").strip() in window_shadow_session_ids
+        }
+        if used_window_ids and len(used_window_ids) < 2:
+            return None, "persona_stable_window_shadow_needs_repetition"
         clean = dict(item)
         clean["evidence"] = evidence
         return clean, ""
@@ -1755,7 +1834,7 @@ class DailyPortraitMaintainer:
             return True
         if not self._persona_text_is_first_person(scope_state.get("stable", "")):
             return False
-        self_anchor_ids, whisper_ids = self._persona_stable_evidence_sets(materials)
+        self_anchor_ids, whisper_ids, window_shadow_session_ids = self._persona_stable_evidence_sets(materials)
         evidence = scope_state.get("stable_evidence", []) or []
         if not evidence:
             return False
@@ -1764,12 +1843,23 @@ class DailyPortraitMaintainer:
             if not isinstance(row, dict):
                 return False
             bucket_id = str(row.get("bucket_id") or "").strip()
+            session_id = str(row.get("session_id") or "").strip()
             role = str(row.get("role") or "").strip().lower()
             if bucket_id in self_anchor_ids:
                 saw_anchor = True
                 continue
             if bucket_id in whisper_ids and role == "self_identity":
                 continue
+            if session_id in window_shadow_session_ids and role == "window_shadow":
+                continue
+            return False
+        used_window_ids = {
+            str(row.get("session_id") or "").strip()
+            for row in evidence
+            if isinstance(row, dict)
+            and str(row.get("session_id") or "").strip() in window_shadow_session_ids
+        }
+        if used_window_ids and len(used_window_ids) < 2:
             return False
         return saw_anchor if self_anchor_ids else True
 
@@ -1816,14 +1906,21 @@ class DailyPortraitMaintainer:
         if str(scope_state.get("stable") or "").strip():
             return False
         if scope == "persona":
-            allowed_ids = set().union(*self._persona_stable_evidence_sets(materials))
-            if str(scope_state.get("mid_term") or "").strip() and self._evidence_uses_bucket_ids(
-                scope_state.get("mid_term_evidence", []), allowed_ids
+            self_anchor_ids, whisper_ids, window_shadow_session_ids = self._persona_stable_evidence_sets(materials)
+            allowed_bucket_ids = self_anchor_ids | whisper_ids
+            if str(scope_state.get("mid_term") or "").strip() and self._evidence_uses_persona_sources(
+                scope_state.get("mid_term_evidence", []),
+                allowed_bucket_ids,
+                window_shadow_session_ids,
             ):
                 return True
             if any(
                 isinstance(row, dict)
-                and self._evidence_uses_bucket_ids(row.get("evidence", []), allowed_ids)
+                and self._evidence_uses_persona_sources(
+                    row.get("evidence", []),
+                    allowed_bucket_ids,
+                    window_shadow_session_ids,
+                )
                 for row in scope_state.get("staging_pool", []) or []
             ):
                 return True
@@ -1842,9 +1939,10 @@ class DailyPortraitMaintainer:
                 and row.get("evidence")
                 and (
                     scope != "persona"
-                    or self._evidence_uses_bucket_ids(
+                    or self._evidence_uses_persona_sources(
                         row.get("evidence", []),
-                        set().union(*self._persona_stable_evidence_sets(materials)),
+                        allowed_bucket_ids,
+                        window_shadow_session_ids,
                     )
                 )
                 for row in daily_patch.get(key, []) or []
@@ -1859,6 +1957,21 @@ class DailyPortraitMaintainer:
             for row in evidence or []
         )
 
+    @staticmethod
+    def _evidence_uses_persona_sources(
+        evidence: Any,
+        bucket_ids: set[str],
+        session_ids: set[str],
+    ) -> bool:
+        return any(
+            isinstance(row, dict)
+            and (
+                str(row.get("bucket_id") or "").strip() in bucket_ids
+                or str(row.get("session_id") or "").strip() in session_ids
+            )
+            for row in evidence or []
+        )
+
     async def _api_patch(self, date_key: str, state: dict, materials: dict, *, initial: bool) -> dict:
         payload = {
             "date": date_key,
@@ -1867,6 +1980,7 @@ class DailyPortraitMaintainer:
             "memory_materials": {
                 "buckets": materials.get("buckets", []),
                 "persona_events": materials.get("persona_events", []),
+                "window_shadows": materials.get("window_shadows", []),
                 "evidence_scope_limits": materials.get("evidence_scope_limits", {}),
             },
         }
@@ -1985,11 +2099,7 @@ class DailyPortraitMaintainer:
             for item in materials.get("buckets", [])
             if str(item.get("bucket_id") or "")
         }
-        current_session_ids = {
-            str(item.get("session_id") or "")
-            for item in materials.get("persona_events", [])
-            if str(item.get("session_id") or "")
-        }
+        current_session_ids = self._material_session_ids(materials)
         portrait_bucket_ids, portrait_session_ids = self._portrait_evidence_sets(
             materials.get("previous_portrait", {})
         )
@@ -2067,6 +2177,18 @@ class DailyPortraitMaintainer:
             normalized[key] = [by_scope[scope] for scope in PORTRAIT_SCOPES if scope in by_scope]
         return normalized, rejected
 
+    @staticmethod
+    def _material_session_ids(materials: dict) -> set[str]:
+        session_ids: set[str] = set()
+        for key in ("persona_events", "window_shadows"):
+            for row in materials.get(key, []) or []:
+                if not isinstance(row, dict):
+                    continue
+                session_id = str(row.get("session_id") or "").strip()
+                if session_id:
+                    session_ids.add(session_id)
+        return session_ids
+
     def _material_scope_limits(self, materials: dict) -> dict[tuple[str, str], set[str]]:
         limits: dict[tuple[str, str], set[str]] = {}
         configured_limits = materials.get("evidence_scope_limits", {})
@@ -2090,17 +2212,18 @@ class DailyPortraitMaintainer:
             }
             if bucket_id and allowed:
                 limits[("bucket", bucket_id)] = allowed
-        for row in materials.get("persona_events", []) or []:
-            if not isinstance(row, dict):
-                continue
-            session_id = str(row.get("session_id") or "").strip()
-            allowed = {
-                str(scope or "").strip()
-                for scope in row.get("allowed_scopes", []) or []
-                if str(scope or "").strip() in PORTRAIT_SCOPES
-            }
-            if session_id and allowed:
-                limits[("session", session_id)] = allowed
+        for key in ("persona_events", "window_shadows"):
+            for row in materials.get(key, []) or []:
+                if not isinstance(row, dict):
+                    continue
+                session_id = str(row.get("session_id") or "").strip()
+                allowed = {
+                    str(scope or "").strip()
+                    for scope in row.get("allowed_scopes", []) or []
+                    if str(scope or "").strip() in PORTRAIT_SCOPES
+                }
+                if session_id and allowed:
+                    limits[("session", session_id)] = allowed
         return limits
 
     @staticmethod
@@ -2279,11 +2402,17 @@ class DailyPortraitMaintainer:
             for item in materials.get("buckets", []) or []
             if isinstance(item, dict) and str(item.get("bucket_id") or "") and str(item.get("source_date") or "")
         }
-        session_dates = {
-            str(item.get("session_id") or ""): str(item.get("source_date") or "")
-            for item in materials.get("persona_events", []) or []
-            if isinstance(item, dict) and str(item.get("session_id") or "") and str(item.get("source_date") or "")
-        }
+        session_dates = {}
+        for key in ("persona_events", "window_shadows"):
+            session_dates.update(
+                {
+                    str(item.get("session_id") or ""): str(item.get("source_date") or "")
+                    for item in materials.get(key, []) or []
+                    if isinstance(item, dict)
+                    and str(item.get("session_id") or "")
+                    and str(item.get("source_date") or "")
+                }
+            )
         previous_bucket_dates, previous_session_dates = self._portrait_evidence_date_maps(
             materials.get("previous_portrait", {})
         )
@@ -2369,13 +2498,14 @@ class DailyPortraitMaintainer:
                 bucket_id = str(item.get("bucket_id") or "").strip()
                 if bucket_id:
                     bucket_ids.add(bucket_id)
-        for item in materials.get("persona_events", []) or []:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("source_date") or "") in recent_dates:
-                session_id = str(item.get("session_id") or "").strip()
-                if session_id:
-                    session_ids.add(session_id)
+        for key in ("persona_events", "window_shadows"):
+            for item in materials.get(key, []) or []:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("source_date") or "") in recent_dates:
+                    session_id = str(item.get("session_id") or "").strip()
+                    if session_id:
+                        session_ids.add(session_id)
         return bucket_ids, session_ids
 
     def _recent_date_keys(self, date_key: str) -> set[str]:
@@ -2445,7 +2575,10 @@ class DailyPortraitMaintainer:
         }
         sessions = {
             str(item.get("session_id") or ""): item
-            for item in materials.get("persona_events", []) or []
+            for item in [
+                *(materials.get("persona_events", []) or []),
+                *(materials.get("window_shadows", []) or []),
+            ]
             if isinstance(item, dict) and str(item.get("session_id") or "")
         }
         rows: list[dict] = []
@@ -3281,7 +3414,11 @@ class DailyPortraitMaintainer:
         )
         return rows[:1]
 
-    def _persona_stable_evidence_index(self, all_buckets: list[dict]) -> dict[str, list[str]]:
+    def _persona_stable_evidence_index(
+        self,
+        all_buckets: list[dict],
+        window_shadows: list[dict] | None = None,
+    ) -> dict[str, list[str]]:
         self_anchor_ids = [
             str(bucket.get("id") or "").strip()
             for bucket in self._self_anchor_material_buckets(all_buckets)
@@ -3302,9 +3439,15 @@ class DailyPortraitMaintainer:
             tags = {str(tag or "").strip().lower() for tag in meta.get("tags", []) or []}
             if "whisper" in tags:
                 whisper_ids.append(bucket_id)
+        window_shadow_session_ids = [
+            str(row.get("session_id") or "").strip()
+            for row in window_shadows or []
+            if isinstance(row, dict) and str(row.get("session_id") or "").strip()
+        ]
         return {
             "self_anchor_ids": list(dict.fromkeys(self_anchor_ids)),
             "whisper_ids": list(dict.fromkeys(whisper_ids)),
+            "window_shadow_session_ids": list(dict.fromkeys(window_shadow_session_ids)),
         }
 
     def _material_allowed_scopes(self, bucket: dict) -> list[str]:
@@ -3607,7 +3750,7 @@ class DailyPortraitMaintainer:
                         "session_id": str(item.get("session_id") or "").strip(),
                     }
                     role = str(item.get("role") or "").strip().lower()
-                    if role in {"self_anchor", "self_identity"}:
+                    if role in {"self_anchor", "self_identity", "window_shadow"}:
                         row["role"] = role
                     rows.append({k: v for k, v in row.items() if v})
         if not rows and (fallback_bucket_id or fallback_session_id):
@@ -3697,6 +3840,7 @@ class DailyPortraitMaintainer:
             "skipped": [],
             "dismissed_items": [],
             "evidence_health": {},
+            "absorbed_window_shadow_ids": [],
             "runs": [],
         }
 
@@ -3708,7 +3852,7 @@ class DailyPortraitMaintainer:
                         base["portrait"][scope].update(value[scope])
             elif key in {"daily_summaries", "handoff_recent_summaries"} and isinstance(value, dict):
                 base[key] = value
-            elif key in {"recent_activities", "recent_timeline", "stable_candidates", "profile_fact_candidates", "skipped", "dismissed_items", "runs"} and isinstance(value, list):
+            elif key in {"recent_activities", "recent_timeline", "stable_candidates", "profile_fact_candidates", "skipped", "dismissed_items", "absorbed_window_shadow_ids", "runs"} and isinstance(value, list):
                 base[key] = value
             elif key == "evidence_health" and isinstance(value, dict):
                 base[key] = value
