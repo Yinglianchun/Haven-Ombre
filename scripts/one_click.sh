@@ -1529,6 +1529,7 @@ safe_backup_label() {
 
 backup_current_deployment() {
   local label stamp archive_name archive tmp_archive
+  local service config_bind_source env_bind_source
   label="$(safe_backup_label "${1:-manual}")"
   stamp="$(date +%Y%m%d_%H%M%S)"
   archive_name="ombre_backup_${label}_${stamp}.tar.gz"
@@ -1553,13 +1554,23 @@ backup_current_deployment() {
     }
     printf '已写入备份：%s\n' "${archive}"
   else
+    service="${OMBRE_SERVICE:-ombre-brain}"
     archive="/state/backups/${archive_name}"
     run_target_shell "set -e; mkdir -p /state/backups; items=''; for item in /data /state /app/config.yaml /app/.env; do [ -e \"\$item\" ] && items=\"\$items \$item\"; done; if [ -z \"\$items\" ]; then echo '没有找到可备份的 /data /state /app/config.yaml /app/.env'; exit 1; fi; tar --exclude=/state/backups --exclude=state/backups -czf '/tmp/${archive_name}' \$items; cp '/tmp/${archive_name}' '${archive}'" || return 1
-    backup_file ".env"
-    backup_file "config.yaml"
+    if env_bind_source="$(ombre_compose_bind_source "${COMPOSE_FILE}" "${service}" "/app/.env")"; then
+      backup_file "${env_bind_source}"
+    else
+      backup_file ".env"
+    fi
+    if config_bind_source="$(ombre_compose_bind_source "${COMPOSE_FILE}" "${service}" "/app/config.yaml")"; then
+      backup_file "${config_bind_source}"
+    else
+      backup_file "config.yaml"
+    fi
     backup_file "${COMPOSE_FILE}"
     printf '已写入容器数据备份：%s\n' "${archive}"
-    printf '如果当前目录有 .env / config.yaml / compose，也已在宿主机备份。\n'
+    printf '宿主机中存在的实际 .env / config.yaml 挂载源和 compose 也已分别备份。\n'
+    ombre_validate_compose_file_bind "${COMPOSE_FILE}" "${service}" "/app/config.yaml" "config.yaml" || return 1
   fi
 }
 

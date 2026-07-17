@@ -33,6 +33,95 @@ ombre_compose() {
   fi
 }
 
+ombre_resolve_bind_source() {
+  local compose_file="${1}"
+  local source="${2}"
+  local compose_dir
+
+  case "${source}" in
+    /*) ;;
+    '~/'*) source="${HOME}/${source#\~/}" ;;
+    *'$'*)
+      echo "Bind source contains an unresolved variable: ${source}" >&2
+      return 1
+      ;;
+    *)
+      compose_dir="$(cd "$(dirname "${compose_file}")" && pwd -P)"
+      source="${compose_dir}/${source#./}"
+      ;;
+  esac
+
+  if command -v realpath >/dev/null 2>&1; then
+    realpath -m -- "${source}"
+  else
+    printf '%s\n' "${source}"
+  fi
+}
+
+ombre_compose_bind_source() {
+  local compose_file="${1}"
+  local service="${2}"
+  local destination="${3}"
+  local container_id source entry marker
+
+  container_id="$(ombre_compose -f "${compose_file}" ps -q "${service}" 2>/dev/null | head -n 1 || true)"
+  if [[ -n "${container_id}" ]]; then
+    source="$(docker inspect --format "{{range .Mounts}}{{if and (eq .Type \"bind\") (eq .Destination \"${destination}\")}}{{println .Source}}{{end}}{{end}}" "${container_id}" 2>/dev/null | head -n 1 || true)"
+    if [[ -n "${source}" ]]; then
+      ombre_resolve_bind_source "${compose_file}" "${source}"
+      return
+    fi
+  fi
+
+  entry="$(awk -v target="${destination}" '
+    /^[[:space:]]*-[[:space:]]*/ && index($0, ":" target) {
+      line = $0
+      sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+      if ((substr(line, 1, 1) == "\"" && substr(line, length(line), 1) == "\"") ||
+          (substr(line, 1, 1) == "\047" && substr(line, length(line), 1) == "\047")) {
+        line = substr(line, 2, length(line) - 2)
+      }
+      print line
+      exit
+    }
+  ' "${compose_file}")"
+  [[ -n "${entry}" ]] || return 1
+
+  marker=":${destination}"
+  source="${entry%%${marker}*}"
+  [[ -n "${source}" ]] || return 1
+  case "${source}" in
+    /*|./*|../*|'~/'*|*'$'*) ;;
+    *) return 1 ;;
+  esac
+  ombre_resolve_bind_source "${compose_file}" "${source}"
+}
+
+ombre_validate_compose_file_bind() {
+  local compose_file="${1}"
+  local service="${2}"
+  local destination="${3}"
+  local label="${4:-${destination}}"
+  local source
+
+  if ! source="$(ombre_compose_bind_source "${compose_file}" "${service}" "${destination}")"; then
+    printf '未发现 %s 的宿主机文件挂载，跳过该项检查。\n' "${label}"
+    return 0
+  fi
+
+  printf '%s 挂载源：%s\n' "${label}" "${source}"
+  if [[ ! -e "${source}" ]]; then
+    printf 'ERROR %s 挂载源不存在：%s\n' "${label}" "${source}" >&2
+    printf '为避免 Docker 把缺失文件自动创建成目录，已停止部署。请先恢复该文件。\n' >&2
+    return 1
+  fi
+  if [[ ! -f "${source}" ]]; then
+    printf 'ERROR %s 挂载源不是普通文件：%s\n' "${label}" "${source}" >&2
+    printf '为避免继续使用 Docker 自动创建的同名目录，已停止部署。请先恢复该文件。\n' >&2
+    return 1
+  fi
+}
+
 ombre_default_health_url() {
   local compose_file="${1}"
   case "${compose_file}" in

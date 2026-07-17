@@ -17,6 +17,9 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   ombre_update_git_checkout
 fi
 
+BRAIN_SERVICE="${OMBRE_SERVICE:-ombre-brain}"
+ombre_validate_compose_file_bind "${COMPOSE_FILE}" "${BRAIN_SERVICE}" "/app/config.yaml" "config.yaml"
+
 echo "Update containers..."
 if grep -Eq '^[[:space:]]*build:' "${COMPOSE_FILE}"; then
   ombre_compose -f "${COMPOSE_FILE}" up -d --build --remove-orphans
