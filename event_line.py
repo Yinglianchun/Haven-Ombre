@@ -21,6 +21,8 @@ logger = logging.getLogger("ombre_brain.event_line")
 BJ = timezone(timedelta(hours=8))
 MAX_ENTRIES_PER_DAY = 3
 STALE_DAYS = 1
+# prepare_payload 可每轮调用 sync()；跨自然日或间隔到期才重写缓存区，避免每轮刷坏 prompt cache
+REFRESH_INTERVAL_HOURS = 2
 
 
 def _bj_now() -> datetime:
@@ -81,7 +83,7 @@ class EventLine:
             }
         )
         self._save(data)
-        self.sync()
+        self.sync(force=True)
         logger.info("EventLine created | id=%s title=%s", event_id, title)
         return event_id
 
@@ -104,7 +106,7 @@ class EventLine:
                 )
                 ev["last_updated"] = today
                 self._save(data)
-                self.sync()
+                self.sync(force=True)
                 logger.info("EventLine updated | id=%s", event_id)
                 return True, ""
         return False, "event_id 不存在"
@@ -125,7 +127,7 @@ class EventLine:
             return None
         data["events"] = remaining
         self._save(data)
-        self.sync()
+        self.sync(force=True)
         logger.info("EventLine closed | id=%s reason=%s", event_id, reason)
         return closed
 
@@ -144,7 +146,7 @@ class EventLine:
             if ev.get("id") == event_id:
                 ev["title"] = str(title or "").strip()[:60] or ev.get("title") or "未命名事件"
                 self._save(data)
-                self.sync()
+                self.sync(force=True)
                 return True, ""
         return False, "event_id 不存在"
 
@@ -178,7 +180,7 @@ class EventLine:
                 default=ev.get("last_updated") or _bj_now().strftime("%Y-%m-%d"),
             )
             self._save(data)
-            self.sync()
+            self.sync(force=True)
             return True, ""
         return False, "event_id 不存在"
 
@@ -195,7 +197,7 @@ class EventLine:
             if entries:
                 ev["last_updated"] = max(str(e.get("date") or "") for e in entries)
             self._save(data)
-            self.sync()
+            self.sync(force=True)
             return True, ""
         return False, "event_id 不存在"
 
@@ -206,7 +208,7 @@ class EventLine:
         if len(data["events"]) == before:
             return False
         self._save(data)
-        self.sync()
+        self.sync(force=True)
         logger.info("EventLine deleted | id=%s", event_id)
         return True
 
@@ -245,7 +247,30 @@ class EventLine:
             )
         return "\n".join(lines)
 
-    def sync(self) -> None:
+    def sync(self, force: bool = False) -> None:
+        """
+        跨北京自然日或每 REFRESH_INTERVAL_HOURS 小时刷新一次写入缓存区；
+        force=True（创建/追加/关闭等）立即刷新。
+        非强制调用很轻量，可在 prepare_payload 每轮调用，以便过期事件打上 ⚠ 提醒。
+        """
+        data = self._load()
+        if not force:
+            last_refresh = data.get("last_refresh", "")
+            if last_refresh:
+                try:
+                    last_dt = datetime.fromisoformat(last_refresh)
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=BJ)
+                    now = _bj_now()
+                    # 跨日必须刷新（stale 按日历日判定）
+                    if last_dt.astimezone(BJ).date() == now.date():
+                        elapsed_h = (now - last_dt).total_seconds() / 3600
+                        if elapsed_h < REFRESH_INTERVAL_HOURS:
+                            return
+                except Exception:
+                    pass
+        data["last_refresh"] = _bj_now().isoformat(timespec="seconds")
+        self._save(data)
         cache_activity_zone.update_block(
             self._persona_file, "EVENT_LINE", self.format_section()
         )
