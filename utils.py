@@ -941,15 +941,25 @@ def bucket_text_for_embedding(bucket: dict) -> str:
     if not isinstance(meta, dict):
         meta = {}
 
+    # A Scene vector represents only the verbatim experience. Title and cues
+    # remain sparse lookup fields and must not pull the semantic vector away
+    # from scene.content.  Do not run stored Scene prose through recall display
+    # cleanup: even removing Obsidian brackets would stop this from being the
+    # exact authored text.  Only old heading-wrapped Scenes keep their read
+    # compatibility cleanup.
+    if str(meta.get("memory_value_source") or "") == "authored_scene":
+        raw_body = str(bucket.get("content") or "")
+        if re.match(
+            r"\A\s{0,3}#{2,6}\s+(?:scene|场景)(?:\s*[:：|｜-]\s*[^\n]*)?\s*(?:\r?\n)+",
+            raw_body,
+            flags=re.IGNORECASE,
+        ):
+            return _strip_legacy_scene_wrapper(raw_body)
+        return raw_body
+
     title = strip_wikilinks(str(meta.get("name") or "")).strip()
     scene_cues = normalize_scene_cues(meta.get("scene_cues"))
     body = bucket_content_for_recall(bucket)
-
-    # A Scene vector represents only the verbatim experience. Title and cues
-    # remain sparse lookup fields and must not pull the semantic vector away
-    # from scene.content.
-    if str(meta.get("memory_value_source") or "") == "authored_scene":
-        return body
 
     parts = []
     if title:
