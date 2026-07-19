@@ -376,7 +376,7 @@ gateway:
   date_persona_trace_include_daily: true
   recalled_memory_budget: 900
   direct_render_mode: auto   # auto | compact | full; direct/recalled display shape
-  retrieval_mode: bucket      # default: direct Scene recall; graph remains an explicit experiment
+  retrieval_mode: graph       # default: direct Scene recall plus bounded Scene-edge diffusion
   operit_context_rewrite_enabled: false # Operit-only text turn cleanup: split stable/activity attachment context before forwarding
   bucket_list_cache_ttl_seconds: 300 # cache active bucket list inside Gateway; 0 disables
   portrait_memory_enabled: true  # read-only stable portrait cache from profile_fact by default

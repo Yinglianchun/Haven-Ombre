@@ -599,7 +599,7 @@ class GatewayService:
             self.gateway_cfg.get("direct_render_mode", "auto")
         )
         self.retrieval_mode = self._normalize_retrieval_mode(
-            self.gateway_cfg.get("retrieval_mode", "bucket")
+            self.gateway_cfg.get("retrieval_mode", "graph")
         )
         self.relationship_weather_budget = int(self.gateway_cfg.get("relationship_weather_budget", 220))
         self.relationship_weather_include_weekly = bool(
@@ -8843,8 +8843,8 @@ class GatewayService:
     def _representative_moment(self, moments: list[dict]) -> dict | None:
         for section in (
             "scene",
-            "body",
             "original",
+            "body",
             "moment",
             "fact",
             "evidence_context",
@@ -9956,20 +9956,46 @@ class GatewayService:
                 if moment_id:
                     seen_candidate_ids.add(moment_id)
         explicit_lookup = self._query_explicitly_requests_caution_memory(query)
-        candidates = [
+        admitted_bucket_ids = set(selected_bucket_ids)
+        eligible_candidates = [
             moment for moment in candidates
             if str(moment.get("bucket_id") or "") in eligible_ids
-            and can_moment_be_direct_seed(moment, explicit_lookup=explicit_lookup)
         ]
+        non_direct_candidates = []
+        candidates = []
+        for moment in eligible_candidates:
+            if can_moment_be_direct_seed(moment, explicit_lookup=explicit_lookup):
+                candidates.append(moment)
+                continue
+            item = dict(moment)
+            bucket_id = str(item.get("bucket_id") or "")
+            item = self._moment_with_bucket_recall_signal(
+                item,
+                candidate_bucket_signals.get(bucket_id),
+            )
+            if bucket_id in admitted_bucket_ids:
+                item["admission_reason"] = "context_only_not_direct_seed"
+                item["recall_policy_debug"] = {
+                    "bucket_id": bucket_id,
+                    "bucket_admitted": True,
+                    "direct_seed_eligible": False,
+                    "auto": True,
+                }
+            else:
+                self._admit_moment_for_recall(
+                    query,
+                    item,
+                    admitted_bucket_ids=admitted_bucket_ids,
+                )
+            non_direct_candidates.append(item)
         candidates = self._apply_relevance_to_moment_candidates(query, candidates)
         self._add_timing_ms(timing_debug, "moment.filter_relevance", stage_started_at)
         stage_started_at = time.perf_counter()
         candidates = await self._rerank_moment_candidates(query, candidates)
         self._add_timing_ms(timing_debug, "moment.rerank_candidates", stage_started_at)
         stage_started_at = time.perf_counter()
-        admitted_bucket_ids = set(selected_bucket_ids)
         admitted_candidates = []
-        suppressed_candidates = []
+        suppressed_candidates = non_direct_candidates
         for moment in candidates:
             item = dict(moment)
             bucket_id = str(item.get("bucket_id") or "")
@@ -10890,6 +10916,13 @@ class GatewayService:
         limit: int = 1,
     ) -> list[dict]:
         if limit <= 0 or not isinstance(seed, dict):
+            return []
+        query_lower = str(query_text or "").lower()
+        explicit_year_ring_lookup = any(
+            marker in query_lower
+            for marker in ("年轮", "后来", "之后怎么看", "现在怎么看", "重新看", "再看", "later")
+        )
+        if not explicit_year_ring_lookup and str(seed.get("section") or "") != "scene":
             return []
         bucket_id = str(seed.get("bucket_id") or "")
         seed_id = str(seed.get("moment_id") or "")
@@ -16149,6 +16182,11 @@ class GatewayService:
         text = str(query or "").strip()
         if not text or self.inject_max_cards <= 0:
             return list(selected_buckets or []), []
+        text_lower = text.lower()
+        explicit_year_ring_lookup = any(
+            marker in text_lower
+            for marker in ("年轮", "后来", "之后怎么看", "现在怎么看", "重新看", "再看", "later")
+        )
         generic_keys = {
             "后来",
             "后来呢",
@@ -16177,6 +16215,8 @@ class GatewayService:
         candidates: list[tuple[float, dict, dict]] = []
         for bucket in all_buckets or []:
             if not isinstance(bucket, dict) or self._is_profile_fact_bucket(bucket):
+                continue
+            if not explicit_year_ring_lookup and not self._is_canonical_scene_bucket(bucket):
                 continue
             if self._is_self_anchor_recall_excluded_bucket(bucket):
                 continue

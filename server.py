@@ -4956,8 +4956,8 @@ def _related_recallable_moments(moments: list[dict], *, explicit_lookup: bool = 
 def _representative_moment(moments: list[dict]) -> dict | None:
     for section in (
         "scene",
-        "body",
         "original",
+        "body",
         "moment",
         "fact",
         "evidence_context",
@@ -5110,6 +5110,13 @@ def _format_direct_moment(seed: dict, grouped: dict[str, list[dict]], token_budg
 
 def _matching_year_ring(bucket: dict, query_text: str) -> dict | None:
     """Select one attached annotation; never turn it into a standalone seed."""
+    query = str(query_text or "").lower()
+    explicit_year_ring_lookup = any(
+        marker in query
+        for marker in ("年轮", "后来", "之后怎么看", "现在怎么看", "重新看", "再看", "later")
+    )
+    if not explicit_year_ring_lookup and not _is_canonical_scene_bucket(bucket):
+        return None
     comments = [
         moment
         for moment in parse_bucket_moments(bucket, _recall_relevance_options())
@@ -5128,8 +5135,7 @@ def _matching_year_ring(bucket: dict, query_text: str) -> dict | None:
     if scored:
         scored.sort(key=lambda row: (row[0], row[1]), reverse=True)
         return scored[0][2]
-    query = str(query_text or "").lower()
-    if any(marker in query for marker in ("年轮", "后来", "之后怎么看", "现在怎么看", "重新看", "再看")):
+    if explicit_year_ring_lookup:
         return max(comments, key=lambda item: str(item.get("created_at") or ""))
     return None
 
@@ -12600,7 +12606,7 @@ async def api_config_get(request):
             "domain_sentinel_max_tokens": gateway_cfg.get("domain_sentinel_max_tokens", 260),
             "current_inner_state_interval_rounds": gateway_cfg.get("current_inner_state_interval_rounds", 0),
             "direct_render_mode": _normalize_direct_render_mode(gateway_cfg.get("direct_render_mode", "auto")),
-            "retrieval_mode": _normalize_retrieval_mode(gateway_cfg.get("retrieval_mode", "bucket")),
+            "retrieval_mode": _normalize_retrieval_mode(gateway_cfg.get("retrieval_mode", "graph")),
             "operit_context_rewrite_enabled": _bool_value(
                 gateway_cfg.get("operit_context_rewrite_enabled"),
                 False,
