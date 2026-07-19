@@ -55,6 +55,7 @@ orientation 规则：
 - 其他关系必须是 candidate_to_new 或 new_to_candidate。
 
 没有可靠关系时返回 {"edges": []}。不要为了凑数量连边。
+同一个 candidate_scene_id 最多返回一条边；如果多个关系都勉强成立，只选最具体、证据最强的一条。
 只返回 JSON：
 {
   "edges": [
@@ -1061,7 +1062,7 @@ class SceneLinker:
     ) -> tuple[list[dict], list[dict]]:
         anchor_id = str(anchor.get("id") or "")
         anchor_content = str(anchor.get("content") or "")
-        accepted: dict[tuple[str, str, str], dict] = {}
+        accepted: dict[str, dict] = {}
         rejected = []
         for item in raw_edges:
             if not isinstance(item, dict):
@@ -1127,7 +1128,10 @@ class SceneLinker:
                 "source_evidence": source_evidence,
                 "target_evidence": target_evidence,
             }
-            key = (candidate_id, relation, directionality)
+            # One candidate pair should create one review decision, not several
+            # overlapping labels for the same two Scenes. Keep the strongest
+            # fully evidenced proposal from this model response.
+            key = candidate_id
             current = accepted.get(key)
             if current is None or confidence > float(current.get("confidence", 0.0)):
                 accepted[key] = edge
