@@ -46,6 +46,7 @@ from memory_layers import (
 )
 from memory_moments import HEADING_RE, _canonical_section
 from memory_moments import MemoryMomentStore
+from self_anchor import SELF_ANCHOR_TAG, is_self_anchor_metadata
 from utils import bucket_text_for_embedding, load_config, normalize_scene_cues, now_iso
 
 
@@ -271,6 +272,12 @@ def _scene_cues(metadata: dict) -> list[str]:
     return normalize_scene_cues(candidates, limit=8, max_chars=80)
 
 
+def _scene_tags(metadata: dict) -> list[str]:
+    # Structural classification survives migration without copying the old
+    # bucket's full tag cloud into the canonical Scene.
+    return [SELF_ANCHOR_TAG] if is_self_anchor_metadata(metadata) else []
+
+
 def _bucket_type(metadata: dict) -> str:
     return "permanent" if str(metadata.get("type") or "").strip().lower() == "permanent" else "dynamic"
 
@@ -351,6 +358,7 @@ def build_plan(root: Path) -> dict[str, Any]:
                     ),
                     "title": str(metadata.get("name") or "").strip(),
                     "scene_cues": _scene_cues(metadata),
+                    "scene_tags": _scene_tags(metadata),
                     "source_tags": _source_tags(metadata),
                     "domain": _domain(metadata),
                     "bucket_type": _bucket_type(metadata),
@@ -384,6 +392,7 @@ def build_plan(root: Path) -> dict[str, Any]:
             "content_sha256": item["content_sha256"],
             "selection_rule": item["selection_rule"],
             "source_spans": item["source_spans"],
+            "scene_tags": item["scene_tags"],
             "source_activation_count": item["source_activation_count"],
         }
         for item in actions
@@ -436,6 +445,7 @@ def _scene_extra_metadata(action: dict[str, Any], imported_at: str, reviewed_by:
         "memory_value_source": "authored_scene",
         "write_contract": "scene-migration-v2",
         "scene_cues": action["scene_cues"] or None,
+        "migration_source_self_anchor": SELF_ANCHOR_TAG in action["scene_tags"],
         "migration_import_version": IMPORT_VERSION,
         "migration_rule_version": RULE_VERSION,
         "migration_reviewed_by": reviewed_by,
@@ -559,7 +569,7 @@ async def apply_plan(
                 imported_at = now_iso()
                 await bucket_mgr.create(
                     content=action["content"],
-                    tags=[],
+                    tags=action["scene_tags"],
                     importance=action["importance"],
                     domain=action["domain"],
                     bucket_type=action["bucket_type"],
@@ -611,15 +621,31 @@ async def apply_plan(
 
             existing = await bucket_mgr.get(action["scene_id"])
             if existing:
+                metadata_updates = {
+                    "active": True,
+                    "deprecated": False,
+                    "resolved": False,
+                    "activation_count": action["source_activation_count"],
+                    "migration_embedding_failed": None,
+                }
+                if SELF_ANCHOR_TAG in action["scene_tags"]:
+                    current_meta = (
+                        existing.get("metadata", {})
+                        if isinstance(existing.get("metadata"), dict)
+                        else {}
+                    )
+                    current_tags = [
+                        str(tag).strip()
+                        for tag in (current_meta.get("tags") or [])
+                        if str(tag).strip()
+                    ]
+                    if SELF_ANCHOR_TAG not in current_tags:
+                        current_tags.append(SELF_ANCHOR_TAG)
+                    metadata_updates["tags"] = current_tags
+                    metadata_updates["migration_source_self_anchor"] = True
                 _write_metadata(
                     Path(existing["path"]),
-                    {
-                        "active": True,
-                        "deprecated": False,
-                        "resolved": False,
-                        "activation_count": action["source_activation_count"],
-                        "migration_embedding_failed": None,
-                    },
+                    metadata_updates,
                 )
                 existing = await bucket_mgr.get(action["scene_id"])
                 if existing:

@@ -12,6 +12,8 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from self_anchor import is_self_anchor_bucket
+
 
 logger = logging.getLogger("ombre_brain.scene_linker")
 
@@ -314,6 +316,8 @@ def _is_authored_scene(scene: dict | None) -> bool:
         return False
     meta = scene.get("metadata", {}) if isinstance(scene.get("metadata"), dict) else {}
     if str(meta.get("memory_value_source") or "") != "authored_scene":
+        return False
+    if is_self_anchor_bucket(scene):
         return False
     if str(meta.get("type") or "").lower() in {"feel", "archived"}:
         return False
