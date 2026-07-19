@@ -28,6 +28,83 @@ RELATION_TYPES = {
     "relates_to",
 }
 
+# Old enrichers produced broad semantic and affective links. Keep the file for
+# rollback/read compatibility, but ordinary recall only receives this narrow,
+# discounted structural subset. Reviewed Scene relations live in SQLite.
+LEGACY_RECALL_RELATION_TYPES = frozenset(
+    {
+        "same_event",
+        "context_of",
+        "updates",
+        "evidenced_by",
+        "supports",
+        "precedes",
+        "triggers",
+        "contradicts",
+        "belongs_to",
+    }
+)
+LEGACY_MOMENT_RECALL_RELATION_TYPES = frozenset({"same_event", "context_of", "supports"})
+
+
+def legacy_edges_for_recall(
+    edges: list[dict[str, Any]],
+    *,
+    scene_ids: set[str] | None = None,
+    confidence_weight: float = 0.72,
+) -> list[dict]:
+    """Return one-hop-only legacy compatibility edges for ordinary recall."""
+    canonical_scene_ids = {str(item) for item in (scene_ids or set()) if str(item)}
+    try:
+        weight = max(0.0, min(1.0, float(confidence_weight)))
+    except (TypeError, ValueError):
+        weight = 0.72
+    selected: list[dict] = []
+    for edge in edges or []:
+        source = str(edge.get("source") or edge.get("source_memory_id") or "").strip()
+        target = str(edge.get("target") or edge.get("target_memory_id") or "").strip()
+        relation = str(edge.get("relation_type") or edge.get("type") or "").strip()
+        if (
+            not source
+            or not target
+            or relation not in LEGACY_RECALL_RELATION_TYPES
+            or source in canonical_scene_ids
+            or target in canonical_scene_ids
+        ):
+            continue
+        normalized = dict(edge)
+        normalized.update(
+            {
+                "source": source,
+                "target": target,
+                "relation_type": relation,
+                "confidence": round(_safe_confidence(edge.get("confidence")) * weight, 3),
+                "graph_scope": "legacy",
+            }
+        )
+        selected.append(normalized)
+    return selected
+
+
+def legacy_moment_edges_for_recall(edges: list[dict[str, Any]]) -> list[dict]:
+    """Retain only concrete structural legacy moment links, never affect/reflection links."""
+    selected: list[dict] = []
+    for edge in edges or []:
+        relation = str(edge.get("relation_type") or edge.get("type") or "").strip()
+        if relation not in LEGACY_MOMENT_RECALL_RELATION_TYPES:
+            continue
+        normalized = dict(edge)
+        normalized["graph_scope"] = "legacy"
+        selected.append(normalized)
+    return selected
+
+
+def _safe_confidence(value: Any) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.5
+
 
 class MemoryEdgeStore:
     """Small JSONL-backed store for explicit memory relationships."""

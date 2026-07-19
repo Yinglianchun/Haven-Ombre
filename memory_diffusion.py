@@ -126,6 +126,7 @@ class DiffusionStep:
     confidence: float
     reason: str = ""
     direction: str = "outgoing"
+    graph_scope: str = ""
 
 
 @dataclass(frozen=True)
@@ -389,6 +390,10 @@ def _should_continue_path(
     step: DiffusionStep,
     options: DiffusionOptions,
 ) -> bool:
+    # Legacy bucket/moment links are a migration bridge, never a multi-hop
+    # associative graph. One reviewed Scene edge may continue to another.
+    if step.graph_scope == "legacy":
+        return False
     if not options.chain_walk_enabled:
         return True
     if len(state.steps) >= options.chain_max_hops:
@@ -482,10 +487,27 @@ def _build_adjacency(edges: list[dict], include_incoming: bool) -> dict[str, lis
         relation_type = str(edge.get("relation_type") or edge.get("type") or "relates_to").strip()
         confidence = _clamp(edge.get("confidence", 0.5), 0.0, 1.0)
         reason = str(edge.get("reason") or "").strip()
-        outgoing = DiffusionStep(source, target, relation_type, confidence, reason, "outgoing")
+        graph_scope = str(edge.get("graph_scope") or "").strip()
+        outgoing = DiffusionStep(
+            source,
+            target,
+            relation_type,
+            confidence,
+            reason,
+            "outgoing",
+            graph_scope,
+        )
         adjacency.setdefault(source, []).append(outgoing)
         if include_incoming:
-            incoming = DiffusionStep(target, source, relation_type, confidence, reason, "incoming")
+            incoming = DiffusionStep(
+                target,
+                source,
+                relation_type,
+                confidence,
+                reason,
+                "incoming",
+                graph_scope,
+            )
             adjacency.setdefault(target, []).append(incoming)
 
     for steps in adjacency.values():

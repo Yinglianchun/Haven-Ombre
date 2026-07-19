@@ -37,7 +37,12 @@ from memory_diffusion import (
     seed_scores_for_buckets,
     should_suppress_context_candidate,
 )
-from memory_edges import MemoryEdgeStore
+from memory_edges import (
+    MemoryEdgeStore,
+    legacy_edges_for_recall,
+    legacy_moment_edges_for_recall,
+)
+from scene_linker import SceneEdgeStore
 from entity_edges import EntityEdgeStore
 from memory_moments import MemoryMomentStore, parse_bucket_moments, preview_bucket_moment_chunks
 from memory_relevance import (
@@ -104,11 +109,13 @@ from reranker_engine import RerankerEngine
 from self_anchor import is_self_anchor_bucket, is_self_anchor_metadata
 from source_refs import source_ref_window
 from utils import (
+    active_scene_migration_map,
     count_tokens_approx,
     bucket_content_for_recall,
     bucket_text_for_embedding,
     local_date_key,
     load_config,
+    migrated_scene_for_legacy_source,
     parse_human_date_reference,
     setup_logging,
     strip_human_date_references,
@@ -116,6 +123,7 @@ from utils import (
     strip_followup_sections,
     strip_temperature_meaning_lines,
     strip_wikilinks,
+    suppress_migrated_legacy_sources,
 )
 from word_map import WordMapStore
 
@@ -471,13 +479,17 @@ class GatewayService:
         self.embedding_engine = embedding_engine or EmbeddingEngine(config)
         self.reranker_engine = reranker_engine or RerankerEngine(config)
         self.memory_edge_store = MemoryEdgeStore(config)
+        self.scene_edge_store = SceneEdgeStore(config, create=False)
         self.entity_edge_store = EntityEdgeStore(config)
         self.memory_node_store = memory_node_store or MemoryNodeStore(config)
         self.memory_moment_store = MemoryMomentStore(config)
         self._moment_graph_cache_signature = ""
         self._moment_graph_cache_value: tuple[list[dict], dict[str, list[dict]], list[dict]] | None = None
         self._moment_graph_cache_bucket_list_id = 0
-        self._moment_graph_cache_edge_stamp: tuple[int, int] = (0, 0)
+        self._moment_graph_cache_edge_stamp: tuple[
+            tuple[int, int],
+            tuple[tuple[int, int], tuple[int, int]],
+        ] = ((0, 0), ((0, 0), (0, 0)))
         self._moment_graph_cache_store_stamp: tuple[int, int] = (0, 0)
         self.relevance_options = memory_relevance_options_from_config(config)
         self.axis_lite_cfg = (
@@ -8719,7 +8731,7 @@ class GatewayService:
             for bucket in recallable_buckets
             if str(bucket.get("id") or "")
         }
-        bucket_edges = self.memory_edge_store.list_edges()
+        bucket_edges = self._bucket_edges_for_recall(recallable_buckets)
         signature = self._moment_graph_signature(recallable_buckets, bucket_edges)
         if (
             signature
@@ -8742,7 +8754,7 @@ class GatewayService:
         }
         edges = [
             edge
-            for edge in self.memory_moment_store.list_edges()
+            for edge in legacy_moment_edges_for_recall(self.memory_moment_store.list_edges())
             if str(edge.get("source") or "") in moment_ids
             and str(edge.get("target") or "") in moment_ids
         ]
@@ -8755,9 +8767,36 @@ class GatewayService:
         self._moment_graph_cache_store_stamp = self._memory_moment_store_stamp()
         return value
 
-    def _memory_edge_store_stamp(self) -> tuple[int, int]:
-        path = str(getattr(self.memory_edge_store, "path", "") or "")
-        return self._path_stamp(path)
+    def _bucket_edges_for_recall(self, buckets: list[dict]) -> list[dict]:
+        scene_ids = {
+            str(bucket.get("id") or "")
+            for bucket in buckets or []
+            if str(bucket.get("id") or "") and self._is_canonical_scene_bucket(bucket)
+        }
+        scene_map = {
+            str(bucket.get("id") or ""): bucket
+            for bucket in buckets or []
+            if str(bucket.get("id") or "") in scene_ids
+        }
+        scene_edges = self.scene_edge_store.recall_edges(scene_map)
+        legacy_edges = legacy_edges_for_recall(
+            self.memory_edge_store.list_edges(),
+            scene_ids=scene_ids,
+        )
+        return [*scene_edges, *legacy_edges]
+
+    def _memory_edge_store_stamp(
+        self,
+    ) -> tuple[tuple[int, int], tuple[tuple[int, int], tuple[int, int]]]:
+        legacy_path = str(getattr(self.memory_edge_store, "path", "") or "")
+        scene_path = str(getattr(self.scene_edge_store, "db_path", "") or "")
+        # Scene review writes use SQLite WAL. Watching the main db alone can
+        # miss a freshly accepted edge until a checkpoint happens.
+        scene_stamp = (
+            self._path_stamp(scene_path),
+            self._path_stamp(scene_path + "-wal" if scene_path else ""),
+        )
+        return self._path_stamp(legacy_path), scene_stamp
 
     def _memory_moment_store_stamp(self) -> tuple[int, int]:
         path = str(getattr(self.memory_moment_store, "db_path", "") or "")
@@ -8818,6 +8857,7 @@ class GatewayService:
                 "relation_type": edge.get("relation_type") or edge.get("type"),
                 "confidence": edge.get("confidence"),
                 "reason": edge.get("reason"),
+                "graph_scope": edge.get("graph_scope"),
             }
             digest.update(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8"))
             digest.update(b"\n")
@@ -9209,6 +9249,7 @@ class GatewayService:
                         "relation_type": relation_type,
                         "confidence": max(0.0, min(1.0, confidence)),
                         "reason": edge.get("reason") or "bucket edge bridge",
+                        "graph_scope": str(edge.get("graph_scope") or ""),
                     }
                 )
         return edges
@@ -12739,7 +12780,7 @@ class GatewayService:
 
         edges = [
             edge
-            for edge in self.memory_edge_store.list_edges()
+            for edge in self._bucket_edges_for_recall(list(bucket_map.values()))
             if float(edge.get("confidence", 0.0)) >= self.edge_min_confidence
         ]
         hits = diffuse_memory(
@@ -13872,7 +13913,6 @@ class GatewayService:
             "excluded_edges": {
                 "low_confidence": 0,
                 "non_scene_endpoint": 0,
-                "legacy_emotional_edge": 0,
             },
             "paths": [],
             "injected_path_count": 0,
@@ -13929,15 +13969,12 @@ class GatewayService:
             return payload
 
         eligible_edges: list[dict[str, Any]] = []
-        for edge in self.memory_edge_store.list_edges():
+        for edge in self.scene_edge_store.recall_edges(scene_map):
             confidence = self._safe_float(edge.get("confidence"), 0.0)
             if confidence < self.edge_min_confidence:
                 payload["excluded_edges"]["low_confidence"] += 1
                 continue
             relation_type = str(edge.get("relation_type") or "relates_to")
-            if relation_type == "emotional_echo":
-                payload["excluded_edges"]["legacy_emotional_edge"] += 1
-                continue
             source_id = str(edge.get("source") or "")
             target_id = str(edge.get("target") or "")
             if source_id not in scene_map or target_id not in scene_map:
@@ -15427,6 +15464,7 @@ class GatewayService:
 
         if not query or self.inject_max_cards <= 0:
             return [], []
+        all_buckets = suppress_migrated_legacy_sources(all_buckets)
         early_query_plan = self._recall_query_plan(query)
         if getattr(early_query_plan, "skip_reason", "") == "recall_meta_without_target":
             return [], []
@@ -15904,6 +15942,18 @@ class GatewayService:
             if include_query_planner_debug:
                 return [], [], planner_debug
             return [], []
+        migration_map = active_scene_migration_map(all_buckets)
+        if migration_map:
+            planner_debug["scene_migration"] = {
+                "suppressed_source_bucket_ids": sorted(migration_map),
+                "active_scene_ids": sorted(
+                    str(scene.get("id") or "")
+                    for scenes in migration_map.values()
+                    for scene in scenes
+                    if str(scene.get("id") or "")
+                ),
+            }
+            all_buckets = suppress_migrated_legacy_sources(all_buckets)
         if (
             self._auto_query_too_vague(query)
             and not str(search_query or "").strip()
@@ -16768,12 +16818,23 @@ class GatewayService:
         }
         edge_rows: list[tuple[dict, bool]] = []
         boosted: dict[str, dict[str, Any]] = {}
-        for edge in self.memory_edge_store.list_edges():
+        candidate_buckets = [
+            item.get("bucket") or {}
+            for item in items
+            if isinstance(item, dict) and isinstance(item.get("bucket"), dict)
+        ]
+        for edge in self._bucket_edges_for_recall(candidate_buckets):
             try:
                 confidence = float(edge.get("confidence", 0.0))
             except (TypeError, ValueError):
                 confidence = 0.0
-            if confidence < strong_floor:
+            edge_floor = strong_floor
+            if str(edge.get("graph_scope") or "") == "legacy":
+                # Legacy confidence has already been discounted by 0.72. Keep
+                # an explicit, title-focused relation query usable without
+                # letting the old graph regain multi-hop authority.
+                edge_floor = max(self.edge_min_confidence * 0.72, 0.54)
+            if confidence < edge_floor:
                 continue
             source = str(edge.get("source") or "")
             target = str(edge.get("target") or "")
@@ -21095,6 +21156,7 @@ class GatewayService:
             for bucket in all_buckets
             if isinstance(bucket, dict) and str(bucket.get("id") or "")
         }
+        migration_map = active_scene_migration_map(all_buckets)
         output: list[dict] = []
         routes: list[dict] = []
         seen: set[str] = set()
@@ -21111,32 +21173,46 @@ class GatewayService:
             if meta.get("resolved") or meta.get("digested") or meta.get("deprecated") or meta.get("active") is False:
                 continue
             for evidence in self._profile_fact_evidence_refs(bucket):
-                evidence_id = evidence["bucket_id"]
-                evidence_bucket = by_id.get(evidence_id)
+                source_evidence_id = evidence["bucket_id"]
                 evidence_moment_id = str(evidence.get("moment_id") or "")
+                migrated_scene = migrated_scene_for_legacy_source(
+                    migration_map,
+                    source_evidence_id,
+                    evidence_moment_id,
+                )
+                evidence_bucket = migrated_scene or by_id.get(source_evidence_id)
+                evidence_id = str((evidence_bucket or {}).get("id") or source_evidence_id)
                 if not self._is_fact_evidence_recall_bucket(
                     evidence_bucket,
-                    evidence_moment_id=evidence_moment_id,
+                    # The recorded moment belongs to the preserved legacy
+                    # source. Once that exact span has become a canonical
+                    # Scene, validate the Scene as a whole instead of asking
+                    # it to contain the legacy moment id.
+                    evidence_moment_id="" if migrated_scene is not None else evidence_moment_id,
                 ):
                     continue
                 routed = dict(evidence_bucket)
                 routed["_recall_signal"] = dict(bucket.get("_recall_signal") or {})
-                routed["_profile_fact_route"] = {
+                route_payload = {
                     "fact_id": bucket_id,
                     "evidence_moment_id": evidence_moment_id,
                     "legacy_evidence": not self._is_canonical_scene_bucket(evidence_bucket),
                 }
+                if evidence_id != source_evidence_id:
+                    route_payload["source_evidence_bucket_id"] = source_evidence_id
+                routed["_profile_fact_route"] = route_payload
                 if evidence_id not in seen:
                     output.append(routed)
                     seen.add(evidence_id)
-                routes.append(
-                    {
+                route_debug = {
                         "fact_id": bucket_id,
                         "evidence_bucket_id": evidence_id,
                         "evidence_moment_id": evidence_moment_id,
                         "legacy_evidence": not self._is_canonical_scene_bucket(evidence_bucket),
                     }
-                )
+                if evidence_id != source_evidence_id:
+                    route_debug["source_evidence_bucket_id"] = source_evidence_id
+                routes.append(route_debug)
         return output, routes
 
     @staticmethod

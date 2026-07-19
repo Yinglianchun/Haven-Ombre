@@ -851,8 +851,23 @@ def bucket_content_for_recall(bucket: dict) -> str:
     if not isinstance(bucket, dict):
         return ""
     text = strip_wikilinks(str(bucket.get("content") or ""))
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    if str(meta.get("memory_value_source") or "") == "authored_scene":
+        text = _strip_legacy_scene_wrapper(text)
     text = strip_affect_anchor(text)
     return strip_followup_sections(text).strip()
+
+
+def _strip_legacy_scene_wrapper(text: str) -> str:
+    """Read old authored Scenes as prose without rewriting their stored file."""
+    raw = str(text or "").strip()
+    return re.sub(
+        r"\A\s{0,3}#{2,6}\s+(?:scene|场景)(?:\s*[:：|｜-]\s*[^\n]*)?\s*(?:\r?\n)+",
+        "",
+        raw,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
 
 
 def strip_display_temperature_sections(text: str) -> str:
@@ -917,7 +932,7 @@ def normalize_scene_cues(value: object, *, limit: int = 8, max_chars: int = 80) 
 def bucket_text_for_embedding(bucket: dict) -> str:
     """
     Build the text sent to the embedding model for a bucket.
-    Include the human title because short title recalls are common.
+    Legacy buckets may include title/cues; canonical Scene vectors are body-only.
     """
     if not isinstance(bucket, dict):
         return ""
@@ -930,6 +945,12 @@ def bucket_text_for_embedding(bucket: dict) -> str:
     scene_cues = normalize_scene_cues(meta.get("scene_cues"))
     body = bucket_content_for_recall(bucket)
 
+    # A Scene vector represents only the verbatim experience. Title and cues
+    # remain sparse lookup fields and must not pull the semantic vector away
+    # from scene.content.
+    if str(meta.get("memory_value_source") or "") == "authored_scene":
+        return body
+
     parts = []
     if title:
         parts.append(f"Title: {title}")
@@ -941,6 +962,66 @@ def bucket_text_for_embedding(bucket: dict) -> str:
         parts.append("Recall cues: " + " | ".join(scene_cues))
 
     return "\n".join(parts).strip()
+
+
+def active_scene_migration_map(buckets: list[dict]) -> dict[str, list[dict]]:
+    """Map preserved legacy sources to their active migrated canonical Scenes."""
+    output: dict[str, list[dict]] = {}
+    for bucket in buckets or []:
+        if not isinstance(bucket, dict):
+            continue
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        source_id = str(meta.get("migration_source_bucket_id") or "").strip()
+        if not source_id or str(meta.get("memory_value_source") or "") != "authored_scene":
+            continue
+        if (
+            meta.get("type") in {"feel", "archived"}
+            or meta.get("resolved")
+            or meta.get("digested")
+            or meta.get("deprecated")
+            or meta.get("active") is False
+        ):
+            continue
+        output.setdefault(source_id, []).append(bucket)
+    for scenes in output.values():
+        scenes.sort(key=lambda item: str(item.get("id") or ""))
+    return output
+
+
+def migrated_scene_for_legacy_source(
+    migration_map: dict[str, list[dict]],
+    source_bucket_id: str,
+    source_moment_id: str = "",
+) -> dict | None:
+    """Resolve one legacy evidence ref to its reversible migrated Scene."""
+    scenes = list((migration_map or {}).get(str(source_bucket_id or "").strip()) or [])
+    if not scenes:
+        return None
+    moment_id = str(source_moment_id or "").strip()
+    if moment_id:
+        matches = []
+        for scene in scenes:
+            meta = scene.get("metadata", {}) if isinstance(scene.get("metadata"), dict) else {}
+            if str(meta.get("migration_source_moment_id") or "").strip() == moment_id:
+                matches.append(scene)
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            return matches[0]
+    return scenes[0] if len(scenes) == 1 else None
+
+
+def suppress_migrated_legacy_sources(buckets: list[dict]) -> list[dict]:
+    """Keep source files for rollback while removing duplicate ordinary candidates."""
+    migration_map = active_scene_migration_map(buckets)
+    if not migration_map:
+        return list(buckets or [])
+    source_ids = set(migration_map)
+    return [
+        bucket
+        for bucket in buckets or []
+        if str((bucket or {}).get("id") or "") not in source_ids
+    ]
 
 
 def sanitize_name(name: str) -> str:

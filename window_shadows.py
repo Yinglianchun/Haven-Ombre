@@ -142,10 +142,21 @@ def extract_window_shadow_scenes(
             continue
         title = _moment_title(match.group(2), body, index)
         source_text = text[match.start():end].strip()
+        heading_key = _normalize_heading(match.group(2))
+        legacy_moment = allow_legacy_moment and (
+            heading_key == "moment"
+            or heading_key.startswith("moment")
+            or heading_key == "时刻"
+            or heading_key.startswith("时刻")
+        )
         moments.append(
             {
                 "title": title,
-                "content": source_text,
+                # The heading is an extraction marker inside the Shadow, not
+                # part of the standalone Scene object's authored prose.
+                # The legacy grow reader keeps its old payload contract; only
+                # the canonical Scene extractor returns the plain body.
+                "content": source_text if legacy_moment else body,
                 "source_text": source_text,
             }
         )

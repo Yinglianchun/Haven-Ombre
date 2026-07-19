@@ -61,11 +61,11 @@
 - **对话启动流程**：breath() → dream() → breath(domain="feel") → 开始对话
 
 **新 Scene 写入**
-- `hold` / `close_window` 的同步写入不调用 LLM：原文先落盘，标题、显式 tags 与 scene_cues 作为 sidecar 元数据
+- `hold` / `close_window` 的同步写入不调用 LLM：纯 Scene 正文先落盘，标题、显式 tags 与 scene_cues 作为 sidecar 元数据；向量只 embed content
 - 自动 enrich 只写 `metadata_proposals.sqlite` 待审 sidecar，不自动修改 tags / importance / confidence / embedding / edges
-- 可选 Scene linker 在写入返回后异步运行，按顺序故障转移多个独立模型；两端逐字证据校验通过的结果先只写 `scene_edge_proposals.sqlite`。只读审核工具不改图；只有带精确确认词的单条接受操作在重验 Scene hash、active 状态与证据后才写 `memory_edges.jsonl`
+- 可选 Scene linker 在写入返回后异步运行，按顺序故障转移多个独立模型；两端逐字证据校验通过的结果先只写 `scene_edge_proposals.sqlite`。只读审核工具不改图；只有带精确确认词的单条接受操作在重验 Scene hash、active 状态与证据后，才在同一 SQLite 事务中写正式 `scene_edges` 并接受 proposal。它永不写旧 `memory_edges.jsonl`
 - 脱水、日记拆分和旧自动摘记只保留给专项导入/旧兼容路径
-- 普通召回默认直接检索 Scene；graph 模式只作为显式兼容/实验开关
+- 普通召回先直接检索 Scene，再沿逐条审核的 Scene 图受限多跳；旧 JSONL 图仅白名单结构边、降权、最多一跳
 - Wikilink `[[]]` 由 LLM 在内容中标记
 
 ---
@@ -77,7 +77,7 @@
 | 工具 | 关键参数 | 功能 |
 |---|---|---|
 | `breath` | query, max_tokens, domain, valence, arousal, max_results | 检索/浮现记忆 |
-| `hold` | content, cues, tags, importance, pinned, feel, whisper, source_bucket, valence, arousal | 原样保存唯一一段 `### scene`；旧 section 仅兼容读取 |
+| `hold` | content, cues, tags, importance, pinned, feel, whisper, source_bucket, valence, arousal | 原样保存一段纯 Scene 正文；旧 section 仅兼容读取 |
 | `close_window` | shadow, scenes, session_id, date, source | 原子保存整窗第一人称窗影与 0～N 个 Scene |
 | `grow` | content | `close_window` 兼容别名；不提升旧 `### moment` |
 | `comment_bucket` | bucket_id, content, kind, valence, arousal | 给源 bucket 追加年轮 |
@@ -96,7 +96,7 @@
 - valence/arousal 参数仅兼容读取，不参与普通排序
 
 **`hold`** — 主要模式：
-- **普通模式**（`feel=False`，默认）：当前 AI 先写一件完整 `### scene`，原话与意义都写在同一段，可带 sidecar `cues` → 工具只校验、原样新建并生成 embedding；不调用模型、不自动合并
+- **普通模式**（`feel=False`，默认）：当前 AI 先写一段完整 Scene 原文，content 不带 `## Scene` / `### scene` / `### moment`，可带 sidecar `cues` → 工具只校验、原样新建；向量只取 content，不调用模型、不自动合并
 - **Whisper 模式**（`whisper=True`）：无源碎碎念/悄悄话，独立保存为 `type=feel + whisper`，可用 `breath(domain="whisper")` 读取。
 - **旧兼容 Feel 路径**（`feel=True`）：不建议新调用。带 `source_bucket` 时转为年轮 comment；不带源桶时转为 whisper。
 
@@ -116,10 +116,15 @@
 - 结果存为 `type=feel`，带 `relationship_weather` 标签
 - 默认复用 `persona` 模型配置和 key，可用 `OMBRE_REFLECTION_*` 单独覆盖
 
-**Memory Edge** — 显式关系边：
-- 文件：`state/memory_edges.jsonl`
-- 自动模型只提出 0~3 条关系边建议并写入 metadata proposal；只有显式维护/审核动作才落真实边
-- Gateway 召回记忆后，会沿一跳强关系边补一条相关记忆
+**Scene Edge** — canonical Scene 正式关系边：
+- 表：`state/scene_edge_proposals.sqlite -> scene_edges`
+- 只允许 `continues / echoes / resolves / contrasts_with / evidenced_by`，且两端必须有逐字正文证据
+- proposal 与正式边原子晋升；普通召回可在可靠 direct Scene seed 后受限多跳
+
+**Legacy Memory Edge** — 旧桶兼容关系：
+- 文件：`state/memory_edges.jsonl`，保留原文件，不自动迁移、不由 Scene linker 改写
+- 普通召回只读 `same_event / context_of / updates / evidenced_by / supports / precedes / triggers / contradicts / belongs_to`，统一降权且最多一跳
+- `emotional_echo / reflects_on / relates_to / previous_context / next_context` 等旧泛关系不再参与普通扩散
 
 **`trace`** — 记忆编辑：
 - 修改任意元数据字段（name/domain/valence/arousal/importance/tags/resolved/pinned）
@@ -129,7 +134,7 @@
 
 **`close_window`** — Window Shadow：
 - 整篇第一人称窗影原样写入独立 SQLite，不进普通候选池
-- 可选“不能丢的场景”或 `scenes[]` 中的 `### scene` 原样写成普通 Scene；不调用 LLM
+- 可选“不能丢的场景”中的 `### scene` 只作 Shadow 抽取标记，落库时去掉；`scenes[]` 直接传纯正文；不调用 LLM
 - 写前完整校验，任一 Scene 失败就补偿删除本次新建 Scene 与 Shadow；成功后才排 embedding
 - `grow` 仅为旧客户端兼容别名，不把旧 `### moment` 提升成 Scene
 

@@ -1206,6 +1206,290 @@
     display: inline-block;
     box-shadow: 0 1px 3px var(--shadow-dark-subtle);
   }
+  .network-workspace {
+    display: grid;
+    grid-template-columns: minmax(310px, 360px) minmax(0, 1fr);
+    gap: 18px;
+    align-items: start;
+  }
+  .network-main {
+    min-width: 0;
+  }
+  .scene-linker-panel {
+    position: sticky;
+    top: 16px;
+    min-width: 0;
+    max-height: calc(100vh - 150px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    background: var(--surface);
+    box-shadow: 5px 6px 16px rgba(105, 88, 63, 0.08);
+  }
+  .scene-linker-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 16px 16px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .scene-linker-kicker {
+    color: var(--text-light);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+  .scene-linker-head h2 {
+    margin: 3px 0 0;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 17px;
+    font-weight: 600;
+  }
+  .scene-linker-refresh {
+    min-height: 30px;
+    padding: 5px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    font: inherit;
+    font-size: 11px;
+  }
+  .scene-linker-refresh:hover {
+    border-color: var(--border-strong);
+    color: var(--accent);
+  }
+  .scene-linker-status {
+    display: grid;
+    gap: 11px;
+    padding: 13px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .scene-linker-state-line,
+  .scene-proposal-toolbar,
+  .scene-proposal-head,
+  .scene-proposal-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .scene-linker-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .scene-linker-state::before {
+    content: '';
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--positive);
+    box-shadow: 0 0 0 3px rgba(93, 130, 100, 0.12);
+  }
+  .scene-linker-state.offline::before { background: var(--negative); }
+  .scene-linker-state.idle::before { background: #9A7B4F; }
+  .scene-linker-boundary {
+    color: var(--text-light);
+    font-size: 10px;
+  }
+  .scene-linker-stats {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
+  }
+  .scene-linker-stat {
+    padding: 8px 9px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.24);
+  }
+  .scene-linker-stat b {
+    display: block;
+    color: var(--text);
+    font-size: 15px;
+    line-height: 1.1;
+  }
+  .scene-linker-stat span {
+    display: block;
+    margin-top: 4px;
+    color: var(--text-light);
+    font-size: 10px;
+  }
+  .scene-model-pool {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .scene-model-row {
+    display: grid;
+    grid-template-columns: 22px minmax(0, 1fr) auto;
+    gap: 7px;
+    align-items: center;
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  .scene-model-order {
+    color: var(--text-light);
+    font-variant-numeric: tabular-nums;
+  }
+  .scene-model-copy {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .scene-model-copy small {
+    margin-left: 4px;
+    color: var(--text-light);
+  }
+  .scene-model-ready {
+    color: var(--positive);
+    font-size: 10px;
+  }
+  .scene-model-ready.offline { color: var(--negative); }
+  .scene-proposal-toolbar {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .scene-proposal-toolbar select {
+    min-height: 30px;
+    padding: 4px 26px 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-solid);
+    color: var(--text);
+    font: inherit;
+    font-size: 11px;
+  }
+  .scene-proposal-count {
+    color: var(--text-light);
+    font-size: 11px;
+  }
+  .scene-proposal-message {
+    min-height: 0;
+    padding: 0 16px;
+    color: var(--text-dim);
+    font-size: 11px;
+  }
+  .scene-proposal-message:not(:empty) { padding-top: 10px; }
+  .scene-proposal-message.error { color: var(--negative); }
+  .scene-proposal-message.ok { color: var(--positive); }
+  .scene-proposal-list {
+    min-height: 140px;
+    overflow-y: auto;
+    padding: 11px 12px 15px;
+  }
+  .scene-proposal-card {
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    background: rgba(255, 255, 255, 0.24);
+  }
+  .scene-proposal-card + .scene-proposal-card { margin-top: 9px; }
+  .scene-proposal-relation {
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .scene-proposal-confidence {
+    color: var(--text-light);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  .scene-proposal-route {
+    margin-top: 8px;
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .scene-proposal-meta {
+    margin-top: 4px;
+    color: var(--text-light);
+    font-size: 10px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
+  .scene-proposal-reason {
+    margin-top: 9px;
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.55;
+  }
+  .scene-evidence {
+    margin-top: 8px;
+    padding: 8px 9px;
+    border-left: 2px solid var(--border-strong);
+    background: rgba(255, 255, 255, 0.2);
+    color: var(--text-dim);
+    font-size: 10px;
+    line-height: 1.55;
+  }
+  .scene-evidence div + div { margin-top: 5px; }
+  .scene-context {
+    margin-top: 8px;
+    color: var(--text-light);
+    font-size: 10px;
+  }
+  .scene-context summary {
+    cursor: pointer;
+    color: var(--text-dim);
+  }
+  .scene-context-body {
+    margin-top: 7px;
+    padding: 8px 9px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-dim);
+    line-height: 1.5;
+    white-space: pre-wrap;
+  }
+  .scene-context-body + .scene-context-body { margin-top: 6px; }
+  .scene-review-state {
+    margin-top: 8px;
+    color: var(--positive);
+    font-size: 10px;
+  }
+  .scene-review-state.stale { color: var(--negative); }
+  .scene-proposal-actions {
+    justify-content: flex-end;
+    margin-top: 10px;
+  }
+  .scene-proposal-actions button {
+    min-height: 29px;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    font: inherit;
+    font-size: 11px;
+  }
+  .scene-proposal-actions button:hover:not(:disabled) {
+    border-color: var(--border-strong);
+    color: var(--accent);
+  }
+  .scene-proposal-actions button.reject:hover:not(:disabled) { color: var(--negative); }
+  .scene-proposal-actions button:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+  .scene-proposal-empty {
+    padding: 26px 10px;
+    color: var(--text-light);
+    font-size: 12px;
+    line-height: 1.6;
+    text-align: center;
+  }
 
   .persona-shell {
     max-width: 1120px;
@@ -2801,6 +3085,13 @@
     .word-map-toolbar { align-items: flex-start; flex-direction: column; }
     .word-map-actions { justify-content: flex-start; }
     .word-map-grid { grid-template-columns: 1fr; }
+    .network-workspace { grid-template-columns: 1fr; }
+    .scene-linker-panel {
+      position: static;
+      max-height: none;
+    }
+    .scene-proposal-list { max-height: 520px; }
+    #network-canvas { height: min(62vh, 620px); }
     .reflection-toolbar { align-items: flex-start; flex-direction: column; }
     .reflection-board { grid-template-columns: 1fr; }
     .reflection-day-panel { height: auto; max-height: none; }
@@ -3391,15 +3682,45 @@
 </div>
 
 <div class="content" id="network-view" style="display:none">
-  <div class="network-legend">
-    <div class="legend-item"><span class="legend-dot" style="background:#2F4F4F"></span> dynamic</div>
-    <div class="legend-item"><span class="legend-dot" style="background:#9A7B4F"></span> permanent</div>
-    <div class="legend-item"><span class="legend-dot" style="background:#8B6A6A"></span> feel</div>
-    <div class="legend-item"><span class="legend-dot" style="background:#B0A590"></span> archived</div>
-  </div>
-  <div class="network-stage">
-    <canvas id="network-canvas"></canvas>
-    <div id="network-popover" class="network-popover" hidden></div>
+  <div class="network-workspace">
+    <aside class="scene-linker-panel" aria-label="Scene linker 提案审核">
+      <div class="scene-linker-head">
+        <div>
+          <div class="scene-linker-kicker">Scene linker</div>
+          <h2>边提案审核</h2>
+        </div>
+        <button type="button" class="scene-linker-refresh" onclick="loadSceneLinkerPanel()">刷新</button>
+      </div>
+      <div class="scene-linker-status" id="scene-linker-status">
+        <div class="loading">读取 linker 状态…</div>
+      </div>
+      <div class="scene-proposal-toolbar">
+        <select id="scene-proposal-status" aria-label="提案状态" onchange="loadSceneLinkerPanel()">
+          <option value="pending">待审核</option>
+          <option value="accepted">已接受</option>
+          <option value="rejected">已拒绝</option>
+          <option value="superseded">已失效</option>
+          <option value="all">全部</option>
+        </select>
+        <span class="scene-proposal-count" id="scene-proposal-count">—</span>
+      </div>
+      <div class="scene-proposal-message" id="scene-proposal-message"></div>
+      <div class="scene-proposal-list" id="scene-proposal-list">
+        <div class="loading">读取提案…</div>
+      </div>
+    </aside>
+    <section class="network-main" aria-label="记忆网络图">
+      <div class="network-legend">
+        <div class="legend-item"><span class="legend-dot" style="background:#2F4F4F"></span> dynamic</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#9A7B4F"></span> permanent</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#8B6A6A"></span> feel</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#B0A590"></span> archived</div>
+      </div>
+      <div class="network-stage">
+        <canvas id="network-canvas"></canvas>
+        <div id="network-popover" class="network-popover" hidden></div>
+      </div>
+    </section>
   </div>
 </div>
 
@@ -3830,6 +4151,8 @@ let profileFactProposals = [];
 let anchorProposals = [];
 let wordMapData = null;
 let identitySemanticData = null;
+let sceneLinkerStatusData = null;
+let sceneEdgeProposals = [];
 let domainOptions = [];
 let currentFilter = 'all';
 let bucketSortMode = 'time';
@@ -6826,6 +7149,200 @@ function closeDetail() {
   document.getElementById('detail-panel').classList.remove('open');
 }
 
+function setSceneProposalMessage(message, tone) {
+  var el = document.getElementById('scene-proposal-message');
+  if (!el) return;
+  el.textContent = message || '';
+  el.className = 'scene-proposal-message' + (tone ? ' ' + tone : '');
+}
+
+function sceneLinkerState(status) {
+  var readyCount = Array.isArray(status.ready_models) ? status.ready_models.length : 0;
+  if (!status.enabled) return { label: '已关闭', className: 'offline' };
+  if (!readyCount) return { label: '没有可用模型', className: 'offline' };
+  if (!status.auto_enabled) return { label: '已就绪 · 自动运行关闭', className: 'idle' };
+  return { label: '运行中 · proposal only', className: '' };
+}
+
+function renderSceneLinkerStatus(status) {
+  var container = document.getElementById('scene-linker-status');
+  if (!container) return;
+  var state = sceneLinkerState(status || {});
+  var stats = (status && status.proposal_store) || {};
+  var sceneEdgeStats = (status && status.scene_edges) || {};
+  var models = Array.isArray(status && status.model_pool) ? status.model_pool : [];
+  if (!models.length) {
+    models = (status.configured_models || []).map(function(name, index) {
+      return {
+        position: index + 1,
+        name: name,
+        model: '',
+        ready: (status.ready_models || []).indexOf(name) >= 0,
+      };
+    });
+  }
+  var modelHtml = models.length ? models.map(function(model) {
+    return '<div class="scene-model-row">' +
+      '<span class="scene-model-order">' + String(model.position || 1).padStart(2, '0') + '</span>' +
+      '<span class="scene-model-copy" title="' + escAttr(model.name + (model.model ? ' · ' + model.model : '')) + '">' +
+        esc(model.name || 'unnamed') + (model.model ? '<small>' + esc(model.model) + '</small>' : '') +
+      '</span>' +
+      '<span class="scene-model-ready' + (model.ready ? '' : ' offline') + '">' + (model.ready ? 'ready' : 'offline') + '</span>' +
+    '</div>';
+  }).join('') : '<div class="scene-proposal-empty">没有配置模型</div>';
+  container.innerHTML =
+    '<div class="scene-linker-state-line">' +
+      '<span class="scene-linker-state ' + state.className + '">' + esc(state.label) + '</span>' +
+      '<span class="scene-linker-boundary">不改正文 · 审核后写独立 Scene 图 · ' + Number(sceneEdgeStats.active || 0) + ' 条正式边</span>' +
+    '</div>' +
+    '<div class="scene-linker-stats">' +
+      '<div class="scene-linker-stat"><b>' + Number(stats.pending || 0) + '</b><span>待审核</span></div>' +
+      '<div class="scene-linker-stat"><b>' + Number(stats.accepted || 0) + '</b><span>已接受</span></div>' +
+      '<div class="scene-linker-stat"><b>' + Number(stats.rejected || 0) + '</b><span>已拒绝</span></div>' +
+    '</div>' +
+    '<div class="scene-model-pool">' + modelHtml + '</div>';
+}
+
+function sceneRelationLabel(value) {
+  return {
+    continues: '延续',
+    resolves: '回应 / 解开',
+    contrasts_with: '形成对照',
+    echoes: '彼此呼应',
+    evidenced_by: '被其印证',
+  }[String(value || '')] || String(value || '未标注关系');
+}
+
+function sceneProposalName(proposal, sceneId) {
+  var anchor = proposal.anchor_scene || {};
+  var candidate = proposal.candidate_scene || {};
+  if (String(anchor.scene_id || '') === String(sceneId || '')) return anchor.name || anchor.scene_id;
+  if (String(candidate.scene_id || '') === String(sceneId || '')) return candidate.name || candidate.scene_id;
+  return sceneId || '未知 Scene';
+}
+
+function sceneProposalStatusLabel(status) {
+  return {
+    pending: '待审核',
+    accepted: '已接受',
+    rejected: '已拒绝',
+    superseded: '已失效',
+  }[String(status || '')] || String(status || '未知');
+}
+
+function renderSceneEdgeProposals(proposals, selectedStatus) {
+  var list = document.getElementById('scene-proposal-list');
+  var count = document.getElementById('scene-proposal-count');
+  if (!list || !count) return;
+  sceneEdgeProposals = Array.isArray(proposals) ? proposals : [];
+  count.textContent = sceneEdgeProposals.length + ' 条';
+  if (!sceneEdgeProposals.length) {
+    var emptyLabel = selectedStatus === 'pending' ? '没有待审核提案。Linker 可以继续在后台找关系。' : '这个状态下没有提案。';
+    list.innerHTML = '<div class="scene-proposal-empty">' + esc(emptyLabel) + '</div>';
+    return;
+  }
+  list.innerHTML = sceneEdgeProposals.map(function(proposal) {
+    var sourceName = sceneProposalName(proposal, proposal.source_scene_id);
+    var targetName = sceneProposalName(proposal, proposal.target_scene_id);
+    var confidence = Math.round(Number(proposal.confidence || 0) * 100);
+    var ready = String(proposal.review_state || '') === 'ready';
+    var isPending = String(proposal.status || '') === 'pending';
+    var stateClass = ready ? '' : ' stale';
+    var stateText = ready ? '快照可审核' : '不可接受：' + String(proposal.review_state || '快照已变化');
+    var anchorScene = proposal.anchor_scene || {};
+    var candidateScene = proposal.candidate_scene || {};
+    var contextHtml = (anchorScene.content || candidateScene.content) ?
+      '<details class="scene-context"><summary>查看 Scene 上下文</summary>' +
+        '<div class="scene-context-body"><b>' + esc(anchorScene.name || 'anchor') + '</b>\n' + esc(clipUiText(anchorScene.content, 520)) + '</div>' +
+        '<div class="scene-context-body"><b>' + esc(candidateScene.name || 'candidate') + '</b>\n' + esc(clipUiText(candidateScene.content, 520)) + '</div>' +
+      '</details>' : '';
+    var actionHtml = isPending ?
+      '<div class="scene-proposal-actions">' +
+        '<button type="button" class="reject" onclick="reviewSceneEdgeProposal(\'' + escAttr(proposal.proposal_id) + '\', \'reject\')">拒绝</button>' +
+        '<button type="button" onclick="reviewSceneEdgeProposal(\'' + escAttr(proposal.proposal_id) + '\', \'accept\')"' + (ready ? '' : ' disabled') + '>接受为正式边</button>' +
+      '</div>' : '';
+    return '<article class="scene-proposal-card">' +
+      '<div class="scene-proposal-head">' +
+        '<span class="scene-proposal-relation">' + esc(sceneRelationLabel(proposal.relation_type)) + '</span>' +
+        '<span class="scene-proposal-confidence">' + confidence + '%</span>' +
+      '</div>' +
+      '<div class="scene-proposal-route">' + esc(sourceName) + ' <span aria-hidden="true">→</span> ' + esc(targetName) + '</div>' +
+      '<div class="scene-proposal-meta">' + esc(proposal.model || 'unknown model') + ' · ' + esc(formatTimeAgo(proposal.updated_at || proposal.created_at)) + ' · ' + esc(sceneProposalStatusLabel(proposal.status)) + '</div>' +
+      '<div class="scene-proposal-reason">' + esc(proposal.reason || '没有附加理由。') + '</div>' +
+      '<div class="scene-evidence">' +
+        '<div><b>source</b> “' + esc(clipUiText(proposal.source_evidence, 180)) + '”</div>' +
+        '<div><b>target</b> “' + esc(clipUiText(proposal.target_evidence, 180)) + '”</div>' +
+      '</div>' +
+      contextHtml +
+      '<div class="scene-review-state' + stateClass + '">' + esc(stateText) + '</div>' +
+      actionHtml +
+    '</article>';
+  }).join('');
+}
+
+async function loadSceneLinkerPanel() {
+  var statusContainer = document.getElementById('scene-linker-status');
+  var list = document.getElementById('scene-proposal-list');
+  var statusSelect = document.getElementById('scene-proposal-status');
+  if (!statusContainer || !list || !statusSelect) return;
+  var selectedStatus = statusSelect.value || 'pending';
+  list.innerHTML = '<div class="loading">读取提案…</div>';
+  setSceneProposalMessage('');
+  try {
+    var responses = await Promise.all([
+      authFetch(BASE + '/health'),
+      authFetch(BASE + '/api/scene-edge-proposals?status=' + encodeURIComponent(selectedStatus) + '&limit=40&include_context=true'),
+    ]);
+    if (!responses[0] || !responses[1]) return;
+    var health = await responses[0].json();
+    var proposalData = await responses[1].json();
+    if (!responses[0].ok) throw new Error(health.detail || health.error || 'Scene linker 状态读取失败');
+    if (!responses[1].ok || proposalData.status === 'error') throw new Error(proposalData.error || 'Scene 提案读取失败');
+    sceneLinkerStatusData = health.scene_linker || {};
+    renderSceneLinkerStatus(sceneLinkerStatusData);
+    renderSceneEdgeProposals(proposalData.proposals || [], selectedStatus);
+  } catch (error) {
+    statusContainer.innerHTML = '<div class="scene-proposal-empty">Linker 状态读取失败</div>';
+    list.innerHTML = '<div class="scene-proposal-empty">提案暂时不可读。</div>';
+    setSceneProposalMessage(error.message, 'error');
+  }
+}
+
+async function reviewSceneEdgeProposal(proposalId, decision) {
+  var proposal = sceneEdgeProposals.find(function(item) { return item.proposal_id === proposalId; });
+  if (!proposal) return setSceneProposalMessage('这条提案已经不在当前列表里。', 'error');
+  var accepting = decision === 'accept';
+  var prompt = accepting
+    ? '接受后会把这条关系写入正式 Scene 图；两端 Scene 正文不会被修改。确定接受吗？'
+    : '拒绝只会关闭这条提案，不写正式边。确定拒绝吗？';
+  if (!window.confirm(prompt)) return;
+  setSceneProposalMessage(accepting ? '正在重验快照并写入正式边…' : '正在拒绝提案…');
+  try {
+    var response = await authFetch(BASE + '/api/scene-edge-proposals/review', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        proposal_id: proposalId,
+        decision: decision,
+        confirm: accepting ? 'ACCEPT_SCENE_EDGE' : 'REJECT_SCENE_EDGE',
+      }),
+    });
+    if (!response) return;
+    var data = await response.json().catch(function() { return {}; });
+    if (!response.ok || data.status === 'error' || data.status === 'stale' || data.status === 'conflict') {
+      throw new Error(data.error || data.status || '审核失败');
+    }
+    setSceneProposalMessage(accepting ? '已写入正式 Scene 边。' : '提案已拒绝。', 'ok');
+    if (accepting) {
+      await loadNetwork();
+    } else {
+      await loadSceneLinkerPanel();
+    }
+  } catch (error) {
+    setSceneProposalMessage(error.message, 'error');
+  }
+}
+
 var networkData = null;
 var NETWORK_NODE_RADIUS = 6;
 var networkState = {
@@ -6845,6 +7362,7 @@ var networkState = {
 };
 
 async function loadNetwork() {
+  loadSceneLinkerPanel();
   var canvas = document.getElementById('network-canvas');
   var ctx = canvas.getContext('2d');
   var dpr = window.devicePixelRatio || 1;
@@ -6926,7 +7444,7 @@ function buildNetworkPositions(W, H, data) {
       if (!a || !b) return;
       var dx = b.x - a.x, dy = b.y - a.y;
       var dist = Math.sqrt(dx*dx + dy*dy);
-      var ideal = e.kind === 'memory_edge' ? 230 : 200;
+      var ideal = e.kind === 'scene_edge' ? 250 : (e.kind === 'memory_edge' ? 230 : 200);
       var force = (dist - ideal) * 0.006 * (e.similarity || 0.5);
       dx = (dx / Math.max(1,dist)) * force;
       dy = (dy / Math.max(1,dist)) * force;
@@ -6996,19 +7514,24 @@ function drawNetworkFrame(time) {
   edges.forEach(function(e) {
     var a = positions[e.source], b = positions[e.target];
     if (!a || !b) return;
+    var isSceneEdge = e.kind === 'scene_edge';
     var isMemoryEdge = e.kind === 'memory_edge';
     var activeNodeId = networkActiveNodeId();
     var selectedEdge = activeNodeId && (e.source === activeNodeId || e.target === activeNodeId);
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
     ctx.lineTo(b.x, b.y);
-    ctx.strokeStyle = isMemoryEdge
-      ? 'rgba(154, 123, 79, ' + (selectedEdge ? '0.30' : '0.14') + ')'
-      : 'rgba(47, 79, 79, ' + ((e.similarity || 0.5) * (selectedEdge ? 0.08 : 0.035)) + ')';
-    ctx.lineWidth = isMemoryEdge ? (selectedEdge ? 1.2 : 0.85) : Math.max(0.28, (e.similarity || 0.5) * 0.45);
+    ctx.strokeStyle = isSceneEdge
+      ? 'rgba(218, 112, 74, ' + (selectedEdge ? '0.58' : '0.32') + ')'
+      : (isMemoryEdge
+        ? 'rgba(154, 123, 79, ' + (selectedEdge ? '0.30' : '0.14') + ')'
+        : 'rgba(47, 79, 79, ' + ((e.similarity || 0.5) * (selectedEdge ? 0.08 : 0.035)) + ')');
+    ctx.lineWidth = isSceneEdge
+      ? (selectedEdge ? 2.0 : 1.35)
+      : (isMemoryEdge ? (selectedEdge ? 1.2 : 0.85) : Math.max(0.28, (e.similarity || 0.5) * 0.45));
     ctx.stroke();
-    if (selectedEdge && isMemoryEdge && e.relation_type) {
-      ctx.fillStyle = 'rgba(154, 123, 79, 0.38)';
+    if (selectedEdge && (isSceneEdge || isMemoryEdge) && e.relation_type) {
+      ctx.fillStyle = isSceneEdge ? 'rgba(190, 76, 45, 0.78)' : 'rgba(154, 123, 79, 0.38)';
       ctx.font = '9px Inter, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText(e.relation_type, (a.x + b.x) / 2, (a.y + b.y) / 2);

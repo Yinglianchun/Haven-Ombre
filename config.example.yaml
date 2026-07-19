@@ -699,10 +699,11 @@ reflection:
 
 # --- Scene linker / Scene 关系提案 ---
 # Runs only after an authored Scene has already been saved. Background linking
-# never rewrites Scene prose or writes memory_edges.jsonl; accepted model JSON
+# never rewrites Scene prose or writes memory_edges.jsonl; model JSON first
 # lands in state/scene_edge_proposals.sqlite for review. Only an explicit
 # review_scene_edge_proposal(..., confirm="ACCEPT_SCENE_EDGE") promotion may
-# write a formal edge after revalidating both Scene hashes, states, and evidence.
+# atomically write a formal scene_edges row in that SQLite database after
+# revalidating both Scene hashes, states, and verbatim evidence.
 # Models are tried in order.
 # Transport failure, invalid JSON, or non-verbatim evidence falls through to
 # the next model. A valid {"edges": []} is a real answer and stops failover.

@@ -34,6 +34,188 @@ SCENE_RELATION_TYPES = frozenset(
 SYMMETRIC_SCENE_RELATIONS = frozenset({"echoes", "contrasts_with"})
 DIRECTED_ORIENTATIONS = frozenset({"candidate_to_new", "new_to_candidate"})
 
+
+def _scene_edge_id(source_scene_id: str, target_scene_id: str, relation_type: str) -> str:
+    source = str(source_scene_id or "").strip()
+    target = str(target_scene_id or "").strip()
+    relation = str(relation_type or "").strip()
+    if relation in SYMMETRIC_SCENE_RELATIONS and target < source:
+        source, target = target, source
+    identity = json.dumps(
+        {
+            "source": source,
+            "target": target,
+            "relation": relation,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "scene_rel_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+
+
+def _ensure_scene_edge_schema(conn: sqlite3.Connection) -> None:
+    """Keep reviewed Scene relations separate from the legacy JSONL graph."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scene_edges (
+            edge_id TEXT PRIMARY KEY,
+            source_scene_id TEXT NOT NULL,
+            target_scene_id TEXT NOT NULL,
+            relation_type TEXT NOT NULL,
+            directionality TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            reason TEXT NOT NULL,
+            source_evidence TEXT NOT NULL,
+            target_evidence TEXT NOT NULL,
+            source_hash TEXT NOT NULL,
+            target_hash TEXT NOT NULL,
+            proposal_id TEXT NOT NULL UNIQUE,
+            linker_version TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            accepted_at TEXT NOT NULL,
+            accepted_by TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scene_edges_active_source "
+        "ON scene_edges(active, source_scene_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scene_edges_active_target "
+        "ON scene_edges(active, target_scene_id)"
+    )
+
+
+class SceneEdgeStore:
+    """Reviewed Scene-only graph stored beside proposals, never in legacy JSONL."""
+
+    def __init__(self, config: dict, *, create: bool = True):
+        self.db_path = SceneEdgeProposalStore.path_for(config)
+        if create:
+            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+            conn = self._connect()
+            conn.execute("PRAGMA journal_mode=WAL")
+            _ensure_scene_edge_schema(conn)
+            conn.commit()
+            conn.close()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def list_edges(self, *, include_inactive: bool = False) -> list[dict]:
+        if not os.path.exists(self.db_path):
+            return []
+        conn = self._connect()
+        try:
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scene_edges'"
+            ).fetchone()
+            if table is None:
+                return []
+            where = "" if include_inactive else " WHERE active = 1"
+            rows = conn.execute(
+                "SELECT * FROM scene_edges" + where + " ORDER BY accepted_at DESC, edge_id"
+            ).fetchall()
+        finally:
+            conn.close()
+        return [self._edge_payload(dict(row)) for row in rows]
+
+    def recall_edges(self, scene_map: dict[str, dict]) -> list[dict]:
+        """Return only formal edges still grounded in both current Scene bodies."""
+        valid: list[dict] = []
+        for edge in self.list_edges():
+            source = scene_map.get(str(edge.get("source") or ""))
+            target = scene_map.get(str(edge.get("target") or ""))
+            if not _is_authored_scene(source) or not _is_authored_scene(target):
+                continue
+            if str(edge.get("source_hash") or "") != _scene_hash(source):
+                continue
+            if str(edge.get("target_hash") or "") != _scene_hash(target):
+                continue
+            source_ok, _ = _evidence_is_verbatim(
+                str(source.get("content") or ""), edge.get("source_evidence")
+            )
+            target_ok, _ = _evidence_is_verbatim(
+                str(target.get("content") or ""), edge.get("target_evidence")
+            )
+            if source_ok and target_ok:
+                valid.append(edge)
+        return valid
+
+    def stats(self) -> dict:
+        if not os.path.exists(self.db_path):
+            return {"total": 0, "active": 0, "inactive": 0}
+        conn = self._connect()
+        try:
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scene_edges'"
+            ).fetchone()
+            if table is None:
+                return {"total": 0, "active": 0, "inactive": 0}
+            rows = conn.execute(
+                "SELECT active, COUNT(*) AS count FROM scene_edges GROUP BY active"
+            ).fetchall()
+        finally:
+            conn.close()
+        counts = {int(row["active"]): int(row["count"]) for row in rows}
+        return {
+            "total": sum(counts.values()),
+            "active": counts.get(1, 0),
+            "inactive": counts.get(0, 0),
+        }
+
+    def deactivate_for_scene(self, scene_id: str) -> int:
+        normalized = str(scene_id or "").strip()
+        if not normalized or not os.path.exists(self.db_path):
+            return 0
+        conn = self._connect()
+        try:
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scene_edges'"
+            ).fetchone()
+            if table is None:
+                return 0
+            cursor = conn.execute(
+                """
+                UPDATE scene_edges
+                   SET active = 0, updated_at = ?
+                 WHERE active = 1 AND (source_scene_id = ? OR target_scene_id = ?)
+                """,
+                (_now_utc(), normalized, normalized),
+            )
+            conn.commit()
+            return max(0, int(cursor.rowcount or 0))
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _edge_payload(row: dict) -> dict:
+        return {
+            "edge_id": str(row.get("edge_id") or ""),
+            "source": str(row.get("source_scene_id") or ""),
+            "target": str(row.get("target_scene_id") or ""),
+            "relation_type": str(row.get("relation_type") or ""),
+            "directionality": str(row.get("directionality") or ""),
+            "confidence": _clamp(row.get("confidence")),
+            "reason": str(row.get("reason") or ""),
+            "source_evidence": str(row.get("source_evidence") or ""),
+            "target_evidence": str(row.get("target_evidence") or ""),
+            "source_hash": str(row.get("source_hash") or ""),
+            "target_hash": str(row.get("target_hash") or ""),
+            "proposal_id": str(row.get("proposal_id") or ""),
+            "linker_version": str(row.get("linker_version") or ""),
+            "active": bool(row.get("active")),
+            "accepted_at": str(row.get("accepted_at") or ""),
+            "accepted_by": str(row.get("accepted_by") or ""),
+            "updated_at": str(row.get("updated_at") or ""),
+            "graph_scope": "scene",
+        }
+
 SCENE_LINKER_PROMPT = """\
 你是 Scene Linker。你的任务不是摘要、打标签或判断情绪，而是判断一条新 Scene 与少量旧 Scene 之间，是否存在足以支持自然回忆扩散的经历关系。
 
@@ -109,12 +291,11 @@ def _environment_value(name: str) -> str:
 
 
 def _scene_hash(scene: dict) -> str:
-    meta = scene.get("metadata", {}) if isinstance(scene.get("metadata"), dict) else {}
+    # Formal relationships are grounded in Scene prose. Title/cue edits may
+    # change candidate routing, but they must not invalidate a verbatim edge.
     payload = {
         "id": str(scene.get("id") or ""),
-        "name": str(meta.get("name") or ""),
         "content": str(scene.get("content") or ""),
-        "scene_cues": list(meta.get("scene_cues") or []),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -260,6 +441,7 @@ class SceneEdgeProposalStore:
             "CREATE INDEX IF NOT EXISTS idx_scene_edge_proposals_anchor "
             "ON scene_edge_proposals(anchor_scene_id, updated_at DESC)"
         )
+        _ensure_scene_edge_schema(conn)
         conn.commit()
         conn.close()
 
@@ -466,6 +648,117 @@ class SceneEdgeProposalStore:
         conn.close()
         return self._row(row)
 
+    def promote(self, proposal_id: str, *, reviewed_by: str = "") -> dict | None:
+        """Atomically accept one proposal and publish it to the Scene-only graph."""
+        normalized = str(proposal_id or "").strip()
+        now = _now_utc()
+        reviewer = str(reviewed_by or "").strip()[:80]
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM scene_edge_proposals WHERE proposal_id = ?",
+                (normalized,),
+            ).fetchone()
+            if row is None or str(row["status"] or "") != "pending":
+                conn.rollback()
+                return None
+            proposal = dict(row)
+            source_id = str(proposal.get("source_scene_id") or "")
+            target_id = str(proposal.get("target_scene_id") or "")
+            anchor_id = str(proposal.get("anchor_scene_id") or "")
+            source_hash = (
+                str(proposal.get("anchor_hash") or "")
+                if source_id == anchor_id
+                else str(proposal.get("candidate_hash") or "")
+            )
+            target_hash = (
+                str(proposal.get("anchor_hash") or "")
+                if target_id == anchor_id
+                else str(proposal.get("candidate_hash") or "")
+            )
+            relation_type = str(proposal.get("relation_type") or "")
+            source_evidence = str(proposal.get("source_evidence") or "")
+            target_evidence = str(proposal.get("target_evidence") or "")
+            if relation_type in SYMMETRIC_SCENE_RELATIONS and target_id < source_id:
+                source_id, target_id = target_id, source_id
+                source_hash, target_hash = target_hash, source_hash
+                source_evidence, target_evidence = target_evidence, source_evidence
+            edge_id = _scene_edge_id(source_id, target_id, relation_type)
+            _ensure_scene_edge_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO scene_edges (
+                    edge_id, source_scene_id, target_scene_id, relation_type,
+                    directionality, confidence, reason,
+                    source_evidence, target_evidence, source_hash, target_hash,
+                    proposal_id, linker_version, active,
+                    accepted_at, accepted_by, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                ON CONFLICT(edge_id) DO UPDATE SET
+                    directionality = excluded.directionality,
+                    confidence = excluded.confidence,
+                    reason = excluded.reason,
+                    source_evidence = excluded.source_evidence,
+                    target_evidence = excluded.target_evidence,
+                    source_hash = excluded.source_hash,
+                    target_hash = excluded.target_hash,
+                    proposal_id = excluded.proposal_id,
+                    linker_version = excluded.linker_version,
+                    active = 1,
+                    accepted_at = excluded.accepted_at,
+                    accepted_by = excluded.accepted_by,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    edge_id,
+                    source_id,
+                    target_id,
+                    relation_type,
+                    str(proposal.get("directionality") or ""),
+                    float(proposal.get("confidence") or 0.0),
+                    str(proposal.get("reason") or ""),
+                    source_evidence,
+                    target_evidence,
+                    source_hash,
+                    target_hash,
+                    normalized,
+                    str(proposal.get("linker_version") or SCENE_LINKER_VERSION),
+                    now,
+                    reviewer or None,
+                    now,
+                ),
+            )
+            updated = conn.execute(
+                """
+                UPDATE scene_edge_proposals
+                   SET status = 'accepted', updated_at = ?, reviewed_at = ?, reviewed_by = ?
+                 WHERE proposal_id = ? AND status = 'pending'
+                """,
+                (now, now, reviewer or None, normalized),
+            )
+            if int(updated.rowcount or 0) != 1:
+                conn.rollback()
+                return None
+            conn.commit()
+            edge_row = conn.execute(
+                "SELECT * FROM scene_edges WHERE edge_id = ?",
+                (edge_id,),
+            ).fetchone()
+            proposal_row = conn.execute(
+                "SELECT * FROM scene_edge_proposals WHERE proposal_id = ?",
+                (normalized,),
+            ).fetchone()
+            return {
+                "edge": SceneEdgeStore._edge_payload(dict(edge_row)),
+                "proposal": dict(proposal_row),
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def stats(self) -> dict:
         conn = self._connect()
         rows = conn.execute(
@@ -526,16 +819,39 @@ class SceneLinker:
             if proposal_store is not None
             else {"total": 0, "pending": 0, "accepted": 0, "rejected": 0, "superseded": 0}
         )
+        scene_edge_stats = SceneEdgeStore(self.config, create=False).stats()
         return {
             "enabled": self.enabled,
             "auto_enabled": self.auto_enabled,
             "configured_models": [provider["name"] for provider in self.providers],
             "ready_models": [provider["name"] for provider in self.providers if provider.get("client")],
+            "model_pool": [
+                {
+                    "position": index + 1,
+                    "name": provider["name"],
+                    "model": provider.get("model") or "",
+                    "ready": bool(provider.get("client")),
+                }
+                for index, provider in enumerate(self.providers)
+            ],
             "max_concurrency": self.max_concurrency,
             "proposal_store": proposal_stats,
+            "scene_edges": scene_edge_stats,
             "writes_canonical_memory": False,
             "writes_edge_store": False,
+            "writes_scene_edges_on_accept": True,
         }
+
+    def list_scene_edges(self, *, include_inactive: bool = False) -> list[dict]:
+        return SceneEdgeStore(self.config, create=False).list_edges(
+            include_inactive=include_inactive
+        )
+
+    def recall_scene_edges(self, scene_map: dict[str, dict]) -> list[dict]:
+        return SceneEdgeStore(self.config, create=False).recall_edges(scene_map)
+
+    def deactivate_scene_edges(self, scene_id: str) -> int:
+        return SceneEdgeStore(self.config, create=False).deactivate_for_scene(scene_id)
 
     @staticmethod
     def _load_providers(cfg: dict, clients: dict[str, Any]) -> list[dict]:
@@ -767,6 +1083,7 @@ class SceneLinker:
                 "proposals": [],
                 "writes_canonical_memory": False,
                 "writes_edge_store": False,
+                "writes_scene_edges_on_accept": True,
             }
         normalized_id = str(proposal_id or "").strip()
         if normalized_id:
@@ -810,6 +1127,7 @@ class SceneLinker:
             "stats": store.stats(),
             "writes_canonical_memory": False,
             "writes_edge_store": False,
+            "writes_scene_edges_on_accept": True,
         }
 
     async def review_proposal(
@@ -818,7 +1136,7 @@ class SceneLinker:
         decision: str,
         confirm: str,
         bucket_mgr,
-        edge_store,
+        edge_store=None,
         *,
         reviewed_by: str = "mcp",
     ) -> dict:
@@ -836,6 +1154,7 @@ class SceneLinker:
                 "decision": normalized_decision,
                 "required": required,
                 "memory_edges_changed": False,
+                "scene_edges_changed": False,
             }
 
         store = self.proposal_store(create=False)
@@ -851,6 +1170,7 @@ class SceneLinker:
                     "error": "proposal is not pending",
                     "proposal": proposal,
                     "memory_edges_changed": False,
+                    "scene_edges_changed": False,
                 }
             if normalized_decision == "reject":
                 updated = store.set_status(
@@ -865,12 +1185,14 @@ class SceneLinker:
                         "error": "proposal is not pending",
                         "proposal": updated or proposal,
                         "memory_edges_changed": False,
+                        "scene_edges_changed": False,
                     }
                 return {
                     "status": "rejected",
                     "proposal": updated,
                     "canonical_memory_changed": False,
                     "memory_edges_changed": False,
+                    "scene_edges_changed": False,
                 }
 
             anchor = await bucket_mgr.get(str(proposal.get("anchor_scene_id") or ""))
@@ -888,62 +1210,26 @@ class SceneLinker:
                     "proposal": proposal,
                     "canonical_memory_changed": False,
                     "memory_edges_changed": False,
+                    "scene_edges_changed": False,
                 }
 
-            before = next(
-                (
-                    edge
-                    for edge in edge_store.list_edges()
-                    if edge.get("source") == proposal.get("source_scene_id")
-                    and edge.get("target") == proposal.get("target_scene_id")
-                    and edge.get("relation_type") == proposal.get("relation_type")
-                ),
-                None,
-            )
-            edge = edge_store.add_edge(
-                proposal.get("source_scene_id"),
-                proposal.get("target_scene_id"),
-                proposal.get("relation_type"),
-                proposal.get("confidence", 0.5),
-                proposal.get("reason", ""),
-            )
-            if not edge:
+            _ = edge_store  # legacy call-site compatibility; Scene edges never use JSONL.
+            promoted = store.promote(normalized_id, reviewed_by=reviewed_by)
+            if not promoted:
                 return {
-                    "status": "error",
-                    "error": "edge write failed",
-                    "proposal": proposal,
+                    "status": "conflict",
+                    "error": "proposal is not pending",
+                    "proposal": store.get(normalized_id) or proposal,
                     "memory_edges_changed": False,
-                }
-            after = next(
-                (
-                    item
-                    for item in edge_store.list_edges()
-                    if item.get("source") == proposal.get("source_scene_id")
-                    and item.get("target") == proposal.get("target_scene_id")
-                    and item.get("relation_type") == proposal.get("relation_type")
-                ),
-                None,
-            )
-            updated = store.set_status(
-                normalized_id,
-                "accepted",
-                expected_status="pending",
-                reviewed_by=reviewed_by,
-            )
-            if not updated or str(updated.get("status") or "") != "accepted":
-                return {
-                    "status": "error",
-                    "error": "proposal status update failed",
-                    "proposal": updated or proposal,
-                    "edge": after or edge,
-                    "memory_edges_changed": before != after,
+                    "scene_edges_changed": False,
                 }
             return {
                 "status": "accepted",
-                "proposal": updated,
-                "edge": after or edge,
+                "proposal": promoted["proposal"],
+                "edge": promoted["edge"],
                 "canonical_memory_changed": False,
-                "memory_edges_changed": before != after,
+                "memory_edges_changed": False,
+                "scene_edges_changed": True,
             }
 
     async def _candidate_scenes(self, anchor: dict, bucket_mgr, embedding_engine) -> list[dict]:
@@ -1116,6 +1402,9 @@ class SceneLinker:
                 source_evidence, target_evidence = anchor_evidence, candidate_evidence
             else:
                 source_evidence, target_evidence = candidate_evidence, anchor_evidence
+            if relation in SYMMETRIC_SCENE_RELATIONS and target_scene_id < source_scene_id:
+                source_scene_id, target_scene_id = target_scene_id, source_scene_id
+                source_evidence, target_evidence = target_evidence, source_evidence
             edge = {
                 "anchor_scene_id": anchor_id,
                 "candidate_scene_id": candidate_id,
@@ -1149,5 +1438,6 @@ class SceneLinker:
             "scene_id": scene_id,
             "canonical_memory_changed": False,
             "memory_edges_changed": False,
+            "scene_edges_changed": False,
             **extra,
         }

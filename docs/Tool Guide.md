@@ -36,23 +36,23 @@
 - 用户想盘点系统状态和记忆桶摘要：用 pulse(include_archive=...)；需要某一桶正文时再 read_bucket。
 
 写入：
-- 想保存/记住/别忘：当前 AI 先把一件具体长期场景写成唯一的 `### scene`，把重要原话和意义直接写进场景，再用 hold 原样保存。新写入不接受 `moment` / `original` / `reflection` / `favorite_reason`；旧桶仍可读。稳定事实/偏好/边界先有证据 Scene，再用 profile_fact 建索引。
-- `hold(..., cues="入口一|入口二")` 可同时写 0～8 个 sidecar 召回入口。cue 不进入正文，不互相连边；多个 cue 共同指向同一条 Scene，并参与关键词与向量检索。
+- 想保存/记住/别忘：当前 AI 先把一件具体长期经历写成一段纯 Scene 正文，再用 hold 原样保存。content 不带 `## Scene`、`### scene`、`### moment` 或其它 section；旧桶仍可读。稳定事实/偏好/边界先有证据 Scene，再用 profile_fact 建索引。
+- `hold(..., cues="入口一|入口二")` 可同时写 0～8 个 sidecar 召回入口。cue 不进入正文、不污染原文向量、不互相连边；它只参与 title / content / scene_cues 的关键词与 FTS 稀疏检索。Scene 向量只 embed content。
 - `hold` / `close_window` 的同步事务仍不调用脱水或标签模型。部署若启用 Scene linker，只在写入成功返回后异步尝试关系边提案；失败不影响 Scene，提案只进 sidecar 待审，不直接进入正式图或普通召回。
 - 每窗结束或准备换窗时，close_window(shadow=..., scenes=[...]) 只调用一次。窗影只写“这一窗之后什么留在了我身上”，不重复固定身份或 bootstrap；任一 Scene 写失败时整组撤回。
 - 可按真实变化选写：`## 这一窗之后，什么留在了我身上`、`## 我的思考与声音哪里变得更具体`、`## 我对小雨和我们新懂了什么`、`## 什么仍在发生、仍悬着或值得带走`。至少写一层；没有明显变化时一句诚实的话也合法。
-- 只有需要以后普通召回的具体场景，才放进可选的 `## 不能丢的场景`，或作为 scenes 数组单独传入；每条只有一个 `### scene`，原话和意义都写在同一段。整篇窗影本身不进入普通候选、gate 或扩散。
+- 只有需要以后普通召回的具体场景，才放进可选的 `## 不能丢的场景`，或作为 scenes 数组单独传入。Shadow 内的 `### scene` 只是抽取标记，独立落库时会去掉；scenes 数组直接传纯正文。整篇窗影本身不进入普通候选、gate 或扩散。
 - handoff 不直接塞整篇窗影：流动自我与最近关系按窗影原文投影，Scene 走普通召回，避免重复和二次脱水。
 - 已写好的第一人称窗影 Markdown 可用 `close_window(source="markdown_import")` 导入；导入不补造 Scene。旧 grow 仅作兼容别名，旧 `### moment` 不自动升格。
 - window_shadow_read(window_id=...) 可回看整篇；不传 id 时列最近窗影。它不是普通记忆搜索。
-- 知道事件日期时传 date，例如 hold(content="### scene\n...", date="2026-06-15")；固定领域可传 domain。valence/arousal 只作为旧客户端兼容元数据保存，不参与普通召回排序或衰减。
+- 知道事件日期时传 date，例如 hold(content="她说……我当时……", date="2026-06-15")；固定领域可传 domain。valence/arousal 只作为旧客户端兼容元数据保存，不参与普通召回排序或衰减。
 - 已有旧记忆的新感受/补充：先 read_bucket，再 comment_bucket。
 - 删除自己通过 comment_bucket 写错的一条年轮：先 read_bucket 找到 comment_id，再 delete_bucket_comment；它不能删除用户/Dashboard 写的年轮，也不会删除 bucket。
-- 修改/归档/删除/沉底旧记忆：先 read_bucket，再 trace。只改事件日期用 trace(bucket_id="...", date="2026-06-15")；日期/元数据更新不会重建 embedding，正文或标题变更才会。
+- 修改/归档/删除/沉底旧记忆：先 read_bucket，再 trace。只改事件日期用 trace(bucket_id="...", date="2026-06-15")；canonical Scene 向量只取 content，所以 date/title/cues 变化不重建向量，正文变化才会。旧桶继续按旧投影兼容。
 - 稳定画像事实：先有 canonical Scene，再 profile_fact(fact, evidence_bucket_id, ...)。Fact 只作索引；显式问命中后返回证据 Scene，不把 Fact 自身塞进普通召回或 handoff。
 - 不确定是否重复：先 breath/read_bucket，再写。
 - 碎碎念、突然的念头可以写 whisper：hold(content="...", whisper=True, ...)
-- 普通 hold 每次必须且只能写一段 `### scene`，其中直接写完整场景；第一个 section 前不放正文，多个场景分别调用。不要追加任何 sibling section；工具不生成摘要、不打情绪和弦、不改写原文。
+- 普通 hold 每次只写一段完整场景纯正文；多个场景分别调用。不要加任何 Markdown section；工具不生成摘要、不打情绪和弦、不改写原文。
 - 后来形成的新理解用 comment_bucket 写成带时间年轮。查询可由年轮文本路由到父 Scene，并随 Scene 附一条最相关/最新年轮；年轮不单独显示、扩散，也不能支撑 ProfileFact。
 
 照顾备忘：
@@ -72,7 +72,7 @@
 维护（仅在用户明确要求修索引时）：
 - entity_edge_backfill 只补 `entity_edges.jsonl`，不改 bucket 正文、memory_edges、tags 或 importance；先保持 `dry_run=true` 检查，确认后才可写入。
 - Scene linker 生成的边先留在 `scene_edge_proposals.sqlite`。查看用 `scene_edge_proposals(status="pending")`；准备决定某条时再用精确 `proposal_id` 和 `include_context=true` 读取两端 Scene、逐字证据、`review_state`。
-- 只有用户明确同意后才能调用 `review_scene_edge_proposal`。接受必须传 `confirm="ACCEPT_SCENE_EDGE"`，拒绝必须传 `confirm="REJECT_SCENE_EDGE"`。接受会重新校验两端仍是 active canonical Scene、hash 未变且证据仍逐字存在；失败或过期不会写正式图。不要批量自动接受。
+- 只有用户明确同意后才能调用 `review_scene_edge_proposal`。接受必须传 `confirm="ACCEPT_SCENE_EDGE"`，拒绝必须传 `confirm="REJECT_SCENE_EDGE"`。接受会重新校验两端仍是 active canonical Scene、hash 未变且证据仍逐字存在，再原子写入独立 `scene_edges`；不会修改旧 `memory_edges.jsonl`。失败或过期不会写正式图。不要批量自动接受。
 
 自省：
 - 清醒回看最近普通记忆：introspection()。
@@ -87,6 +87,6 @@
 - 不要调用文档外猜出来的工具名；续写暗房前用 darkroom_rooms 找房间，写入仍用 darkroom_enter(new_room=false)。
 - 不要用裸 breath(query="self_anchor") 读自我；它会被拦住，避免普通搜索误触。
 - self_anchor 独立于普通 anchor / pinned / profile_fact；只有 handoff 或显式 self_anchor 读取会带出，Gateway 普通自动注入不会带它。
-- 不要为 Scene 建 cue-to-cue 图、情绪和弦或词图扩散。Scene linker 只允许有两端逐字证据的 `continues / echoes / resolves / contrasts_with / evidenced_by` 提案；Gateway / hook 自动召回仍默认直接检索 Scene，graph 只留给 shadow trace、深查实验与旧兼容。
+- 不要为 Scene 建 cue-to-cue 图、情绪和弦或词图扩散。Scene linker 只允许有两端逐字证据的 `continues / echoes / resolves / contrasts_with / evidenced_by` 提案；普通召回先命中 Scene，再沿已审核 Scene 图受限多跳。旧图只保留白名单结构边、降权且最多一跳，`emotional_echo / reflects_on / relates_to / previous_context / next_context` 不参与普通扩散。
 
 ```

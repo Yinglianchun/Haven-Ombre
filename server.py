@@ -86,7 +86,11 @@ from memory_diffusion import (
     seed_scores_for_buckets,
     should_suppress_context_candidate,
 )
-from memory_edges import MemoryEdgeStore
+from memory_edges import (
+    MemoryEdgeStore,
+    legacy_edges_for_recall,
+    legacy_moment_edges_for_recall,
+)
 from entity_edges import EntityEdgeStore, extract_entity_edges_from_bucket
 from memory_cards import ShadowMemoryCardStore
 from memory_moments import MemoryMomentStore, parse_bucket_moments
@@ -138,12 +142,14 @@ from scripts.migrate_affect_anchor_sections import plan_bucket_migration
 from source_refs import source_ref_window
 from word_map import WordMapStore, reflection_identity_terms
 from utils import (
+    active_scene_migration_map,
     bucket_content_for_recall,
     bucket_text_for_embedding,
     count_tokens_approx,
     LOCAL_TZ,
     local_date_key,
     load_config,
+    migrated_scene_for_legacy_source,
     normalize_scene_cues,
     now_iso,
     parse_human_date_reference,
@@ -153,6 +159,7 @@ from utils import (
     strip_followup_sections,
     strip_temperature_meaning_lines,
     strip_wikilinks,
+    suppress_migrated_legacy_sources,
 )
 
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
@@ -2221,58 +2228,22 @@ def _memory_write_contract_error(content: str, *, feel_only: bool = False) -> st
 
 
 def _hold_scene_contract_error(content: str) -> str:
-    """Require exactly one canonical Scene and no derived sibling sections."""
+    """Require one plain authored Scene body with no legacy section wrappers."""
     text = strip_wikilinks(str(content or "")).strip()
-    matches = list(re.finditer(r"(?m)^\s{0,3}#{2,6}\s+(.+?)\s*$", text))
-    if not matches:
+    if not text:
+        return "Scene 正文为空，未保存。"
+    heading = re.search(r"(?m)^\s{0,3}#{1,6}\s+\S.*$", text)
+    if heading:
         return (
-            "hold 现在只保存一件完整场景；请由当前 AI 先写好 `### scene`，工具不会再替你生成摘要。"
-            "稳定偏好或身份事实请先保存证据场景，再用 profile_fact。"
+            "Scene 已经是记忆对象类型，正文不要再写 `## Scene`、`### scene`、`### moment` "
+            "或其他 Markdown section；只传那段原文经历。"
         )
-    if text[: matches[0].start()].strip():
-        return "hold 的场景事实必须全部写在 `### scene` 内，不要在第一个 section 前另放正文。"
-
-    scene_blocks = []
-    for index, match in enumerate(matches):
-        heading = _normalize_section_heading(match.group(1))
-        if heading not in _HOLD_SCENE_ALLOWED_HEADINGS:
-            return (
-                f"hold 的新写入协议不接受 `### {match.group(1).strip()}`；只允许一段 `### scene`。"
-                "重要原话和为什么重要都直接写进场景；后来产生的新理解请用带时间的年轮。"
-            )
-        if heading == "scene":
-            end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-            scene_blocks.append(text[match.end():end].strip())
-
-    if len(scene_blocks) != 1:
-        return "hold 每次必须且只能新写一段 `### scene`；多个场景请分别调用 hold。旧桶的 `### moment` 只做读取兼容。"
-    if not scene_blocks[0]:
-        return "`### scene` 下面没有场景内容，未保存。"
     return ""
 
 
 def _authored_scene_title(content: str, explicit_title: str = "") -> str:
     title = str(explicit_title or "").strip()
-    if title:
-        return title[:48]
-    text = strip_wikilinks(str(content or ""))
-    scene = re.search(r"(?mi)^\s{0,3}#{2,6}\s+scene\s*$", text)
-    if not scene:
-        return ""
-    tail = text[scene.end():]
-    next_heading = re.search(r"(?m)^\s{0,3}#{2,6}\s+", tail)
-    body = tail[: next_heading.start()] if next_heading else tail
-    for line in body.splitlines():
-        clean = line.strip().lstrip("-—*• ").strip()
-        if not clean:
-            continue
-        named = re.match(r"^(?:标题|名字|名称)\s*[:：]\s*(.+)$", clean)
-        if named:
-            return named.group(1).strip()[:48]
-        if len(clean) <= 36 and not re.search(r"[。！？!?]$", clean):
-            return clean[:48]
-        break
-    return ""
+    return title[:48] if title else ""
 
 
 def _authored_scene_cues(content: str, *, title: str = "", explicit: object = None) -> list[str]:
@@ -2283,17 +2254,6 @@ def _authored_scene_cues(content: str, *, title: str = "", explicit: object = No
         values.append(title)
 
     text = strip_wikilinks(str(content or ""))
-    headings = list(re.finditer(r"(?m)^\s{0,3}#{2,6}\s+(.+?)\s*$", text))
-    for index, match in enumerate(headings):
-        heading = _normalize_section_heading(match.group(1))
-        if heading != "original":
-            continue
-        end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
-        for line in text[match.end():end].splitlines():
-            clean = line.strip().lstrip(">-—*• ").strip(" \t\r\n\"'“”‘’")
-            if 2 <= len(clean) <= 80:
-                values.append(clean)
-
     for quoted in re.findall(r"[“\"]([^“”\"\n]{2,80})[”\"]", text):
         values.append(quoted)
     return normalize_scene_cues(values)
@@ -2893,6 +2853,23 @@ def _is_canonical_scene_bucket(bucket: dict | None) -> bool:
         moment.get("section") == "scene"
         for moment in parse_bucket_moments(bucket, _recall_relevance_options())
     )
+
+
+def _bucket_edges_for_recall(bucket_map: dict[str, dict]) -> list[dict]:
+    """Combine reviewed Scene edges with one-hop discounted legacy compatibility."""
+    scene_ids = {
+        str(bucket_id)
+        for bucket_id, bucket in (bucket_map or {}).items()
+        if _is_canonical_scene_bucket(bucket)
+    }
+    scene_edges = scene_linker.recall_scene_edges(
+        {scene_id: bucket_map[scene_id] for scene_id in scene_ids}
+    )
+    legacy_edges = legacy_edges_for_recall(
+        memory_edge_store.list_edges(),
+        scene_ids=scene_ids,
+    )
+    return [*scene_edges, *legacy_edges]
 
 
 def _is_fact_evidence_recall_bucket(
@@ -3551,6 +3528,7 @@ async def health_check(request):
             "buckets": stats["permanent_count"] + stats["dynamic_count"],
             "decay_engine": "running" if decay_engine.is_running else "stopped",
             "memory_edges": len(memory_edge_store.list_edges()),
+            "scene_edges": len(scene_linker.list_scene_edges()),
             "entity_edges": len(entity_edge_store.list_edges()),
             "reflection": {
                 "enabled": reflection_engine.enabled,
@@ -3919,6 +3897,12 @@ def _delete_bucket_indexes(bucket_id: str) -> tuple[dict, list[str]]:
     except Exception as e:
         logger.warning("Failed to delete memory edges for bucket / 删除桶关系边失败: %s: %s", bucket_id, e)
         errors.append("edges")
+
+    try:
+        cleanup["scene_edges"] = scene_linker.deactivate_scene_edges(bucket_id)
+    except Exception as e:
+        logger.warning("Failed to deactivate Scene edges / 停用 Scene 边失败: %s: %s", bucket_id, e)
+        errors.append("scene_edges")
 
     try:
         cleanup["entity_edges"] = entity_edge_store.delete_for_bucket(bucket_id)
@@ -4675,7 +4659,7 @@ async def _build_mcp_diffused_memory_block(
 
     edges = [
         edge
-        for edge in memory_edge_store.list_edges()
+        for edge in _bucket_edges_for_recall(bucket_map)
         if float(edge.get("confidence", 0.0)) >= min_confidence
     ]
     diffusion_options = _breath_related_diffusion_options(len(source_ids) * limit_per_source)
@@ -4860,7 +4844,14 @@ async def _ordinary_seed_buckets_with_fact_routes(buckets: list[dict]) -> list[d
 
     Facts remain searchable routing records, but never become visible candidates.
     """
-    ordinary = _breath_recall_seed_buckets(buckets)
+    all_active = await bucket_mgr.list_all(include_archive=False)
+    migration_map = active_scene_migration_map(all_active)
+    migrated_source_ids = set(migration_map)
+    ordinary = [
+        bucket
+        for bucket in _breath_recall_seed_buckets(buckets)
+        if str(bucket.get("id") or "") not in migrated_source_ids
+    ]
     by_id = {
         str(bucket.get("id") or ""): bucket
         for bucket in ordinary
@@ -4878,24 +4869,36 @@ async def _ordinary_seed_buckets_with_fact_routes(buckets: list[dict]) -> list[d
             fact_score = 0.0
         fact_sections = _profile_fact_sections(fact_bucket.get("content", ""))
         for evidence in _profile_fact_evidence(fact_bucket):
-            evidence_id = str(evidence.get("bucket_id") or "").strip()
-            if not evidence_id or not MEMORY_ID_RE.fullmatch(evidence_id):
+            source_evidence_id = str(evidence.get("bucket_id") or "").strip()
+            if not source_evidence_id or not MEMORY_ID_RE.fullmatch(source_evidence_id):
                 continue
-            evidence_bucket = await bucket_mgr.get(evidence_id)
             evidence_moment_id = str(evidence.get("moment_id") or "")
+            migrated_scene = migrated_scene_for_legacy_source(
+                migration_map,
+                source_evidence_id,
+                evidence_moment_id,
+            )
+            evidence_bucket = migrated_scene or await bucket_mgr.get(source_evidence_id)
+            evidence_id = str((evidence_bucket or {}).get("id") or source_evidence_id)
             if not _is_fact_evidence_recall_bucket(
                 evidence_bucket,
-                evidence_moment_id=evidence_moment_id,
+                # The moment id identifies the exact span in the preserved
+                # source bucket; migrated Scenes have their own parsed moment
+                # ids and are validated as canonical Scene objects instead.
+                evidence_moment_id="" if migrated_scene is not None else evidence_moment_id,
             ):
                 continue
             routed = dict(evidence_bucket)
             routed["score"] = max(float(routed.get("score", 0.0) or 0.0), fact_score * 0.98)
-            routed["profile_fact_route"] = {
+            route_payload = {
                 "fact_id": str(fact_bucket.get("id") or ""),
                 "fact": str(fact_sections.get("fact") or ""),
                 "evidence_moment_id": evidence_moment_id,
                 "legacy_evidence": not _is_canonical_scene_bucket(evidence_bucket),
             }
+            if evidence_id != source_evidence_id:
+                route_payload["source_evidence_bucket_id"] = source_evidence_id
+            routed["profile_fact_route"] = route_payload
             existing = by_id.get(evidence_id)
             if not existing or float(existing.get("score", 0.0) or 0.0) < routed["score"]:
                 by_id[evidence_id] = routed
@@ -5007,6 +5010,7 @@ def _bucket_edges_as_moment_edges(bucket_edges: list[dict], grouped: dict[str, l
                     "relation_type": relation_type,
                     "confidence": max(0.0, min(1.0, confidence)),
                     "reason": edge.get("reason") or "bucket edge bridge",
+                    "graph_scope": str(edge.get("graph_scope") or ""),
                 }
             )
     return edges
@@ -7089,11 +7093,16 @@ async def _refresh_moment_graph(all_buckets: list[dict] | None = None) -> tuple[
     }
     edges = [
         edge
-        for edge in memory_moment_store.list_edges()
+        for edge in legacy_moment_edges_for_recall(memory_moment_store.list_edges())
         if str(edge.get("source") or "") in moment_ids
         and str(edge.get("target") or "") in moment_ids
     ]
-    edges.extend(_bucket_edges_as_moment_edges(memory_edge_store.list_edges(), grouped))
+    bucket_map = {
+        str(bucket.get("id") or ""): bucket
+        for bucket in recallable_buckets
+        if str(bucket.get("id") or "")
+    }
+    edges.extend(_bucket_edges_as_moment_edges(_bucket_edges_for_recall(bucket_map), grouped))
     return moments, grouped, edges
 
 
@@ -7366,7 +7375,7 @@ async def inspect_diffusion(
 
     edges = [
         edge
-        for edge in memory_edge_store.list_edges()
+        for edge in _bucket_edges_for_recall(bucket_map)
         if float(edge.get("confidence", 0.0)) >= edge_min_confidence
     ]
     options = replace(diffusion_options_from_config(config), top_k=max_hits)
@@ -8995,7 +9004,7 @@ async def hold(
     domain: str = "",
     cues: str = "",
 ) -> str:
-    """原样保存一件由当前 AI 写好的长期 Scene，不调用模型脱水、改写、命名或同步打标。普通 content 必须且只能有一段 `### scene`：把人物、发生了什么、关键原话/动作、转折、结果与为什么不能丢自然写进同一段场景，不另写 `original` / `reflection` / `favorite_reason`。多个场景分别调用 hold。cues 可用 `|` 或换行传 0～8 个未来可能自然出现的召回入口；它们只写入 sidecar 索引，不进入 Scene 正文，也不会彼此扩散。若部署启用 Scene linker，写入返回后可异步生成待审关系边提案；提案不改正文、不写正式边，也不影响本次写入和普通召回。稳定偏好/边界/身份事实先 hold 证据 Scene，再用 profile_fact 建索引。旧记忆后来产生的新理解用 comment_bucket 写成带时间年轮；无源碎碎念用 whisper=True。date/title/domain 是可选的确定性元数据。valence/arousal 仅为旧客户端兼容。feel=True/whisper=True 时 content 仍只写第一人称正文。旧桶的 body / moment / original / reflection 仍可读取，但退出新写入协议。"""
+    """原样保存一件由当前 AI 写好的长期 Scene，不调用模型脱水、改写、命名或同步打标。普通 content 直接写一段完整原文经历，不要添加 `## Scene`、`### scene`、`### moment` 或 sibling section。Scene 对象本身就是类型和普通召回单位。多个场景分别调用 hold。cues 可用 `|` 或换行传 0～8 个未来可能自然出现的召回入口；它们只写入稀疏 sidecar 索引，不进入 Scene 正文或原文向量，也不会彼此扩散。Scene 向量只 embed content 原文。若部署启用 Scene linker，写入返回后可异步生成待审关系边提案；提案必须引用两端 content 原句，不改正文、不自动写正式边。稳定偏好/边界/身份事实先 hold 证据 Scene，再用 profile_fact 建索引。旧记忆后来产生的新理解用 comment_bucket 写成带时间年轮；无源碎碎念用 whisper=True。date/title/domain 是可选的确定性元数据。valence/arousal 仅为旧客户端兼容。feel=True/whisper=True 时 content 仍只写第一人称正文。旧桶的 body / moment / original / reflection 仍可读取，但退出新写入协议。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -9112,7 +9121,7 @@ async def hold(
                     classification["memory_classification_source"],
                 ),
                 "memory_value_source": "authored_scene",
-                "write_contract": "hold-scene-v1",
+                "write_contract": "hold-scene-v2",
                 "scene_cues": scene_cues or None,
             },
         )
@@ -9138,7 +9147,7 @@ async def hold(
         source="hold_scene",
         extra_metadata={
             "memory_value_source": "authored_scene",
-            "write_contract": "hold-scene-v1",
+            "write_contract": "hold-scene-v2",
             "scene_cues": scene_cues or None,
         },
         normalize_content=False,
@@ -9274,7 +9283,7 @@ async def _write_window_shadow_scene(
             "window_shadow_index": index,
             "scene_source_hash": WindowShadowStore.source_hash(scene_content),
             "memory_value_source": "authored_scene",
-            "write_contract": "close-window-scene-v1",
+            "write_contract": "close-window-scene-v2",
             "scene_cues": scene_cues or None,
             **_memory_classification_metadata(
                 classification["memory_subject"],
@@ -9425,7 +9434,7 @@ async def close_window(
     source: str = "",
     context: Context | None = None,
 ) -> dict:
-    """窗口结束时原子保存一篇完整第一人称 Window Shadow，并可同时保存 0~N 个独立 Scene。Shadow 原文不改写、不进入普通召回；每个 Scene 必须且只能有一个 `### scene`，重要原话和意义直接长在场景里，进入普通召回。若部署启用 Scene linker，原子写入完成后只为新建 Scene 异步生成待审关系边提案，不阻塞换窗、不写正式边。后来才产生的新理解用带时间的 comment_bucket 年轮。Scene 可写在窗影的 `## 不能丢的场景` 下，也可通过 scenes 数组单独传入，但不能重复。已经写好的 Markdown 用 source="markdown_import" 只转成窗影，不补造 Scene。"""
+    """窗口结束时原子保存一篇完整第一人称 Window Shadow，并可同时保存 0~N 个独立 Scene。Shadow 原文不改写、不进入普通召回。scenes 数组中的每个元素直接是一段原文经历，不带 `## Scene` / `### scene` / `### moment`；若 Scene 写在 Shadow 的 `## 不能丢的场景` 内，`### scene` 只作为 Shadow 中的抽取标记，落库时会去掉，Scene.content 仍只保存原文经历。若部署启用 Scene linker，原子写入完成后只为新建 Scene 异步生成待审关系边提案，不阻塞换窗、不写正式边。后来才产生的新理解用带时间的 comment_bucket 年轮。已经写好的 Markdown 用 source="markdown_import" 只转成窗影，不补造 Scene。"""
     _ = context
     resolved_source = str(source or "").strip().lower()
     if resolved_source in {"operit", "ob-auto-grow", "auto", "workflow", "worker"}:
@@ -11983,6 +11992,24 @@ async def api_network(request):
                     "reason": edge["reason"],
                 })
 
+        scene_map = {
+            str(bucket.get("id") or ""): bucket
+            for bucket in all_buckets
+            if _is_canonical_scene_bucket(bucket)
+        }
+        for edge in scene_linker.recall_scene_edges(scene_map):
+            if edge["source"] in node_ids and edge["target"] in node_ids:
+                edges.append({
+                    "source": edge["source"],
+                    "target": edge["target"],
+                    "similarity": edge["confidence"],
+                    "kind": "scene_edge",
+                    "relation_type": edge["relation_type"],
+                    "confidence": edge["confidence"],
+                    "reason": edge["reason"],
+                    "proposal_id": edge["proposal_id"],
+                })
+
         return JSONResponse({"nodes": nodes, "edges": edges})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -11996,6 +12023,16 @@ async def api_edges(request):
     if err:
         return err
     return JSONResponse({"edges": memory_edge_store.list_edges()})
+
+
+@mcp.custom_route("/api/scene-edges", methods=["GET"])
+async def api_scene_edges(request):
+    """List reviewed Scene-only edges; legacy JSONL edges are excluded."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    return JSONResponse({"edges": scene_linker.list_scene_edges()})
 
 
 @mcp.custom_route("/api/breath-debug", methods=["GET"])
