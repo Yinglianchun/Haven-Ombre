@@ -469,10 +469,8 @@ def _active_migration_predecessor_map(buckets: list[dict]) -> dict[str, list[dic
         if (
             str(metadata.get("memory_value_source") or "") != "authored_scene"
             or str(metadata.get("type") or "") == "archived"
-            or metadata.get("active") is False
             or metadata.get("resolved")
             or metadata.get("digested")
-            or metadata.get("deprecated")
         ):
             continue
         output.setdefault(source_id, []).append(bucket)
@@ -567,7 +565,10 @@ async def apply_plan(
                 else:
                     embedding_refreshed = False
                 if not embedding_ready:
-                    _write_metadata(Path(existing["path"]), {"active": False, "migration_embedding_failed": True})
+                    _write_metadata(
+                        Path(existing["path"]),
+                        {"active": False, "resolved": True, "migration_embedding_failed": True},
+                    )
                     results.append(
                         {
                             "scene_id": action["scene_id"],
@@ -583,7 +584,12 @@ async def apply_plan(
             if existing:
                 _write_metadata(
                     Path(existing["path"]),
-                    {"active": True, "deprecated": False, "migration_embedding_failed": None},
+                    {
+                        "active": True,
+                        "deprecated": False,
+                        "resolved": False,
+                        "migration_embedding_failed": None,
+                    },
                 )
                 existing = await bucket_mgr.get(action["scene_id"])
                 if existing:
@@ -593,6 +599,14 @@ async def apply_plan(
                 bucket
                 for bucket in predecessor_map.get(action["source_bucket_id"], [])
                 if str(bucket.get("id") or "") != action["scene_id"]
+                and (
+                    (
+                        (bucket.get("metadata") or {}).get("active") is not False
+                        and not (bucket.get("metadata") or {}).get("deprecated")
+                    )
+                    or str((bucket.get("metadata") or {}).get("superseded_by") or "")
+                    == action["scene_id"]
+                )
             ]
             superseded: list[str] = []
             for predecessor in predecessors:
@@ -602,6 +616,7 @@ async def apply_plan(
                     {
                         "active": False,
                         "deprecated": True,
+                        "resolved": True,
                         "superseded_by": action["scene_id"],
                         "migration_superseded_at": now_iso(),
                     },

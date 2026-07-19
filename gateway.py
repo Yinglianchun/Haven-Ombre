@@ -2650,6 +2650,10 @@ class GatewayService:
 
         stage_started_at = time.perf_counter()
         all_buckets = await self._list_gateway_buckets(include_archive=False)
+        # Migration replacement is global, not only a dynamic-candidate rule.
+        # Core, favorite, date and recent-context paths must see the canonical
+        # Scene instead of independently injecting the preserved source bucket.
+        all_buckets = suppress_migrated_legacy_sources(all_buckets)
         mark_step("list_all_buckets", stage_started_at)
 
         stage_started_at = time.perf_counter()
