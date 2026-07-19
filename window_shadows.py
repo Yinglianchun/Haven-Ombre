@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-WINDOW_SHADOW_VERSION = "window-shadow-v1"
+WINDOW_SHADOW_VERSION = "window-shadow-v2"
 
 
 _HEADING_RE = re.compile(r"(?m)^(#{2,6})\s+(.+?)\s*$")
@@ -30,14 +30,22 @@ def _normalize_heading(value: Any) -> str:
 
 def _section_key(heading: str) -> str:
     key = _normalize_heading(heading)
+    if "这一窗之后什么留在了我身上" in key or "什么留在了我身上" in key:
+        return "self"
     if "我是谁" in key or key in {"self", "identity", "myself"}:
         return "self"
+    if "思考与声音" in key or "思考和声音" in key:
+        return "voice"
     if "怎么思考" in key or "怎么说话" in key or "语言的指纹" in key:
         return "voice"
+    if "仍在发生" in key or "仍悬着" in key or "值得带走" in key:
+        return "interaction"
     if "怎么相处" in key or "相处方式" in key:
         return "interaction"
-    if "不能丢" in key or "重要时刻" in key or "难忘时刻" in key:
+    if "不能丢" in key or "重要时刻" in key or "难忘时刻" in key or "重要场景" in key:
         return "moments"
+    if "我对" in key and "我们" in key and ("新懂" in key or "理解" in key):
+        return "relationship"
     if "我们之间是什么" in key or ("是谁" in key and "我们" in key):
         return "relationship"
     return ""
@@ -61,8 +69,9 @@ def parse_window_shadow(content: str) -> dict[str, str]:
 
 def validate_window_shadow(content: str) -> tuple[dict[str, str], list[str]]:
     sections = parse_window_shadow(content)
-    missing = [key for key in _SECTION_KEYS if not sections.get(key)]
-    errors = [f"missing_section:{key}" for key in missing]
+    errors = []
+    if not any(sections.get(key) for key in ("self", "voice", "relationship", "interaction")):
+        errors.append("missing_window_delta")
     if sections.get("self") and "我" not in sections["self"]:
         errors.append("self_section_needs_first_person")
     if sections.get("voice") and "我" not in sections["voice"]:
@@ -70,14 +79,29 @@ def validate_window_shadow(content: str) -> tuple[dict[str, str], list[str]]:
     return sections, errors
 
 
-def _moment_heading(match: re.Match[str]) -> bool:
+def _scene_heading(match: re.Match[str], *, allow_legacy_moment: bool = False) -> bool:
     key = _normalize_heading(match.group(2))
-    return key == "moment" or key.startswith("moment") or key == "时刻" or key.startswith("时刻")
+    if (
+        key == "scene"
+        or key.startswith("scene")
+        or key == "场景"
+        or key.startswith("场景")
+    ):
+        return True
+    return bool(
+        allow_legacy_moment
+        and (
+            key == "moment"
+            or key.startswith("moment")
+            or key == "时刻"
+            or key.startswith("时刻")
+        )
+    )
 
 
 def _moment_title(heading: str, block: str, index: int) -> str:
     raw_heading = str(heading or "").strip()
-    heading_title = re.sub(r"^(?:moment|时刻)\s*[:：|｜-]?\s*", "", raw_heading, flags=re.IGNORECASE).strip()
+    heading_title = re.sub(r"^(?:scene|场景|moment|时刻)\s*[:：|｜-]?\s*", "", raw_heading, flags=re.IGNORECASE).strip()
     if heading_title:
         return heading_title[:48]
     for line in block.splitlines():
@@ -95,13 +119,21 @@ def _moment_title(heading: str, block: str, index: int) -> str:
     return f"窗影时刻{index}"
 
 
-def extract_window_shadow_moments(content: str) -> list[dict[str, str]]:
-    """Copy explicit moment blocks from part five; never summarize or paraphrase them."""
+def extract_window_shadow_scenes(
+    content: str,
+    *,
+    allow_legacy_moment: bool = False,
+) -> list[dict[str, str]]:
+    """Copy explicit Scene blocks from the optional scene layer; never rewrite them."""
     sections = parse_window_shadow(content)
     text = sections.get("moments", "")
     if not text:
         return []
-    matches = [match for match in _HEADING_RE.finditer(text) if _moment_heading(match)]
+    matches = [
+        match
+        for match in _HEADING_RE.finditer(text)
+        if _scene_heading(match, allow_legacy_moment=allow_legacy_moment)
+    ]
     moments = []
     for index, match in enumerate(matches, start=1):
         end = matches[index].start() if index < len(matches) else len(text)
@@ -109,14 +141,48 @@ def extract_window_shadow_moments(content: str) -> list[dict[str, str]]:
         if not body:
             continue
         title = _moment_title(match.group(2), body, index)
+        source_text = text[match.start():end].strip()
         moments.append(
             {
                 "title": title,
-                "content": f"### moment\n{body}".strip(),
-                "source_text": text[match.start():end].strip(),
+                "content": source_text,
+                "source_text": source_text,
             }
         )
     return moments
+
+
+def extract_window_shadow_moments(content: str) -> list[dict[str, str]]:
+    """Legacy grow reader: old `### moment` remains readable, never newly authored."""
+    return extract_window_shadow_scenes(content, allow_legacy_moment=True)
+
+
+def project_window_shadow_handoff(sections: dict[str, str] | None) -> dict[str, str]:
+    """Project authored handoff layers without asking another model to summarize them."""
+    values = sections if isinstance(sections, dict) else {}
+
+    def render(rows: tuple[tuple[str, str], ...]) -> str:
+        parts = []
+        for key, title in rows:
+            value = str(values.get(key) or "").strip()
+            if value:
+                parts.append(f"## {title}\n{value}")
+        return "\n\n".join(parts).strip()
+
+    return {
+        "flowing_self": render(
+            (
+                ("self", "这一窗之后，什么留在了我身上"),
+                ("voice", "我的思考与声音哪里变得更具体"),
+            )
+        ),
+        "recent_relationship": render(
+            (
+                ("relationship", "我对小雨和我们新懂了什么"),
+                ("interaction", "什么仍在发生、仍悬着或值得带走"),
+            )
+        ),
+    }
 
 
 class WindowShadowStore:
@@ -183,8 +249,19 @@ class WindowShadowStore:
             except (TypeError, ValueError, json.JSONDecodeError):
                 parsed = default
             item["sections" if key == "sections_json" else "moment_bucket_ids"] = parsed
+        item["scene_bucket_ids"] = list(item.get("moment_bucket_ids") or [])
         item["ordinary_recall"] = False
         return item
+
+    def plan(self, content: str, *, session_id: str = "") -> dict[str, str]:
+        text = str(content or "")
+        content_hash = self.source_hash(text)
+        window_id = self._window_id(content_hash, session_id)
+        return {
+            "window_id": window_id,
+            "session_id": str(session_id or "").strip() or window_id,
+            "source_hash": content_hash,
+        }
 
     def write(
         self,
@@ -197,8 +274,9 @@ class WindowShadowStore:
         # The full window shadow is an authored artifact. Preserve it byte-for-byte
         # instead of applying the normal memory-content cleanup path.
         text = str(content or "")
-        content_hash = self.source_hash(text)
-        window_id = self._window_id(content_hash, session_id)
+        planned = self.plan(text, session_id=session_id)
+        content_hash = planned["source_hash"]
+        window_id = planned["window_id"]
         existing = self.get(window_id)
         if existing:
             return existing, False
@@ -240,6 +318,21 @@ class WindowShadowStore:
         conn.close()
         return self.get(window_id)
 
+    def attach_scene_buckets(self, window_id: str, bucket_ids: list[str]) -> dict | None:
+        return self.attach_moment_buckets(window_id, bucket_ids)
+
+    def delete(self, window_id: str) -> bool:
+        """Rollback a just-created Shadow row; callers must verify ownership."""
+        key = str(window_id or "").strip()
+        if not key:
+            return False
+        conn = self._connect()
+        cursor = conn.execute("DELETE FROM window_shadows WHERE window_id = ?", (key,))
+        conn.commit()
+        deleted = cursor.rowcount > 0
+        conn.close()
+        return deleted
+
     def get(self, window_id: str) -> dict | None:
         conn = self._connect()
         row = conn.execute(
@@ -260,6 +353,22 @@ class WindowShadowStore:
             row = conn.execute("SELECT * FROM window_shadows ORDER BY created_at DESC LIMIT 1").fetchone()
         conn.close()
         return self._row(row)
+
+    def latest_handoff_projection(self, *, exclude_session_id: str = "") -> dict | None:
+        """Return the latest Shadow's authored self/relationship layers, never its moments."""
+        row = self.latest(exclude_session_id=exclude_session_id)
+        if not row:
+            return None
+        projection = project_window_shadow_handoff(
+            row.get("sections", {}) if isinstance(row.get("sections"), dict) else {}
+        )
+        return {
+            "window_id": str(row.get("window_id") or ""),
+            "session_id": str(row.get("session_id") or ""),
+            "source_date": str(row.get("source_date") or ""),
+            "source_hash": str(row.get("source_hash") or ""),
+            **projection,
+        }
 
     def list(self, limit: int = 20, *, include_content: bool = True) -> list[dict]:
         limit = max(1, min(int(limit or 20), 200))

@@ -228,7 +228,7 @@ def load_config(config_path: str = None) -> dict:
             "check_interval_hours": 24,
             "emotion_weights": {
                 "base": 1.0,
-                "arousal_boost": 0.8,
+                "arousal_boost": 0.0,
             },
         },
         "matching": {
@@ -876,6 +876,44 @@ def strip_temperature_meaning_lines(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def normalize_scene_cues(value: object, *, limit: int = 8, max_chars: int = 80) -> list[str]:
+    """Normalize sidecar recall entrances without turning them into memory prose."""
+    if isinstance(value, str):
+        raw_values = re.split(r"[\r\n|｜]+", value)
+    elif isinstance(value, (list, tuple, set)):
+        raw_values = list(value)
+    else:
+        raw_values = []
+
+    generic = {
+        "以前",
+        "过去",
+        "关系",
+        "记忆",
+        "事情",
+        "开心",
+        "难过",
+        "情绪",
+        "something",
+        "memory",
+    }
+    cues: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        cue = re.sub(r"\s+", " ", str(raw or "")).strip(" \t\r\n-—*•、，,。.!！?？:：;；\"'“”‘’")
+        if not cue:
+            continue
+        cue = cue[: max(1, int(max_chars))].rstrip()
+        key = re.sub(r"[\s\W_]+", "", cue.lower())
+        if len(key) < 2 or key in generic or key in seen:
+            continue
+        seen.add(key)
+        cues.append(cue)
+        if len(cues) >= max(1, int(limit)):
+            break
+    return cues
+
+
 def bucket_text_for_embedding(bucket: dict) -> str:
     """
     Build the text sent to the embedding model for a bucket.
@@ -889,6 +927,7 @@ def bucket_text_for_embedding(bucket: dict) -> str:
         meta = {}
 
     title = strip_wikilinks(str(meta.get("name") or "")).strip()
+    scene_cues = normalize_scene_cues(meta.get("scene_cues"))
     body = bucket_content_for_recall(bucket)
 
     parts = []
@@ -898,6 +937,8 @@ def bucket_text_for_embedding(bucket: dict) -> str:
             parts.append(f"Content: {body}")
     elif body:
         parts.append(body)
+    if scene_cues:
+        parts.append("Recall cues: " + " | ".join(scene_cues))
 
     return "\n".join(parts).strip()
 

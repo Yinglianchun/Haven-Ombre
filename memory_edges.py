@@ -5,6 +5,10 @@ from typing import Any
 
 
 RELATION_TYPES = {
+    "continues",
+    "echoes",
+    "resolves",
+    "contrasts_with",
     "triggers",
     "causes",
     "precedes",

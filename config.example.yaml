@@ -70,10 +70,10 @@ import:
 write_path:
   semantic_search_timeout_seconds: 3  # Timeout for write-time semantic lookup / 写入时语义查找超时秒数
 
-# --- Dehydration API / 脱水压缩 API 配置 ---
-# Uses a cheap LLM for intelligent compression; auto-degrades to local
-# keyword extraction if API is unavailable
-# 用廉价 LLM 做智能压缩，API 不可用时自动降级到本地关键词提取
+# --- Memory analysis API / 记忆分析 API 配置 ---
+# The historical key remains "dehydration" for compatibility. Ordinary hold
+# uses this model only for metadata analysis; legacy/import paths may still compress.
+# 配置名为兼容旧版仍叫 dehydration。普通 hold 只用它分析元数据；旧路径/导入仍可能压缩。
 dehydration:
   # Supports any OpenAI-compatible API: DeepSeek / Ollama / LM Studio / vLLM / Gemini etc.
   # 支持所有 OpenAI 兼容 API：DeepSeek / Ollama / LM Studio / vLLM / Gemini 等
@@ -123,8 +123,8 @@ decay:
   threshold: 0.3                  # Archive threshold / 归档阈值
   check_interval_hours: 24        # Check interval (hours) / 衰减检查间隔（小时）
   emotion_weights:
-    base: 1.0                     # Base weight / 基础权重
-    arousal_boost: 0.8            # Arousal boost coefficient / 唤醒度加成系数
+    base: 1.0                     # legacy compatibility only; ignored by P1 decay
+    arousal_boost: 0.0            # legacy compatibility only; arousal never changes retention
 
 # --- Embedding / 向量化配置 ---
 # Uses embedding API for semantic similarity search
@@ -376,7 +376,7 @@ gateway:
   date_persona_trace_include_daily: true
   recalled_memory_budget: 900
   direct_render_mode: auto   # auto | compact | full; direct/recalled display shape
-  retrieval_mode: graph       # graph | bucket; bucket skips moment graph diffusion
+  retrieval_mode: bucket      # default: direct Scene recall; graph remains an explicit experiment
   operit_context_rewrite_enabled: false # Operit-only text turn cleanup: split stable/activity attachment context before forwarding
   bucket_list_cache_ttl_seconds: 300 # cache active bucket list inside Gateway; 0 disables
   portrait_memory_enabled: true  # read-only stable portrait cache from profile_fact by default
@@ -498,6 +498,8 @@ memory_diffusion:
   decay: 0.55
   include_incoming: true
   max_paths_per_hit: 3
+  # Full recall debug also runs a Scene-only multi-hop shadow trace in bucket
+  # mode. It never changes candidates or injected context.
   # Optional reliable chain walk: keep following strong narrative/evidence edges
   # until path strength, confidence, or relation quality drops. top_k still
   # controls how many final related memories are rendered.
@@ -509,7 +511,9 @@ memory_diffusion:
   chain_max_frontier: 24
   chain_continue_relation_types:
     - same_event
+    - continues
     - context_of
+    - echoes
     - precedes
     - previous_context
     - next_context
@@ -518,7 +522,11 @@ memory_diffusion:
     - reflects_on
   relation_type_weights:
     same_event: 1.15
+    continues: 1.05
     context_of: 1.1
+    echoes: 0.95
+    resolves: 0.9
+    contrasts_with: 0.82
     embodiment_chain: 1.05
     same_topic: 0.9
     precedes: 1.0
@@ -650,6 +658,7 @@ reflection:
   daily_chat_memory_summary_window_turns: 14    # overlapping context window so boundaries do not split causality
   daily_chat_memory_summary_stride_turns: 7     # start a new summary window every N turns
   daily_chat_memory_api_key_env: "" # optional; leave empty to use the dehydration model
+
   daily_chat_memory_base_url: ""    # optional; set with api_key_env/model only for a separate daily-chat model
   daily_chat_memory_timeout_seconds: 180
   daily_chat_memory_summary_model: ""
@@ -687,6 +696,52 @@ reflection:
   #   OMBRE_REFLECTION_CANDIDATE_MODEL
   #   OMBRE_DIARY_MCP_URL
   #   OMBRE_DIARY_MCP_TOKEN_ENV
+
+# --- Scene linker / Scene 关系提案 ---
+# Runs only after an authored Scene has already been saved. Background linking
+# never rewrites Scene prose or writes memory_edges.jsonl; accepted model JSON
+# lands in state/scene_edge_proposals.sqlite for review. Only an explicit
+# review_scene_edge_proposal(..., confirm="ACCEPT_SCENE_EDGE") promotion may
+# write a formal edge after revalidating both Scene hashes, states, and evidence.
+# Models are tried in order.
+# Transport failure, invalid JSON, or non-verbatim evidence falls through to
+# the next model. A valid {"edges": []} is a real answer and stops failover.
+scene_linker:
+  enabled: false                    # local P1 switch; keep off until the model pool is configured
+  auto_enabled: true                # when enabled, queue after hold/close_window without blocking them
+  version: "scene-linker-v1"
+  semantic_candidates: 8            # embedding shortlist, canonical authored Scenes only
+  recent_candidates: 4              # deterministic fallback when embedding is slow or stale
+  max_candidates: 10
+  max_proposals: 3
+  min_confidence: 0.78
+  source_chars: 2600
+  candidate_chars: 1200
+  candidate_timeout_seconds: 5
+  timeout_seconds: 60
+  max_concurrency: 1               # multiple Scenes may queue together; model calls stay bounded
+  models:
+    - name: "openai-smart"
+      base_url: "https://api.openai.com/v1"
+      model: "gpt-5-mini"
+      api_key_env: "OMBRE_SCENE_LINKER_OPENAI_API_KEY"
+      token_parameter: "max_completion_tokens"
+      max_tokens: 1100
+      temperature: null             # omit temperature for models that do not accept it
+    - name: "gemini-fallback"
+      base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
+      model: "gemini-2.5-flash"
+      api_key_env: "OMBRE_SCENE_LINKER_GEMINI_API_KEY"
+      token_parameter: "max_tokens"
+      max_tokens: 1100
+      temperature: 0.0
+    - name: "qwen-fallback"
+      base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      model: "qwen-plus"
+      api_key_env: "OMBRE_SCENE_LINKER_QWEN_API_KEY"
+      token_parameter: "max_tokens"
+      max_tokens: 1100
+      temperature: 0.0
 
 # --- Daily Portrait Maintainer / 每日画像维护 ---
 # Writes only an inspectable state/portrait_state.json. It does not edit
@@ -767,10 +822,10 @@ dream:
   #   OMBRE_DREAM_ENABLED
 
 # --- Scoring weights / 检索权重参数 ---
-# total = topic(×4) + emotion(×2) + time(×1.5) + importance(×1)
+# total = topic(×4) + time(×1.5) + importance(×1)
 scoring_weights:
   topic_relevance: 4.0
-  emotion_resonance: 2.0
+  emotion_resonance: 0.0          # legacy compatibility only; ignored by ordinary recall ranking
   time_proximity: 1.5
   importance: 1.0
 

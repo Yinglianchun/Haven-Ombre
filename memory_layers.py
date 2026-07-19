@@ -14,6 +14,7 @@ LAYER_AFFECT_CONTEXT = "affect_context"
 LAYER_FAVORITE = "favorite_memory"
 LAYER_DREAM = "dream"
 LAYER_SOURCE_RECORD = "source_record"
+LAYER_PROFILE_INDEX = "profile_index"
 LAYER_ARCHIVE = "archive"
 
 WRITE_SUBJECT_USER = "user"
@@ -61,7 +62,17 @@ DIFFUSE_CAREFUL_SOURCE = "careful_source"
 DIFFUSE_CHAIN_ONLY = "chain_only"
 DIFFUSE_NEVER = "never"
 
-CONTEXT_ONLY_SECTIONS = frozenset({"comment", "affect_anchor", "favorite_reason", "followup", "followup_log"})
+CONTEXT_ONLY_SECTIONS = frozenset(
+    {
+        "comment",
+        "reflection",
+        "feeling",
+        "affect_anchor",
+        "favorite_reason",
+        "followup",
+        "followup_log",
+    }
+)
 RELATIONSHIP_WEATHER_TAGS = frozenset(
     {"relationship_weather", "daily_impression", "weekly_impression"}
 )
@@ -213,6 +224,15 @@ LAYER_POLICIES: dict[str, MemoryLayerPolicy] = {
         diffusion_policy=DIFFUSE_NEVER,
         preserves_original=True,
     ),
+    LAYER_PROFILE_INDEX: MemoryLayerPolicy(
+        layer=LAYER_PROFILE_INDEX,
+        direct_seed_policy=DIRECT_NEVER,
+        render_policy=RENDER_SOURCE_ONLY,
+        gateway_section="none",
+        cooldown_policy="not_recalled",
+        diffusion_policy=DIFFUSE_NEVER,
+        preserves_original=True,
+    ),
     LAYER_ARCHIVE: MemoryLayerPolicy(
         layer=LAYER_ARCHIVE,
         direct_seed_policy=DIRECT_EXPLICIT,
@@ -255,6 +275,8 @@ def infer_bucket_layer(bucket: dict[str, Any] | None) -> str:
         return LAYER_ARCHIVE
     if bucket_type in {"source", "raw", "chat_log", "diary_source"} or tags & RAW_SOURCE_TAGS:
         return LAYER_SOURCE_RECORD
+    if "profile_fact" in tags or bool(meta.get("profile_kind")):
+        return LAYER_PROFILE_INDEX
     if bucket_type == "dream" or "dream" in tags or "night_dream" in tags:
         return LAYER_DREAM
     if bucket_type == "feel" and tags & RELATIONSHIP_WEATHER_TAGS:
@@ -316,7 +338,13 @@ def can_bucket_be_related_target(bucket: dict[str, Any] | None, *, explicit_look
     policy = policy_for_bucket(bucket)
     if policy.layer == LAYER_ARCHIVE:
         return bool(explicit_lookup)
-    if policy.layer in {LAYER_DREAM, LAYER_SOURCE_RECORD, LAYER_RELATIONSHIP_WEATHER, LAYER_AFFECT_CONTEXT}:
+    if policy.layer in {
+        LAYER_DREAM,
+        LAYER_SOURCE_RECORD,
+        LAYER_PROFILE_INDEX,
+        LAYER_RELATIONSHIP_WEATHER,
+        LAYER_AFFECT_CONTEXT,
+    }:
         return False
     return policy.can_diffuse
 
@@ -334,7 +362,13 @@ def can_moment_be_related_target(moment: dict[str, Any] | None, *, explicit_look
     policy = _parent_policy_for_moment(moment)
     if policy.layer == LAYER_ARCHIVE:
         return bool(explicit_lookup)
-    if policy.layer in {LAYER_DREAM, LAYER_SOURCE_RECORD, LAYER_RELATIONSHIP_WEATHER, LAYER_AFFECT_CONTEXT}:
+    if policy.layer in {
+        LAYER_DREAM,
+        LAYER_SOURCE_RECORD,
+        LAYER_PROFILE_INDEX,
+        LAYER_RELATIONSHIP_WEATHER,
+        LAYER_AFFECT_CONTEXT,
+    }:
         return False
     return policy.can_diffuse
 
@@ -369,7 +403,13 @@ def bucket_related_target_gate(
         if explicit_lookup:
             return _gate_payload(True, "archive_explicit_lookup_allowed")
         return _gate_payload(False, "archive_requires_explicit_lookup")
-    if layer in {LAYER_DREAM, LAYER_SOURCE_RECORD, LAYER_RELATIONSHIP_WEATHER, LAYER_AFFECT_CONTEXT}:
+    if layer in {
+        LAYER_DREAM,
+        LAYER_SOURCE_RECORD,
+        LAYER_PROFILE_INDEX,
+        LAYER_RELATIONSHIP_WEATHER,
+        LAYER_AFFECT_CONTEXT,
+    }:
         return _gate_payload(False, f"{layer}_not_related_target")
     if not policy.can_diffuse:
         return _gate_payload(False, "diffusion_policy_never")
@@ -427,7 +467,13 @@ def moment_related_target_gate(
         if explicit_lookup:
             return _gate_payload(True, "archive_explicit_lookup_allowed")
         return _gate_payload(False, "archive_requires_explicit_lookup")
-    if policy.layer in {LAYER_DREAM, LAYER_SOURCE_RECORD, LAYER_RELATIONSHIP_WEATHER, LAYER_AFFECT_CONTEXT}:
+    if policy.layer in {
+        LAYER_DREAM,
+        LAYER_SOURCE_RECORD,
+        LAYER_PROFILE_INDEX,
+        LAYER_RELATIONSHIP_WEATHER,
+        LAYER_AFFECT_CONTEXT,
+    }:
         return _gate_payload(False, f"{policy.layer}_not_related_target")
     if not policy.can_diffuse:
         return _gate_payload(False, "diffusion_policy_never")

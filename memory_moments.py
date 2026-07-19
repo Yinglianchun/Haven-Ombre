@@ -22,6 +22,7 @@ from utils import strip_wikilinks
 
 
 SECTION_ALIASES = {
+    "scene": "scene",
     "moment": "moment",
     "memory": "moment",
     "fact": "fact",
@@ -58,6 +59,7 @@ SECTION_ALIASES = {
     "favorite_reason": "favorite_reason",
     "favorite reason": "favorite_reason",
     "\u7247\u6bb5": "moment",
+    "\u573a\u666f": "scene",
     "\u8bb0\u5fc6\u7247\u6bb5": "moment",
     "\u4e8b\u5b9e": "fact",
     "\u5bf9\u8bdd\u4e8b\u5b9e": "fact",
@@ -92,6 +94,7 @@ DEFAULT_CONTENT_START_LINE = 1
 SHADOW_CHUNKABLE_CONTENT_SECTIONS = frozenset(
     {
         "body",
+        "scene",
         "moment",
         "fact",
         "original",
@@ -102,7 +105,7 @@ SHADOW_CHUNKABLE_CONTENT_SECTIONS = frozenset(
     }
 )
 SENTENCE_END_RE = re.compile(r"[\u3002\uff01\uff1f\uff1b!?;]+|[.]+(?=\s|$)")
-RETRIEVAL_ALIAS_SECTIONS = frozenset({"body", "moment", "fact", "original"})
+RETRIEVAL_ALIAS_SECTIONS = frozenset({"scene", "body", "moment", "fact", "original"})
 MAX_RETRIEVAL_ALIASES_PER_BUCKET = 24
 MAX_RETRIEVAL_ALIASES_PER_MOMENT = 4
 MAX_RETRIEVAL_ALIAS_CHARS = 72
@@ -111,6 +114,7 @@ GENERIC_RETRIEVAL_ALIAS_KEYS = frozenset(
         "memory",
         "memories",
         "moment",
+        "scene",
         "moments",
         "fact",
         "facts",
@@ -1461,7 +1465,9 @@ def _make_edge(
 
 
 def _first_content_moment(moments: list[dict]) -> dict | None:
-    for section in ("original", "moment", "fact", "body", "evidence_context", "context"):
+    # New Scene is canonical. For legacy buckets prefer their authored body over
+    # a possibly dehydrated `### moment`; the old heading remains a search hint.
+    for section in ("scene", "body", "original", "moment", "fact", "evidence_context", "context"):
         for moment in moments:
             if moment.get("section") == section:
                 return moment
@@ -1862,10 +1868,11 @@ def _term_matches_fields(term: str, fields: str) -> bool:
 
 def _moment_section_weight(section: Any) -> float:
     return {
-        "original": 1.1,
-        "moment": 1.08,
-        "fact": 1.05,
-        "body": 1.0,
+        "scene": 1.12,
+        "body": 1.08,
+        "original": 1.02,
+        "moment": 0.96,
+        "fact": 0.94,
         "context": 0.95,
         "evidence_context": 0.94,
         "reflection": 0.9,

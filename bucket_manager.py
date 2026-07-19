@@ -45,6 +45,7 @@ from query_terms import GENERIC_LEXICAL_STOPWORDS
 from utils import (
     bucket_content_for_recall,
     generate_bucket_id,
+    normalize_scene_cues,
     now_iso,
     safe_path,
     sanitize_name,
@@ -99,14 +100,17 @@ class BucketManager:
         # --- Search scoring weights / 检索权重配置 ---
         scoring = config.get("scoring_weights", {})
         self.w_topic = scoring.get("topic_relevance", 4.0)
-        self.w_emotion = scoring.get("emotion_resonance", 2.0)
+        # Legacy valence/arousal fields remain readable, but P1 removes them
+        # from ordinary recall ranking. Keep the public attribute for clients.
+        self.configured_w_emotion = scoring.get("emotion_resonance", 0.0)
+        self.w_emotion = 0.0
         self.w_time = scoring.get("time_proximity", 1.5)
         self.w_importance = scoring.get("importance", 1.0)
         self.content_weight = scoring.get("content_weight", 1.0)  # Added to allow better content-based matching during merge
         self.lexical_stop_terms = self._build_lexical_stop_terms(config)
         self._lexical_profile_cache: dict[
             str,
-            tuple[tuple, Counter[str], float, tuple[str, str, str, str]],
+            tuple[tuple, Counter[str], float, tuple[str, str, str, str, str]],
         ] = {}
 
     # ---------------------------------------------------------
@@ -700,12 +704,10 @@ class BucketManager:
     # 策略：主题域预筛 → 多维加权精排
     #
     # Ranking formula:
-    #   total = topic(×w_topic) + emotion(×w_emotion)
-    #           + time(×w_time) + importance(×w_importance)
+    #   total = topic(×w_topic) + time(×w_time) + importance(×w_importance)
     #
     # Per-dimension scores (normalized to 0~1):
     #   topic     = rapidfuzz weighted match (name/tags/domain/body)
-    #   emotion   = 1 - Euclidean distance (query v/a vs bucket v/a)
     #   time      = e^(-0.02 × days) (recent memories first)
     #   importance = importance / 10
     # ---------------------------------------------------------
@@ -723,7 +725,7 @@ class BucketManager:
         多维索引搜索记忆桶。
 
         domain_filter: pre-filter by domain (None = search all)
-        query_valence/arousal: emotion coordinates for resonance scoring
+        query_valence/arousal: accepted for legacy API compatibility; ignored by ordinary ranking
         """
         if not query or not query.strip():
             return []
@@ -760,26 +762,20 @@ class BucketManager:
                 # Dim 1: topic relevance (BM25 lexical text, 0~1)
                 topic_score = topic_scores.get(str(bucket.get("id") or ""), 0.0)
 
-                # Dim 2: emotion resonance (coordinate distance, 0~1)
-                emotion_score = self._calc_emotion_score(
-                    query_valence, query_arousal, meta
-                )
-
-                # Dim 3: time proximity (exponential decay, 0~1)
+                # Dim 2: time proximity (exponential decay, 0~1)
                 time_score = self._calc_time_score(meta)
 
-                # Dim 4: importance (direct normalization)
+                # Dim 3: importance (direct normalization)
                 importance_score = max(1, min(10, int(meta.get("importance", 5)))) / 10.0
 
                 # --- Weighted sum / 加权求和 ---
                 total = (
                     topic_score * self.w_topic
-                    + emotion_score * self.w_emotion
                     + time_score * self.w_time
                     + importance_score * self.w_importance
                 )
                 # Normalize to 0~100 for readability
-                weight_sum = self.w_topic + self.w_emotion + self.w_time + self.w_importance
+                weight_sum = self.w_topic + self.w_time + self.w_importance
                 normalized = (total / weight_sum) * 100 if weight_sum > 0 else 0
 
                 if normalized >= self.fuzzy_threshold:
@@ -985,7 +981,15 @@ class BucketManager:
         return self._compact_lexical_phrase(text)
 
     def _bucket_searchable_content(self, bucket: dict) -> str:
-        return bucket_content_for_recall(bucket)[:1000]
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        comments = meta.get("comments", []) if isinstance(meta.get("comments", []), list) else []
+        year_rings = " ".join(
+            str(comment.get("content") or "")
+            for comment in comments
+            if isinstance(comment, dict)
+        )
+        body = bucket_content_for_recall(bucket)[:1000]
+        return f"{body}\n{year_rings[:600]}".strip()
 
     def _bucket_lexical_profile(self, bucket: dict) -> tuple[Counter[str], float]:
         _signature, term_frequency, weighted_length, _phrase_fields = self._bucket_lexical_cache_entry(bucket)
@@ -1003,21 +1007,23 @@ class BucketManager:
     def _bucket_lexical_cache_entry(
         self,
         bucket: dict,
-    ) -> tuple[tuple, Counter[str], float, tuple[str, str, str, str]]:
+    ) -> tuple[tuple, Counter[str], float, tuple[str, str, str, str, str]]:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         bucket_id = str(bucket.get("id") or meta.get("id") or "")
         name = str(meta.get("name") or "")
         domain = " ".join(str(item) for item in meta.get("domain", []) or [])
         tags = " ".join(str(item) for item in meta.get("tags", []) or [])
+        scene_cues = " ".join(normalize_scene_cues(meta.get("scene_cues")))
         content = self._bucket_searchable_content(bucket)
         content_weight = float(self.content_weight or 1.0)
-        signature = (bucket_id, name, domain, tags, content, content_weight)
+        signature = (bucket_id, name, domain, tags, scene_cues, content, content_weight)
         cache_key = bucket_id or f"anonymous:{hash(signature)}"
         cached = self._lexical_profile_cache.get(cache_key)
         if cached is not None and cached[0] == signature:
             return cached
         fields = (
             ("name", name, 3.0),
+            ("scene_cues", scene_cues, 2.8),
             ("domain", domain, 2.5),
             ("tags", tags, 2.0),
             ("content", content, content_weight),
@@ -1068,7 +1074,7 @@ class BucketManager:
         if not query_phrase or len(query_phrase) < 3:
             return 0.0
         _signature, _term_frequency, _weighted_length, phrase_fields = self._bucket_lexical_cache_entry(bucket)
-        checks = zip(phrase_fields, (0.95, 0.56, 0.54, 0.48))
+        checks = zip(phrase_fields, (0.95, 0.82, 0.56, 0.54, 0.48))
         best = 0.0
         for compact, score in checks:
             if compact and query_phrase in compact:
@@ -1199,10 +1205,8 @@ class BucketManager:
         return min(1.0, score)
 
     # ---------------------------------------------------------
-    # Emotion resonance sub-score:
-    # Based on Russell circumplex Euclidean distance
-    # 情感共鸣子分：基于环形情感模型的欧氏距离
-    # No emotion in query → neutral 0.5 (doesn't affect ranking)
+    # Legacy emotion-distance diagnostic. Ordinary search no longer calls it;
+    # retained so old dashboards/clients can inspect stored coordinates.
     # ---------------------------------------------------------
     def _calc_emotion_score(
         self, q_valence: float, q_arousal: float, meta: dict

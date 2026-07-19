@@ -16,7 +16,9 @@ from memory_relevance import (
 DEFAULT_HOP_DECAYS = (0.8, 0.6, 0.4, 0.25)
 DEFAULT_CHAIN_CONTINUE_RELATIONS = (
     "same_event",
+    "continues",
     "context_of",
+    "echoes",
     "embodiment_chain",
     "precedes",
     "previous_context",
@@ -31,7 +33,11 @@ CAUTION_RELATION_TYPES = frozenset({"contradicts", "blocks", "conflict"})
 OLD_VERSION_RELATION_TYPES = frozenset({"old_version"})
 DEFAULT_RELATION_TYPE_WEIGHTS = {
     "same_event": 1.15,
+    "continues": 1.05,
     "context_of": 1.1,
+    "echoes": 0.95,
+    "resolves": 0.9,
+    "contrasts_with": 0.82,
     "embodiment_chain": 1.05,
     "same_topic": 0.9,
     "precedes": 1.0,
@@ -57,8 +63,12 @@ DEFAULT_RELATION_TYPE_WEIGHTS = {
 
 RELATION_DISPLAY_PRIORITY = {
     "same_event": 90,
+    "continues": 84,
     "embodiment_chain": 82,
     "context_of": 80,
+    "echoes": 68,
+    "resolves": 66,
+    "contrasts_with": 58,
     "precedes": 80,
     "previous_context": 75,
     "next_context": 70,

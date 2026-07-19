@@ -1,0 +1,1149 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import logging
+import os
+import re
+import sqlite3
+from datetime import datetime, timezone
+from typing import Any
+
+from openai import AsyncOpenAI
+
+
+logger = logging.getLogger("ombre_brain.scene_linker")
+
+SCENE_LINKER_VERSION = "scene-linker-v1"
+SCENE_EDGE_PROPOSAL_ID_RE = re.compile(r"^scene_edge_[0-9a-f]{24}$")
+SCENE_EDGE_PROPOSAL_STATUSES = frozenset({"pending", "accepted", "rejected", "superseded"})
+SCENE_EDGE_REVIEW_CONFIRMATIONS = {
+    "accept": "ACCEPT_SCENE_EDGE",
+    "reject": "REJECT_SCENE_EDGE",
+}
+SCENE_RELATION_TYPES = frozenset(
+    {
+        "continues",
+        "echoes",
+        "resolves",
+        "contrasts_with",
+        "evidenced_by",
+    }
+)
+SYMMETRIC_SCENE_RELATIONS = frozenset({"echoes", "contrasts_with"})
+DIRECTED_ORIENTATIONS = frozenset({"candidate_to_new", "new_to_candidate"})
+
+SCENE_LINKER_PROMPT = """\
+你是 Scene Linker。你的任务不是摘要、打标签或判断情绪，而是判断一条新 Scene 与少量旧 Scene 之间，是否存在足以支持自然回忆扩散的经历关系。
+
+只允许以下关系：
+- continues：同一经历、约定、行动或问题后来继续展开。方向从较早/前置 Scene 指向较晚/后续 Scene。
+- echoes：表面话题可以不同，但两次经历中有具体而独特的表达、动作或关系 pattern 彼此回响。它是对称关系。
+- resolves：后一条 Scene 使前一条 Scene 中明确存在的悬念、承诺或未完成问题落地。方向从未解决 Scene 指向解决 Scene。
+- contrasts_with：两次具体经历形成有意义的反差，且反差本身有助于理解变化。它是对称关系。
+- evidenced_by：一条 Scene 中的判断、选择或承诺，被另一条更具体的经历直接证明。方向从判断/承诺 Scene 指向证据 Scene。
+
+严格禁止：
+- 仅仅因为人物相同、时间接近、都提到爱/难过/开心、关键词相似或主题宽泛而连边；
+- emotional_echo、relates_to 或任何未列出的关系；
+- 改写 Scene、补造事实、输出标签、情绪分数、importance 或新 Scene；
+- 用概括代替证据。new_scene_evidence 和 candidate_scene_evidence 必须分别逐字摘自输入原文。
+
+orientation 规则：
+- echoes / contrasts_with 必须是 symmetric；
+- 其他关系必须是 candidate_to_new 或 new_to_candidate。
+
+没有可靠关系时返回 {"edges": []}。不要为了凑数量连边。
+只返回 JSON：
+{
+  "edges": [
+    {
+      "candidate_scene_id": "候选 ID",
+      "relation_type": "continues|echoes|resolves|contrasts_with|evidenced_by",
+      "orientation": "candidate_to_new|new_to_candidate|symmetric",
+      "confidence": 0.0,
+      "reason": "说明两段具体经历为什么构成这个关系",
+      "new_scene_evidence": "逐字摘自新 Scene 的短句",
+      "candidate_scene_evidence": "逐字摘自候选 Scene 的短句"
+    }
+  ]
+}
+"""
+
+
+def _now_utc() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _environment_value(name: str) -> str:
+    """Read a process env value, with Windows user/machine scope fallback."""
+    normalized = str(name or "").strip()
+    if not normalized:
+        return ""
+    value = os.environ.get(normalized, "")
+    if value or os.name != "nt":
+        return str(value or "").strip()
+    try:
+        import winreg
+
+        scopes = (
+            (winreg.HKEY_CURRENT_USER, r"Environment"),
+            (
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+            ),
+        )
+        for hive, subkey in scopes:
+            try:
+                with winreg.OpenKey(hive, subkey) as key:
+                    scoped, _ = winreg.QueryValueEx(key, normalized)
+            except OSError:
+                continue
+            if str(scoped or "").strip():
+                return str(scoped).strip()
+    except Exception:
+        return ""
+    return ""
+
+
+def _scene_hash(scene: dict) -> str:
+    meta = scene.get("metadata", {}) if isinstance(scene.get("metadata"), dict) else {}
+    payload = {
+        "id": str(scene.get("id") or ""),
+        "name": str(meta.get("name") or ""),
+        "content": str(scene.get("content") or ""),
+        "scene_cues": list(meta.get("scene_cues") or []),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _clamp(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = 0.0
+    return max(0.0, min(1.0, round(number, 3)))
+
+
+def _is_authored_scene(scene: dict | None) -> bool:
+    if not isinstance(scene, dict):
+        return False
+    meta = scene.get("metadata", {}) if isinstance(scene.get("metadata"), dict) else {}
+    if str(meta.get("memory_value_source") or "") != "authored_scene":
+        return False
+    if str(meta.get("type") or "").lower() in {"feel", "archived"}:
+        return False
+    if any(bool(meta.get(key)) for key in ("archived", "resolved", "digested")):
+        return False
+    return bool(str(scene.get("id") or "").strip() and str(scene.get("content") or "").strip())
+
+
+def _clip_scene_text(value: Any, limit: int) -> str:
+    text = str(value or "").strip()
+    limit = max(120, int(limit or 120))
+    if len(text) <= limit:
+        return text
+    head = max(80, int(limit * 0.62))
+    tail = max(40, limit - head - 5)
+    return text[:head].rstrip() + "\n…\n" + text[-tail:].lstrip()
+
+
+def _evidence_text(value: Any) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    return text.strip("`'\"“”‘’《》「」『』 ")
+
+
+def _evidence_is_verbatim(content: str, evidence: Any) -> tuple[bool, str]:
+    excerpt = _evidence_text(evidence)
+    compact_excerpt = re.sub(r"\s+", "", excerpt)
+    compact_content = re.sub(r"\s+", "", str(content or ""))
+    if len(compact_excerpt) < 6:
+        return False, excerpt
+    return compact_excerpt in compact_content, excerpt[:180]
+
+
+def _parse_json_object(raw: str) -> dict | None:
+    cleaned = str(raw or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    try:
+        parsed = json.loads(cleaned)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            parsed = json.loads(cleaned[start : end + 1])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+class SceneEdgeProposalStore:
+    """Reviewable Scene-edge suggestions. It never writes memory_edges.jsonl."""
+
+    def __init__(self, config: dict):
+        state_dir = self.state_dir(config)
+        os.makedirs(state_dir, exist_ok=True)
+        self.db_path = os.path.join(state_dir, "scene_edge_proposals.sqlite")
+        self._init_db()
+
+    @staticmethod
+    def state_dir(config: dict) -> str:
+        return str(
+            config.get("state_dir")
+            or os.path.join(
+                os.path.dirname(os.path.abspath(config.get("buckets_dir", "buckets"))),
+                "state",
+            )
+        )
+
+    @classmethod
+    def path_for(cls, config: dict) -> str:
+        return os.path.join(cls.state_dir(config), "scene_edge_proposals.sqlite")
+
+    @classmethod
+    def exists(cls, config: dict) -> bool:
+        return os.path.exists(cls.path_for(config))
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self) -> None:
+        conn = self._connect()
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scene_edge_proposals (
+                proposal_id TEXT PRIMARY KEY,
+                anchor_scene_id TEXT NOT NULL,
+                candidate_scene_id TEXT NOT NULL,
+                source_scene_id TEXT NOT NULL,
+                target_scene_id TEXT NOT NULL,
+                relation_type TEXT NOT NULL,
+                directionality TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                reason TEXT NOT NULL,
+                source_evidence TEXT NOT NULL,
+                target_evidence TEXT NOT NULL,
+                anchor_hash TEXT NOT NULL,
+                candidate_hash TEXT NOT NULL,
+                model TEXT NOT NULL,
+                linker_version TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                reviewed_at TEXT,
+                reviewed_by TEXT
+            )
+            """
+        )
+        columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(scene_edge_proposals)").fetchall()
+        }
+        if "reviewed_at" not in columns:
+            conn.execute("ALTER TABLE scene_edge_proposals ADD COLUMN reviewed_at TEXT")
+        if "reviewed_by" not in columns:
+            conn.execute("ALTER TABLE scene_edge_proposals ADD COLUMN reviewed_by TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scene_edge_proposals_pending "
+            "ON scene_edge_proposals(status, updated_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scene_edge_proposals_anchor "
+            "ON scene_edge_proposals(anchor_scene_id, updated_at DESC)"
+        )
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def _row(row: sqlite3.Row | None) -> dict | None:
+        return dict(row) if row is not None else None
+
+    def replace_for_anchor(
+        self,
+        anchor: dict,
+        candidate_map: dict[str, dict],
+        edges: list[dict],
+        *,
+        model: str,
+        linker_version: str = SCENE_LINKER_VERSION,
+    ) -> list[dict]:
+        anchor_id = str(anchor.get("id") or "").strip()
+        if not anchor_id:
+            raise ValueError("Scene edge proposal requires an anchor Scene id")
+        anchor_hash = _scene_hash(anchor)
+        model_name = str(model or "").strip()
+        version = str(linker_version or SCENE_LINKER_VERSION).strip()
+        now = _now_utc()
+        conn = self._connect()
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """
+            UPDATE scene_edge_proposals
+               SET status = 'superseded', updated_at = ?
+             WHERE anchor_scene_id = ? AND linker_version = ? AND status = 'pending'
+            """,
+            (now, anchor_id, version),
+        )
+        proposal_ids: list[str] = []
+        for edge in edges:
+            candidate_id = str(edge.get("candidate_scene_id") or "").strip()
+            candidate = candidate_map.get(candidate_id)
+            if not candidate:
+                continue
+            candidate_hash = _scene_hash(candidate)
+            identity = json.dumps(
+                {
+                    "anchor": anchor_id,
+                    "candidate": candidate_id,
+                    "source": edge.get("source_scene_id"),
+                    "target": edge.get("target_scene_id"),
+                    "relation": edge.get("relation_type"),
+                    "directionality": edge.get("directionality"),
+                    "anchor_hash": anchor_hash,
+                    "candidate_hash": candidate_hash,
+                    "model": model_name,
+                    "version": version,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            proposal_id = "scene_edge_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+            proposal_ids.append(proposal_id)
+            conn.execute(
+                """
+                INSERT INTO scene_edge_proposals (
+                    proposal_id, anchor_scene_id, candidate_scene_id,
+                    source_scene_id, target_scene_id, relation_type, directionality,
+                    confidence, reason, source_evidence, target_evidence,
+                    anchor_hash, candidate_hash, model, linker_version,
+                    status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                ON CONFLICT(proposal_id) DO UPDATE SET
+                    confidence = excluded.confidence,
+                    reason = excluded.reason,
+                    source_evidence = excluded.source_evidence,
+                    target_evidence = excluded.target_evidence,
+                    status = CASE
+                        WHEN scene_edge_proposals.status IN ('accepted', 'rejected')
+                        THEN scene_edge_proposals.status
+                        ELSE 'pending'
+                    END,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    proposal_id,
+                    anchor_id,
+                    candidate_id,
+                    edge["source_scene_id"],
+                    edge["target_scene_id"],
+                    edge["relation_type"],
+                    edge["directionality"],
+                    float(edge["confidence"]),
+                    str(edge["reason"]),
+                    str(edge["source_evidence"]),
+                    str(edge["target_evidence"]),
+                    anchor_hash,
+                    candidate_hash,
+                    model_name,
+                    version,
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+        rows = []
+        for proposal_id in proposal_ids:
+            row = conn.execute(
+                "SELECT * FROM scene_edge_proposals WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+            if row is not None:
+                rows.append(dict(row))
+        conn.close()
+        return rows
+
+    def get(self, proposal_id: str) -> dict | None:
+        normalized = str(proposal_id or "").strip()
+        if not normalized:
+            return None
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT * FROM scene_edge_proposals WHERE proposal_id = ?",
+            (normalized,),
+        ).fetchone()
+        conn.close()
+        return self._row(row)
+
+    def list(
+        self,
+        *,
+        status: str = "pending",
+        anchor_scene_id: str = "",
+        limit: int = 100,
+    ) -> list[dict]:
+        conn = self._connect()
+        bounded = max(1, min(int(limit or 100), 1000))
+        normalized_status = str(status or "pending").strip().lower()
+        if normalized_status != "all" and normalized_status not in SCENE_EDGE_PROPOSAL_STATUSES:
+            conn.close()
+            raise ValueError("invalid Scene edge proposal status")
+        clauses = []
+        params: list[Any] = []
+        if normalized_status != "all":
+            clauses.append("status = ?")
+            params.append(normalized_status)
+        normalized_anchor = str(anchor_scene_id or "").strip()
+        if normalized_anchor:
+            clauses.append("anchor_scene_id = ?")
+            params.append(normalized_anchor)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        params.append(bounded)
+        rows = conn.execute(
+            f"""
+            SELECT * FROM scene_edge_proposals{where}
+             ORDER BY updated_at DESC, confidence DESC LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    def list_pending(self, *, anchor_scene_id: str = "", limit: int = 100) -> list[dict]:
+        return self.list(status="pending", anchor_scene_id=anchor_scene_id, limit=limit)
+
+    def set_status(
+        self,
+        proposal_id: str,
+        status: str,
+        *,
+        expected_status: str | None = None,
+        reviewed_by: str = "",
+    ) -> dict | None:
+        normalized = str(status or "").strip().lower()
+        if normalized not in SCENE_EDGE_PROPOSAL_STATUSES:
+            raise ValueError("invalid Scene edge proposal status")
+        expected = str(expected_status or "").strip().lower()
+        if expected and expected not in SCENE_EDGE_PROPOSAL_STATUSES:
+            raise ValueError("invalid expected Scene edge proposal status")
+        proposal_id = str(proposal_id or "").strip()
+        now = _now_utc()
+        conn = self._connect()
+        reviewed_at = now if normalized in {"accepted", "rejected"} else None
+        reviewer = str(reviewed_by or "").strip()[:80] if reviewed_at else None
+        if expected:
+            conn.execute(
+                """
+                UPDATE scene_edge_proposals
+                   SET status = ?, updated_at = ?, reviewed_at = ?, reviewed_by = ?
+                 WHERE proposal_id = ? AND status = ?
+                """,
+                (normalized, now, reviewed_at, reviewer, proposal_id, expected),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE scene_edge_proposals
+                   SET status = ?, updated_at = ?, reviewed_at = ?, reviewed_by = ?
+                 WHERE proposal_id = ?
+                """,
+                (normalized, now, reviewed_at, reviewer, proposal_id),
+            )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM scene_edge_proposals WHERE proposal_id = ?",
+            (proposal_id,),
+        ).fetchone()
+        conn.close()
+        return self._row(row)
+
+    def stats(self) -> dict:
+        conn = self._connect()
+        rows = conn.execute(
+            "SELECT status, COUNT(*) AS count FROM scene_edge_proposals GROUP BY status"
+        ).fetchall()
+        conn.close()
+        counts = {str(row["status"]): int(row["count"]) for row in rows}
+        return {
+            "total": sum(counts.values()),
+            "pending": counts.get("pending", 0),
+            "accepted": counts.get("accepted", 0),
+            "rejected": counts.get("rejected", 0),
+            "superseded": counts.get("superseded", 0),
+        }
+
+
+class SceneLinker:
+    """Asynchronous, proposal-only linker for canonical authored Scenes."""
+
+    def __init__(
+        self,
+        config: dict,
+        *,
+        proposal_store: SceneEdgeProposalStore | None = None,
+        clients: dict[str, Any] | None = None,
+    ):
+        self.config = config
+        cfg = config.get("scene_linker", {}) if isinstance(config.get("scene_linker"), dict) else {}
+        self.enabled = bool(cfg.get("enabled", False))
+        self.auto_enabled = bool(cfg.get("auto_enabled", False))
+        self.semantic_candidates = max(0, min(int(cfg.get("semantic_candidates", 8)), 20))
+        self.recent_candidates = max(0, min(int(cfg.get("recent_candidates", 4)), 20))
+        self.max_candidates = max(1, min(int(cfg.get("max_candidates", 10)), 24))
+        self.max_proposals = max(1, min(int(cfg.get("max_proposals", 3)), 6))
+        self.min_confidence = max(0.0, min(float(cfg.get("min_confidence", 0.78)), 1.0))
+        self.source_chars = max(500, min(int(cfg.get("source_chars", 2600)), 8000))
+        self.candidate_chars = max(300, min(int(cfg.get("candidate_chars", 1200)), 4000))
+        self.candidate_timeout_seconds = max(
+            0.5,
+            min(float(cfg.get("candidate_timeout_seconds", 5.0)), 30.0),
+        )
+        self.timeout_seconds = max(5.0, min(float(cfg.get("timeout_seconds", 60.0)), 300.0))
+        self.max_concurrency = max(1, min(int(cfg.get("max_concurrency", 1)), 4))
+        self._model_semaphore = asyncio.Semaphore(self.max_concurrency)
+        self._review_lock = asyncio.Lock()
+        self.linker_version = str(cfg.get("version") or SCENE_LINKER_VERSION).strip()
+        self._proposal_store = proposal_store
+        self.providers = self._load_providers(cfg, clients or {})
+
+    @property
+    def can_auto_link(self) -> bool:
+        return self.enabled and self.auto_enabled and any(provider.get("client") for provider in self.providers)
+
+    def status(self) -> dict:
+        proposal_store = self.proposal_store(create=False)
+        proposal_stats = (
+            proposal_store.stats()
+            if proposal_store is not None
+            else {"total": 0, "pending": 0, "accepted": 0, "rejected": 0, "superseded": 0}
+        )
+        return {
+            "enabled": self.enabled,
+            "auto_enabled": self.auto_enabled,
+            "configured_models": [provider["name"] for provider in self.providers],
+            "ready_models": [provider["name"] for provider in self.providers if provider.get("client")],
+            "max_concurrency": self.max_concurrency,
+            "proposal_store": proposal_stats,
+            "writes_canonical_memory": False,
+            "writes_edge_store": False,
+        }
+
+    @staticmethod
+    def _load_providers(cfg: dict, clients: dict[str, Any]) -> list[dict]:
+        raw_models = cfg.get("models") if isinstance(cfg.get("models"), list) else []
+        if not raw_models and any(cfg.get(key) for key in ("model", "base_url", "api_key")):
+            raw_models = [cfg]
+        providers = []
+        for index, raw in enumerate(raw_models):
+            if not isinstance(raw, dict) or not bool(raw.get("enabled", True)):
+                continue
+            name = str(raw.get("name") or raw.get("model") or f"model_{index + 1}").strip()
+            model_env = str(raw.get("model_env") or "").strip()
+            base_url_env = str(raw.get("base_url_env") or "").strip()
+            api_key_env = str(raw.get("api_key_env") or "OMBRE_SCENE_LINKER_API_KEY").strip()
+            model = str((_environment_value(model_env) if model_env else "") or raw.get("model") or "").strip()
+            base_url = str(
+                (_environment_value(base_url_env) if base_url_env else "")
+                or raw.get("base_url")
+                or ""
+            ).strip().rstrip("/")
+            api_key = str(_environment_value(api_key_env) or raw.get("api_key") or "").strip()
+            client = clients.get(name)
+            if client is None and model and base_url and api_key:
+                client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=float(raw.get("timeout_seconds", 60.0)))
+            token_parameter = str(raw.get("token_parameter") or "max_tokens").strip()
+            if token_parameter not in {"max_tokens", "max_completion_tokens"}:
+                token_parameter = "max_tokens"
+            providers.append(
+                {
+                    "name": name,
+                    "model": model,
+                    "base_url": base_url,
+                    "client": client,
+                    "max_tokens": max(200, min(int(raw.get("max_tokens", 1100)), 4000)),
+                    "token_parameter": token_parameter,
+                    "temperature": raw.get("temperature"),
+                }
+            )
+        return providers
+
+    async def link_scene(self, scene_id: str, bucket_mgr, embedding_engine=None) -> dict:
+        scene_id = str(scene_id or "").strip()
+        if not self.enabled:
+            return self._result("disabled", scene_id)
+        anchor = await bucket_mgr.get(scene_id)
+        if not _is_authored_scene(anchor):
+            return self._result("skipped", scene_id, reason="not_active_authored_scene")
+        candidates = await self._candidate_scenes(anchor, bucket_mgr, embedding_engine)
+        if not candidates:
+            return self._result("no_candidates", scene_id, candidate_count=0)
+        candidate_map = {str(item.get("id") or ""): item for item in candidates}
+        payload = {
+            "new_scene": self._scene_payload(anchor, self.source_chars),
+            "candidate_scenes": [
+                self._scene_payload(candidate, self.candidate_chars) for candidate in candidates
+            ],
+            "max_edges": self.max_proposals,
+        }
+        attempts = []
+        ready_provider_seen = False
+        for provider in self.providers:
+            client = provider.get("client")
+            if client is None or not provider.get("model"):
+                attempts.append({"model": provider["name"], "status": "unavailable"})
+                continue
+            ready_provider_seen = True
+            try:
+                async with self._model_semaphore:
+                    parsed = await self._call_provider(provider, payload)
+            except Exception as exc:
+                attempts.append(
+                    {
+                        "model": provider["name"],
+                        "status": "call_failed",
+                        "error": str(exc)[:180],
+                    }
+                )
+                continue
+            if parsed is None or not isinstance(parsed.get("edges"), list):
+                attempts.append({"model": provider["name"], "status": "invalid_json_contract"})
+                continue
+            raw_edges = parsed.get("edges") or []
+            normalized, rejected = self._normalize_edges(anchor, candidate_map, raw_edges)
+            if raw_edges and (not normalized or rejected):
+                attempts.append(
+                    {
+                        "model": provider["name"],
+                        "status": "evidence_contract_failed",
+                        "rejected": len(rejected),
+                    }
+                )
+                continue
+            rows = self._store().replace_for_anchor(
+                anchor,
+                candidate_map,
+                normalized,
+                model=provider["name"],
+                linker_version=self.linker_version,
+            )
+            attempts.append(
+                {
+                    "model": provider["name"],
+                    "status": "accepted_response",
+                    "proposals": len(rows),
+                    "rejected": len(rejected),
+                }
+            )
+            return self._result(
+                "proposed" if rows else "no_edges",
+                scene_id,
+                model=provider["name"],
+                candidate_count=len(candidates),
+                proposal_count=len(rows),
+                proposal_ids=[row["proposal_id"] for row in rows],
+                rejected_count=len(rejected),
+                attempts=attempts,
+            )
+        return self._result(
+            "failed" if ready_provider_seen else "unavailable",
+            scene_id,
+            candidate_count=len(candidates),
+            attempts=attempts,
+        )
+
+    def proposal_store(self, *, create: bool = False) -> SceneEdgeProposalStore | None:
+        if self._proposal_store is not None:
+            return self._proposal_store
+        if not create and not SceneEdgeProposalStore.exists(self.config):
+            return None
+        self._proposal_store = SceneEdgeProposalStore(self.config)
+        return self._proposal_store
+
+    def _store(self) -> SceneEdgeProposalStore:
+        store = self.proposal_store(create=True)
+        if store is None:  # pragma: no cover - create=True always returns a store
+            raise RuntimeError("Scene edge proposal store unavailable")
+        return store
+
+    @staticmethod
+    def _proposal_snapshot_error(
+        proposal: dict,
+        anchor: dict | None,
+        candidate: dict | None,
+        *,
+        min_confidence: float,
+    ) -> str:
+        if not isinstance(anchor, dict):
+            return "anchor_scene_missing"
+        if not isinstance(candidate, dict):
+            return "candidate_scene_missing"
+        if not _is_authored_scene(anchor):
+            return "anchor_scene_inactive"
+        if not _is_authored_scene(candidate):
+            return "candidate_scene_inactive"
+        if str(anchor.get("id") or "") != str(proposal.get("anchor_scene_id") or ""):
+            return "anchor_scene_id_mismatch"
+        if str(candidate.get("id") or "") != str(proposal.get("candidate_scene_id") or ""):
+            return "candidate_scene_id_mismatch"
+        if _scene_hash(anchor) != str(proposal.get("anchor_hash") or ""):
+            return "anchor_scene_changed"
+        if _scene_hash(candidate) != str(proposal.get("candidate_hash") or ""):
+            return "candidate_scene_changed"
+
+        anchor_id = str(anchor.get("id") or "")
+        candidate_id = str(candidate.get("id") or "")
+        source_id = str(proposal.get("source_scene_id") or "")
+        target_id = str(proposal.get("target_scene_id") or "")
+        if {source_id, target_id} != {anchor_id, candidate_id}:
+            return "edge_scene_ids_mismatch"
+        relation = str(proposal.get("relation_type") or "")
+        directionality = str(proposal.get("directionality") or "")
+        if relation not in SCENE_RELATION_TYPES:
+            return "relation_not_allowed"
+        if relation in SYMMETRIC_SCENE_RELATIONS and directionality != "symmetric":
+            return "symmetric_directionality_required"
+        if relation not in SYMMETRIC_SCENE_RELATIONS and directionality != "directed":
+            return "directed_directionality_required"
+        if _clamp(proposal.get("confidence")) < min_confidence:
+            return "confidence_below_current_threshold"
+
+        scene_map = {anchor_id: anchor, candidate_id: candidate}
+        source = scene_map.get(source_id)
+        target = scene_map.get(target_id)
+        source_ok, _ = _evidence_is_verbatim(
+            str((source or {}).get("content") or ""),
+            proposal.get("source_evidence"),
+        )
+        if not source_ok:
+            return "source_evidence_stale"
+        target_ok, _ = _evidence_is_verbatim(
+            str((target or {}).get("content") or ""),
+            proposal.get("target_evidence"),
+        )
+        if not target_ok:
+            return "target_evidence_stale"
+        return ""
+
+    @staticmethod
+    def _proposal_scene_payload(scene: dict | None, *, include_context: bool) -> dict | None:
+        if not isinstance(scene, dict):
+            return None
+        meta = scene.get("metadata", {}) if isinstance(scene.get("metadata"), dict) else {}
+        payload = {
+            "scene_id": str(scene.get("id") or ""),
+            "name": str(meta.get("name") or scene.get("id") or ""),
+            "date": str(meta.get("date") or meta.get("created") or ""),
+            "active_authored_scene": _is_authored_scene(scene),
+        }
+        if include_context:
+            payload["content"] = _clip_scene_text(scene.get("content"), 3200)
+        return payload
+
+    async def list_proposals(
+        self,
+        bucket_mgr,
+        *,
+        status: str = "pending",
+        proposal_id: str = "",
+        anchor_scene_id: str = "",
+        limit: int = 20,
+        include_context: bool = False,
+    ) -> dict:
+        store = self.proposal_store(create=False)
+        if store is None:
+            return {
+                "status": "ok",
+                "sidecar_exists": False,
+                "count": 0,
+                "proposals": [],
+                "writes_canonical_memory": False,
+                "writes_edge_store": False,
+            }
+        normalized_id = str(proposal_id or "").strip()
+        if normalized_id:
+            row = store.get(normalized_id)
+            rows = [row] if row else []
+        else:
+            rows = store.list(
+                status=status,
+                anchor_scene_id=anchor_scene_id,
+                limit=limit,
+            )
+        payloads = []
+        for row in rows:
+            anchor = await bucket_mgr.get(str(row.get("anchor_scene_id") or ""))
+            candidate = await bucket_mgr.get(str(row.get("candidate_scene_id") or ""))
+            snapshot_error = self._proposal_snapshot_error(
+                row,
+                anchor,
+                candidate,
+                min_confidence=self.min_confidence,
+            )
+            payloads.append(
+                {
+                    **row,
+                    "review_state": snapshot_error or "ready",
+                    "anchor_scene": self._proposal_scene_payload(
+                        anchor,
+                        include_context=include_context,
+                    ),
+                    "candidate_scene": self._proposal_scene_payload(
+                        candidate,
+                        include_context=include_context,
+                    ),
+                }
+            )
+        return {
+            "status": "ok",
+            "sidecar_exists": True,
+            "count": len(payloads),
+            "proposals": payloads,
+            "stats": store.stats(),
+            "writes_canonical_memory": False,
+            "writes_edge_store": False,
+        }
+
+    async def review_proposal(
+        self,
+        proposal_id: str,
+        decision: str,
+        confirm: str,
+        bucket_mgr,
+        edge_store,
+        *,
+        reviewed_by: str = "mcp",
+    ) -> dict:
+        normalized_id = str(proposal_id or "").strip()
+        normalized_decision = str(decision or "").strip().lower()
+        if not SCENE_EDGE_PROPOSAL_ID_RE.fullmatch(normalized_id):
+            return {"status": "error", "error": "invalid proposal_id"}
+        if normalized_decision not in SCENE_EDGE_REVIEW_CONFIRMATIONS:
+            return {"status": "error", "error": "decision must be accept or reject"}
+        required = SCENE_EDGE_REVIEW_CONFIRMATIONS[normalized_decision]
+        if str(confirm or "") != required:
+            return {
+                "status": "confirmation_required",
+                "proposal_id": normalized_id,
+                "decision": normalized_decision,
+                "required": required,
+                "memory_edges_changed": False,
+            }
+
+        store = self.proposal_store(create=False)
+        if store is None:
+            return {"status": "not_found", "proposal_id": normalized_id}
+        async with self._review_lock:
+            proposal = store.get(normalized_id)
+            if not proposal:
+                return {"status": "not_found", "proposal_id": normalized_id}
+            if str(proposal.get("status") or "") != "pending":
+                return {
+                    "status": "conflict",
+                    "error": "proposal is not pending",
+                    "proposal": proposal,
+                    "memory_edges_changed": False,
+                }
+            if normalized_decision == "reject":
+                updated = store.set_status(
+                    normalized_id,
+                    "rejected",
+                    expected_status="pending",
+                    reviewed_by=reviewed_by,
+                )
+                if not updated or str(updated.get("status") or "") != "rejected":
+                    return {
+                        "status": "conflict",
+                        "error": "proposal is not pending",
+                        "proposal": updated or proposal,
+                        "memory_edges_changed": False,
+                    }
+                return {
+                    "status": "rejected",
+                    "proposal": updated,
+                    "canonical_memory_changed": False,
+                    "memory_edges_changed": False,
+                }
+
+            anchor = await bucket_mgr.get(str(proposal.get("anchor_scene_id") or ""))
+            candidate = await bucket_mgr.get(str(proposal.get("candidate_scene_id") or ""))
+            snapshot_error = self._proposal_snapshot_error(
+                proposal,
+                anchor,
+                candidate,
+                min_confidence=self.min_confidence,
+            )
+            if snapshot_error:
+                return {
+                    "status": "stale",
+                    "error": snapshot_error,
+                    "proposal": proposal,
+                    "canonical_memory_changed": False,
+                    "memory_edges_changed": False,
+                }
+
+            before = next(
+                (
+                    edge
+                    for edge in edge_store.list_edges()
+                    if edge.get("source") == proposal.get("source_scene_id")
+                    and edge.get("target") == proposal.get("target_scene_id")
+                    and edge.get("relation_type") == proposal.get("relation_type")
+                ),
+                None,
+            )
+            edge = edge_store.add_edge(
+                proposal.get("source_scene_id"),
+                proposal.get("target_scene_id"),
+                proposal.get("relation_type"),
+                proposal.get("confidence", 0.5),
+                proposal.get("reason", ""),
+            )
+            if not edge:
+                return {
+                    "status": "error",
+                    "error": "edge write failed",
+                    "proposal": proposal,
+                    "memory_edges_changed": False,
+                }
+            after = next(
+                (
+                    item
+                    for item in edge_store.list_edges()
+                    if item.get("source") == proposal.get("source_scene_id")
+                    and item.get("target") == proposal.get("target_scene_id")
+                    and item.get("relation_type") == proposal.get("relation_type")
+                ),
+                None,
+            )
+            updated = store.set_status(
+                normalized_id,
+                "accepted",
+                expected_status="pending",
+                reviewed_by=reviewed_by,
+            )
+            if not updated or str(updated.get("status") or "") != "accepted":
+                return {
+                    "status": "error",
+                    "error": "proposal status update failed",
+                    "proposal": updated or proposal,
+                    "edge": after or edge,
+                    "memory_edges_changed": before != after,
+                }
+            return {
+                "status": "accepted",
+                "proposal": updated,
+                "edge": after or edge,
+                "canonical_memory_changed": False,
+                "memory_edges_changed": before != after,
+            }
+
+    async def _candidate_scenes(self, anchor: dict, bucket_mgr, embedding_engine) -> list[dict]:
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+        anchor_id = str(anchor.get("id") or "")
+        scene_map = {
+            str(item.get("id") or ""): item
+            for item in all_buckets
+            if _is_authored_scene(item) and str(item.get("id") or "") != anchor_id
+        }
+        if not scene_map:
+            return []
+        selected: list[dict] = []
+        selected_ids: set[str] = set()
+
+        def add(candidate_id: str) -> None:
+            candidate_id = str(candidate_id or "").strip()
+            if candidate_id in selected_ids or candidate_id not in scene_map:
+                return
+            selected_ids.add(candidate_id)
+            selected.append(scene_map[candidate_id])
+
+        if (
+            self.semantic_candidates > 0
+            and embedding_engine is not None
+            and bool(getattr(embedding_engine, "enabled", False))
+        ):
+            try:
+                similar = await asyncio.wait_for(
+                    embedding_engine.search_similar(
+                        self._candidate_query(anchor),
+                        top_k=max(self.semantic_candidates * 3, 12),
+                    ),
+                    timeout=self.candidate_timeout_seconds,
+                )
+            except Exception as exc:
+                logger.debug("Scene linker semantic candidate lookup failed: %s", exc)
+                similar = []
+            semantic_added = 0
+            for item in similar or []:
+                candidate_id = item[0] if isinstance(item, (list, tuple)) and item else ""
+                before = len(selected)
+                add(candidate_id)
+                if len(selected) > before:
+                    semantic_added += 1
+                if semantic_added >= self.semantic_candidates or len(selected) >= self.max_candidates:
+                    break
+
+        def recent_key(item: dict) -> tuple[str, str]:
+            meta = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+            return (
+                str(meta.get("created") or meta.get("updated_at") or meta.get("last_active") or ""),
+                str(item.get("id") or ""),
+            )
+
+        recent_added = 0
+        for item in sorted(scene_map.values(), key=recent_key, reverse=True):
+            before = len(selected)
+            add(str(item.get("id") or ""))
+            if len(selected) > before:
+                recent_added += 1
+            if recent_added >= self.recent_candidates or len(selected) >= self.max_candidates:
+                break
+        return selected[: self.max_candidates]
+
+    @staticmethod
+    def _candidate_query(scene: dict) -> str:
+        meta = scene.get("metadata", {}) if isinstance(scene.get("metadata"), dict) else {}
+        return "\n".join(
+            part
+            for part in (
+                str(meta.get("name") or "").strip(),
+                " | ".join(str(cue) for cue in meta.get("scene_cues", []) or [] if str(cue).strip()),
+                _clip_scene_text(scene.get("content"), 2600),
+            )
+            if part
+        )
+
+    @staticmethod
+    def _scene_payload(scene: dict, content_limit: int) -> dict:
+        meta = scene.get("metadata", {}) if isinstance(scene.get("metadata"), dict) else {}
+        return {
+            "scene_id": str(scene.get("id") or ""),
+            "name": str(meta.get("name") or ""),
+            "date": str(meta.get("date") or meta.get("created") or ""),
+            "content": _clip_scene_text(scene.get("content"), content_limit),
+            "scene_cues": [str(cue) for cue in meta.get("scene_cues", []) or []][:8],
+        }
+
+    async def _call_provider(self, provider: dict, payload: dict) -> dict | None:
+        options: dict[str, Any] = {
+            "model": provider["model"],
+            "messages": [
+                {"role": "system", "content": SCENE_LINKER_PROMPT},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            provider["token_parameter"]: provider["max_tokens"],
+        }
+        if provider.get("temperature") is not None:
+            options["temperature"] = float(provider["temperature"])
+        response = await asyncio.wait_for(
+            provider["client"].chat.completions.create(**options),
+            timeout=self.timeout_seconds,
+        )
+        try:
+            raw = response.choices[0].message.content if response.choices else ""
+        except (AttributeError, IndexError, TypeError):
+            raw = ""
+        return _parse_json_object(str(raw or ""))
+
+    def _normalize_edges(
+        self,
+        anchor: dict,
+        candidate_map: dict[str, dict],
+        raw_edges: list,
+    ) -> tuple[list[dict], list[dict]]:
+        anchor_id = str(anchor.get("id") or "")
+        anchor_content = str(anchor.get("content") or "")
+        accepted: dict[tuple[str, str, str], dict] = {}
+        rejected = []
+        for item in raw_edges:
+            if not isinstance(item, dict):
+                rejected.append({"reason": "edge_not_object"})
+                continue
+            candidate_id = str(item.get("candidate_scene_id") or "").strip()
+            candidate = candidate_map.get(candidate_id)
+            relation = str(item.get("relation_type") or "").strip()
+            orientation = str(item.get("orientation") or "").strip()
+            if not candidate:
+                rejected.append({"reason": "candidate_not_allowed", "candidate": candidate_id})
+                continue
+            if relation not in SCENE_RELATION_TYPES:
+                rejected.append({"reason": "relation_not_allowed", "relation": relation})
+                continue
+            if relation in SYMMETRIC_SCENE_RELATIONS:
+                if orientation != "symmetric":
+                    rejected.append({"reason": "symmetric_orientation_required", "relation": relation})
+                    continue
+                source_scene_id, target_scene_id = anchor_id, candidate_id
+                directionality = "symmetric"
+            else:
+                if orientation not in DIRECTED_ORIENTATIONS:
+                    rejected.append({"reason": "directed_orientation_required", "relation": relation})
+                    continue
+                directionality = "directed"
+                if orientation == "candidate_to_new":
+                    source_scene_id, target_scene_id = candidate_id, anchor_id
+                else:
+                    source_scene_id, target_scene_id = anchor_id, candidate_id
+            confidence = _clamp(item.get("confidence"))
+            if confidence < self.min_confidence:
+                rejected.append({"reason": "confidence_below_threshold", "candidate": candidate_id})
+                continue
+            reason = re.sub(r"\s+", " ", str(item.get("reason") or "").strip())[:360]
+            if len(reason) < 12:
+                rejected.append({"reason": "reason_too_thin", "candidate": candidate_id})
+                continue
+            anchor_ok, anchor_evidence = _evidence_is_verbatim(
+                anchor_content,
+                item.get("new_scene_evidence"),
+            )
+            candidate_ok, candidate_evidence = _evidence_is_verbatim(
+                str(candidate.get("content") or ""),
+                item.get("candidate_scene_evidence"),
+            )
+            if not anchor_ok or not candidate_ok:
+                rejected.append({"reason": "evidence_not_verbatim", "candidate": candidate_id})
+                continue
+            if source_scene_id == anchor_id:
+                source_evidence, target_evidence = anchor_evidence, candidate_evidence
+            else:
+                source_evidence, target_evidence = candidate_evidence, anchor_evidence
+            edge = {
+                "anchor_scene_id": anchor_id,
+                "candidate_scene_id": candidate_id,
+                "source_scene_id": source_scene_id,
+                "target_scene_id": target_scene_id,
+                "relation_type": relation,
+                "directionality": directionality,
+                "confidence": confidence,
+                "reason": reason,
+                "source_evidence": source_evidence,
+                "target_evidence": target_evidence,
+            }
+            key = (candidate_id, relation, directionality)
+            current = accepted.get(key)
+            if current is None or confidence > float(current.get("confidence", 0.0)):
+                accepted[key] = edge
+        ordered = sorted(
+            accepted.values(),
+            key=lambda edge: (float(edge["confidence"]), edge["relation_type"]),
+            reverse=True,
+        )
+        return ordered[: self.max_proposals], rejected
+
+    @staticmethod
+    def _result(status: str, scene_id: str, **extra: Any) -> dict:
+        return {
+            "status": status,
+            "scene_id": scene_id,
+            "canonical_memory_changed": False,
+            "memory_edges_changed": False,
+            **extra,
+        }

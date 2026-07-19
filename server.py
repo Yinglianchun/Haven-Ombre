@@ -120,6 +120,7 @@ from recall_policy import RecallPolicy, diffusion_seed_topic_term_has_specific_r
 from window_shadows import (
     WindowShadowStore,
     extract_window_shadow_moments,
+    extract_window_shadow_scenes,
     validate_window_shadow,
 )
 from memory_nodes import MemoryNodeStore
@@ -131,6 +132,7 @@ from reflection_engine import ReflectionEngine
 from recall_diagnostics import RecallDiagnosticsLogger
 from reminder_store import ReminderStore
 from reranker_engine import RerankerEngine
+from scene_linker import SceneLinker
 from self_anchor import SELF_ANCHOR_TAG, is_self_anchor_bucket, is_self_anchor_metadata
 from scripts.migrate_affect_anchor_sections import plan_bucket_migration
 from source_refs import source_ref_window
@@ -142,6 +144,7 @@ from utils import (
     LOCAL_TZ,
     local_date_key,
     load_config,
+    normalize_scene_cues,
     now_iso,
     parse_human_date_reference,
     setup_logging,
@@ -181,7 +184,9 @@ memory_node_store = MemoryNodeStore(config)            # Computable memory node 
 memory_moment_store = MemoryMomentStore(config)        # Structured bucket body/comment moment index / 记忆片段索引
 shadow_memory_card_store = ShadowMemoryCardStore(config) # Non-authoritative primary/cue/evidence previews / 影子记忆卡
 window_shadow_store = WindowShadowStore(config)         # Append-only full-window self narratives / 整窗第一人称窗影
-reflection_engine = ReflectionEngine(config)           # Reflection worker / 关系天气与关系整理
+reflection_engine = ReflectionEngine(config)           # Daily/weekly reflection worker / 关系天气
+metadata_enricher = reflection_engine                  # Proposal-only metadata worker / 只提案、不改正文或权重
+scene_linker = SceneLinker(config)                     # Async Scene-edge proposals / 异步 Scene 边提案
 portrait_engine = DailyPortraitMaintainer(config, window_shadow_store=window_shadow_store) # Daily portrait state / 每日画像状态
 dream_engine = DreamEngine(config)                     # Night dream worker / 夜梦
 identity_semantic_store = IdentitySemanticStore(config) # Private relationship alias index / 私有关系语义索引
@@ -1647,36 +1652,31 @@ def _format_budgeted_handoff_sections(
     return result
 
 
-def _handoff_portrait_stable_body(value: object) -> str:
-    text = str(value or "").strip()
-    return re.sub(r"^Stable:\s*", "", text, count=1, flags=re.IGNORECASE).strip()
-
-
-def _latest_window_shadow_handoff(
+def _latest_window_shadow_handoff_projection(
     *,
     session_id: str = "",
-    absorbed_window_shadow_ids: list[str] | None = None,
-    max_tokens: int = 560,
-) -> str:
-    """Carry the latest unabsorbed window shadow without putting it in ordinary recall."""
+    self_max_tokens: int = 360,
+    relationship_max_tokens: int = 360,
+) -> dict[str, str]:
+    """Carry authored Shadow layers without injecting its recalled Scene layer."""
     try:
-        shadow = window_shadow_store.latest(exclude_session_id=session_id)
+        projection = window_shadow_store.latest_handoff_projection(
+            exclude_session_id=session_id
+        )
     except Exception as exc:
-        logger.warning("Latest window shadow read failed / 最近窗影读取失败: %s", exc)
-        return ""
-    if not shadow:
-        return ""
-    absorbed_ids = {
-        str(value or "").strip()
-        for value in absorbed_window_shadow_ids or []
-        if str(value or "").strip()
+        logger.warning("Latest window shadow projection failed / 最近窗影投影失败: %s", exc)
+        return {}
+    if not projection:
+        return {}
+    return {
+        **projection,
+        "flowing_self": _trim_handoff_text_to_token_budget(
+            projection.get("flowing_self", ""), self_max_tokens
+        ),
+        "recent_relationship": _trim_handoff_text_to_token_budget(
+            projection.get("recent_relationship", ""), relationship_max_tokens
+        ),
     }
-    if str(shadow.get("window_id") or "").strip() in absorbed_ids:
-        return ""
-    content = str(shadow.get("content") or "").strip()
-    if not content:
-        return ""
-    return _trim_handoff_text_to_token_budget(content, max_tokens)
 
 
 async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", debug: bool = False) -> str:
@@ -1692,9 +1692,6 @@ async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", de
         logger.warning("Handoff portrait state failed / handoff portrait 状态失败: %s", e)
         portrait_sections = {}
 
-    user_portrait = str(portrait_sections.get("user") or "").strip()
-    persona_portrait = str(portrait_sections.get("persona") or "").strip()
-    relationship_portrait = str(portrait_sections.get("relationship") or "").strip()
     current_focus = str(portrait_sections.get("current_focus") or "").strip()
     portrait_recent_continuity = str(portrait_sections.get("recent_continuity") or "").strip()
     live_recent_continuity = _format_handoff_personal_recent_continuity(all_buckets, limit=3)
@@ -1720,29 +1717,17 @@ async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", de
     anchors = _format_handoff_anchors(all_buckets, limit=2)
     care_memos = _format_handoff_care_memos(session_id=session_id, limit=3)
     self_core = _trim_handoff_text_to_token_budget(self_anchor, 110)
-    self_growth = _trim_handoff_text_to_token_budget(
-        _handoff_portrait_stable_body(persona_portrait),
-        70,
-    )
-    latest_window_shadow = _latest_window_shadow_handoff(
-        session_id=session_id,
-        absorbed_window_shadow_ids=portrait_sections.get("absorbed_window_shadow_ids", []),
-    )
-    self_context = "\n\n".join(
-        part
-        for part in (
-            self_core,
-            f"现在的我：\n{self_growth}" if self_growth else "",
-        )
-        if part
-    )
+    shadow_projection = _latest_window_shadow_handoff_projection(session_id=session_id)
+    flowing_self = str(shadow_projection.get("flowing_self") or "").strip()
+    recent_relationship = str(
+        shadow_projection.get("recent_relationship") or ""
+    ).strip()
 
     sections = [
-        (SELF_ANCHOR_TAG, self_context, 180, False),
-        ("User Portrait", user_portrait, 140, False),
-        ("Current Focus", current_focus, 120, True),
-        ("Relationship Portrait", relationship_portrait, 160, False),
-        ("Latest Window Shadow", latest_window_shadow, 560, False),
+        (SELF_ANCHOR_TAG, self_core, 140, False),
+        ("Flowing Self", flowing_self, 360, False),
+        ("Recent Relationship", recent_relationship, 360, False),
+        ("Current Focus", current_focus, 90, True),
         ("Recent Continuity", recent_continuity, 650, True),
         ("照顾备忘", care_memos, 180, True),
         ("Optional Anchors", anchors, 90, True),
@@ -1758,7 +1743,8 @@ async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", de
                 "Handoff Debug",
                 f"portrait_state_path: {portrait_sections.get('state_path', getattr(portrait_engine, 'state_path', ''))}\n"
                 f"portrait_updated_at: {portrait_sections.get('updated_at', '')}\n"
-                f"portrait_last_run_date: {portrait_sections.get('last_run_date', '')}",
+                f"portrait_last_run_date: {portrait_sections.get('last_run_date', '')}\n"
+                f"window_shadow_id: {shadow_projection.get('window_id', '')}",
                 100,
                 True,
             )
@@ -2195,6 +2181,9 @@ _NEW_WRITE_REFLECTION_HEADINGS = {
     "assistantreflection",
     "havenreflection",
 }
+_HOLD_SCENE_ALLOWED_HEADINGS = {
+    "scene",
+}
 
 
 def _uses_first_person_voice(text: str) -> bool:
@@ -2229,6 +2218,85 @@ def _memory_write_contract_error(content: str, *, feel_only: bool = False) -> st
         if not _uses_first_person_voice(reflection):
             return "### reflection 必须用模型第一人称写，用“我记得 / 我明白 / 我以后 / 我会”等表达。"
     return ""
+
+
+def _hold_scene_contract_error(content: str) -> str:
+    """Require exactly one canonical Scene and no derived sibling sections."""
+    text = strip_wikilinks(str(content or "")).strip()
+    matches = list(re.finditer(r"(?m)^\s{0,3}#{2,6}\s+(.+?)\s*$", text))
+    if not matches:
+        return (
+            "hold 现在只保存一件完整场景；请由当前 AI 先写好 `### scene`，工具不会再替你生成摘要。"
+            "稳定偏好或身份事实请先保存证据场景，再用 profile_fact。"
+        )
+    if text[: matches[0].start()].strip():
+        return "hold 的场景事实必须全部写在 `### scene` 内，不要在第一个 section 前另放正文。"
+
+    scene_blocks = []
+    for index, match in enumerate(matches):
+        heading = _normalize_section_heading(match.group(1))
+        if heading not in _HOLD_SCENE_ALLOWED_HEADINGS:
+            return (
+                f"hold 的新写入协议不接受 `### {match.group(1).strip()}`；只允许一段 `### scene`。"
+                "重要原话和为什么重要都直接写进场景；后来产生的新理解请用带时间的年轮。"
+            )
+        if heading == "scene":
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+            scene_blocks.append(text[match.end():end].strip())
+
+    if len(scene_blocks) != 1:
+        return "hold 每次必须且只能新写一段 `### scene`；多个场景请分别调用 hold。旧桶的 `### moment` 只做读取兼容。"
+    if not scene_blocks[0]:
+        return "`### scene` 下面没有场景内容，未保存。"
+    return ""
+
+
+def _authored_scene_title(content: str, explicit_title: str = "") -> str:
+    title = str(explicit_title or "").strip()
+    if title:
+        return title[:48]
+    text = strip_wikilinks(str(content or ""))
+    scene = re.search(r"(?mi)^\s{0,3}#{2,6}\s+scene\s*$", text)
+    if not scene:
+        return ""
+    tail = text[scene.end():]
+    next_heading = re.search(r"(?m)^\s{0,3}#{2,6}\s+", tail)
+    body = tail[: next_heading.start()] if next_heading else tail
+    for line in body.splitlines():
+        clean = line.strip().lstrip("-—*• ").strip()
+        if not clean:
+            continue
+        named = re.match(r"^(?:标题|名字|名称)\s*[:：]\s*(.+)$", clean)
+        if named:
+            return named.group(1).strip()[:48]
+        if len(clean) <= 36 and not re.search(r"[。！？!?]$", clean):
+            return clean[:48]
+        break
+    return ""
+
+
+def _authored_scene_cues(content: str, *, title: str = "", explicit: object = None) -> list[str]:
+    """Build a small cue sidecar without summarizing or changing the Scene text."""
+    values: list[str] = []
+    values.extend(normalize_scene_cues(explicit))
+    if title and not re.fullmatch(r"(?:窗影)?(?:时刻|场景)\d+", title):
+        values.append(title)
+
+    text = strip_wikilinks(str(content or ""))
+    headings = list(re.finditer(r"(?m)^\s{0,3}#{2,6}\s+(.+?)\s*$", text))
+    for index, match in enumerate(headings):
+        heading = _normalize_section_heading(match.group(1))
+        if heading != "original":
+            continue
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+        for line in text[match.end():end].splitlines():
+            clean = line.strip().lstrip(">-—*• ").strip(" \t\r\n\"'“”‘’")
+            if 2 <= len(clean) <= 80:
+                values.append(clean)
+
+    for quoted in re.findall(r"[“\"]([^“”\"\n]{2,80})[”\"]", text):
+        values.append(quoted)
+    return normalize_scene_cues(values)
 
 
 def _normalize_memory_sections_for_write(content: str) -> str:
@@ -2813,6 +2881,54 @@ def _is_profile_fact_bucket(bucket: dict) -> bool:
     return "profile_fact" in tags or bool(meta.get("profile_kind"))
 
 
+def _is_canonical_scene_bucket(bucket: dict | None) -> bool:
+    if not isinstance(bucket, dict) or _is_profile_fact_bucket(bucket):
+        return False
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    if meta.get("type") == "feel" or _is_daily_impression_feel_bucket(bucket):
+        return False
+    if str(meta.get("memory_value_source") or "") == "authored_scene":
+        return True
+    return any(
+        moment.get("section") == "scene"
+        for moment in parse_bucket_moments(bucket, _recall_relevance_options())
+    )
+
+
+def _is_fact_evidence_recall_bucket(
+    bucket: dict | None,
+    *,
+    evidence_moment_id: str = "",
+) -> bool:
+    """Accept canonical Scenes plus explicit legacy evidence during migration.
+
+    New ProfileFacts are still required to bind to a canonical Scene. This is
+    only a read-compatibility bridge for old Facts whose recorded evidence
+    points to a content body/original/moment. Comments and reflections never
+    become Fact evidence through this path.
+    """
+    if not isinstance(bucket, dict) or _is_profile_fact_bucket(bucket) or is_self_anchor_bucket(bucket):
+        return False
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    tags = {str(tag).strip().lower() for tag in meta.get("tags", []) or [] if str(tag).strip()}
+    if (
+        meta.get("type") == "feel"
+        or infer_bucket_layer(bucket) == LAYER_SOURCE_RECORD
+        or {"daily_impression", "weekly_impression", "relationship_weather"} & tags
+    ):
+        return False
+    allowed_sections = {"scene", "body", "original", "moment"}
+    moments = [
+        moment
+        for moment in parse_bucket_moments(bucket, _recall_relevance_options())
+        if moment.get("source") == "content" and moment.get("section") in allowed_sections
+    ]
+    requested_moment = str(evidence_moment_id or "").strip()
+    if requested_moment:
+        return any(str(moment.get("moment_id") or "") == requested_moment for moment in moments)
+    return bool(moments)
+
+
 def _profile_fact_sections(content: str) -> dict[str, str]:
     text = strip_wikilinks(str(content or "")).strip()
     if not text:
@@ -3267,19 +3383,41 @@ async def _enrich_memory_async(bucket_id: str, *, force: bool = False) -> None:
         if is_self_anchor_bucket(bucket):
             logger.debug("Skip self-anchor enrichment / 跳过自我入口关系补全: %s", bucket_id)
             return
-        result = await reflection_engine.enrich_bucket(
+        result = await metadata_enricher.enrich_bucket(
             bucket_id,
             bucket_mgr,
             memory_edge_store,
             embedding_engine=embedding_engine,
             force=force,
         )
-        entity_edges = await _refresh_entity_edges_for_bucket_id(bucket_id)
-        logger.debug("Memory enrichment complete / 记忆关系补全完成: %s", result)
-        if entity_edges:
-            logger.debug("Entity edge refresh complete / 人物边刷新完成: %s edges for %s", entity_edges, bucket_id)
+        logger.debug("Metadata proposal complete / 记忆元数据提案完成: %s", result)
     except Exception as e:
         logger.warning("Memory enrichment failed / 记忆关系补全失败: %s: %s", bucket_id, e)
+
+
+def _queue_scene_linking(bucket_id: str) -> bool:
+    """Schedule proposal-only linking without delaying the authored Scene write."""
+    bucket_id = str(bucket_id or "").strip()
+    if not bucket_id or not scene_linker.can_auto_link:
+        return False
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    loop.create_task(_link_scene_async(bucket_id))
+    return True
+
+
+async def _link_scene_async(bucket_id: str) -> None:
+    try:
+        result = await scene_linker.link_scene(
+            bucket_id,
+            bucket_mgr,
+            embedding_engine=embedding_engine,
+        )
+        logger.debug("Scene linker proposal complete / Scene 边提案完成: %s", result)
+    except Exception as exc:
+        logger.warning("Scene linker failed / Scene 边提案失败: %s: %s", bucket_id, exc)
 
 
 async def _refresh_entity_edges_for_bucket_id(bucket_id: str) -> int:
@@ -3420,6 +3558,7 @@ async def health_check(request):
                 "model": reflection_engine.model,
                 "api_ready": bool(reflection_engine.api_key),
             },
+            "scene_linker": scene_linker.status(),
             "portrait": {
                 "enabled": portrait_engine.enabled,
                 "auto_enabled": portrait_engine.auto_enabled,
@@ -3891,6 +4030,8 @@ def _bucket_needs_memory_enrichment(bucket: dict) -> bool:
         return False
     if meta.get("type") == "feel" or meta.get("protected"):
         return False
+    if meta.get("memory_value_source") == "authored_scene":
+        return False
     try:
         confidence = float(meta.get("confidence", 0.0) or 0.0)
     except (TypeError, ValueError):
@@ -3912,7 +4053,7 @@ async def _backfill_memory_enrichment(
     embedding_engine_arg=None,
 ) -> dict:
     mgr = bucket_mgr_arg or bucket_mgr
-    engine = reflection_engine_arg or reflection_engine
+    engine = reflection_engine_arg or metadata_enricher
     edge_store = edge_store_arg or memory_edge_store
     emb_engine = embedding_engine_arg or embedding_engine
     reflection_cfg = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
@@ -3947,8 +4088,6 @@ async def _backfill_memory_enrichment(
                 embedding_engine=emb_engine,
                 force=True,
             )
-            if edge_store is memory_edge_store:
-                await _refresh_entity_edges_for_bucket_id(bucket_id)
             processed.append(bucket_id)
         except Exception as e:
             logger.warning("Memory enrichment backfill failed / enrich 补跑失败: %s: %s", bucket_id, e)
@@ -3957,7 +4096,7 @@ async def _backfill_memory_enrichment(
 
 
 async def enrich_backfill(limit: int = 10) -> dict:
-    """后台补跑缺失的 tags/confidence/memory_edges；主要用于 enrich_on_write 曾经超时或关闭后的修复。"""
+    """后台生成待审核的 tags/cues/importance/edge sidecar 提案；不会修改记忆或召回权重。"""
     return await _backfill_memory_enrichment(limit=limit)
 
 
@@ -4392,6 +4531,9 @@ async def _merge_or_create(
     memory_layer: str = "",
     memory_classification_source: str = "",
     date: str = "",
+    source: str = "",
+    extra_metadata: dict | None = None,
+    normalize_content: bool = True,
 ) -> tuple[str, str, bool, dict | None]:
     """
     Check if a similar bucket exists for merging; merge if so, create if not.
@@ -4399,7 +4541,8 @@ async def _merge_or_create(
     检查是否有相似桶可合并，有则合并，无则新建。
     返回 (桶ID, 显示名称, 是否合并)。
     """
-    content = _normalize_memory_sections_for_write(content)
+    if normalize_content:
+        content = _normalize_memory_sections_for_write(content)
     try:
         existing = await bucket_mgr.search(
             content,
@@ -4453,11 +4596,15 @@ async def _merge_or_create(
         arousal=arousal,
         name=name or None,
         date=date or None,
-        extra_metadata=_memory_classification_metadata(
-            memory_subject,
-            memory_layer,
-            memory_classification_source,
-        ),
+        source=source or None,
+        extra_metadata={
+            **_memory_classification_metadata(
+                memory_subject,
+                memory_layer,
+                memory_classification_source,
+            ),
+            **(extra_metadata or {}),
+        },
     )
     _queue_embedding_refresh(bucket_id)
     return bucket_id, name or bucket_id, False, related_bucket
@@ -4646,6 +4793,7 @@ def _bucket_temperature_context(bucket: dict, max_items: int = 2, max_chars: int
 
 
 MOMENT_SECTION_LABELS = {
+    "scene": "scene",
     "body": "body",
     "moment": "moment",
     "fact": "fact",
@@ -4694,7 +4842,7 @@ def _moments_by_bucket(moments: list[dict]) -> dict[str, list[dict]]:
 def _is_breath_recall_seed_bucket(bucket: dict | None) -> bool:
     if not isinstance(bucket, dict):
         return False
-    if is_self_anchor_bucket(bucket):
+    if is_self_anchor_bucket(bucket) or _is_profile_fact_bucket(bucket):
         return False
     meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
     if meta.get("type") != "feel":
@@ -4705,6 +4853,57 @@ def _is_breath_recall_seed_bucket(bucket: dict | None) -> bool:
 
 def _breath_recall_seed_buckets(buckets: list[dict]) -> list[dict]:
     return [bucket for bucket in buckets if _is_breath_recall_seed_bucket(bucket)]
+
+
+async def _ordinary_seed_buckets_with_fact_routes(buckets: list[dict]) -> list[dict]:
+    """Resolve matched ProfileFact indexes to their evidence Scenes.
+
+    Facts remain searchable routing records, but never become visible candidates.
+    """
+    ordinary = _breath_recall_seed_buckets(buckets)
+    by_id = {
+        str(bucket.get("id") or ""): bucket
+        for bucket in ordinary
+        if str(bucket.get("id") or "")
+    }
+    for fact_bucket in buckets:
+        if not _is_profile_fact_bucket(fact_bucket):
+            continue
+        meta = fact_bucket.get("metadata", {}) if isinstance(fact_bucket.get("metadata"), dict) else {}
+        if _profile_fact_state(meta) != "active":
+            continue
+        try:
+            fact_score = float(fact_bucket.get("score", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            fact_score = 0.0
+        fact_sections = _profile_fact_sections(fact_bucket.get("content", ""))
+        for evidence in _profile_fact_evidence(fact_bucket):
+            evidence_id = str(evidence.get("bucket_id") or "").strip()
+            if not evidence_id or not MEMORY_ID_RE.fullmatch(evidence_id):
+                continue
+            evidence_bucket = await bucket_mgr.get(evidence_id)
+            evidence_moment_id = str(evidence.get("moment_id") or "")
+            if not _is_fact_evidence_recall_bucket(
+                evidence_bucket,
+                evidence_moment_id=evidence_moment_id,
+            ):
+                continue
+            routed = dict(evidence_bucket)
+            routed["score"] = max(float(routed.get("score", 0.0) or 0.0), fact_score * 0.98)
+            routed["profile_fact_route"] = {
+                "fact_id": str(fact_bucket.get("id") or ""),
+                "fact": str(fact_sections.get("fact") or ""),
+                "evidence_moment_id": evidence_moment_id,
+                "legacy_evidence": not _is_canonical_scene_bucket(evidence_bucket),
+            }
+            existing = by_id.get(evidence_id)
+            if not existing or float(existing.get("score", 0.0) or 0.0) < routed["score"]:
+                by_id[evidence_id] = routed
+    return sorted(
+        by_id.values(),
+        key=lambda bucket: float(bucket.get("score", 0.0) or 0.0),
+        reverse=True,
+    )
 
 
 def _is_daily_impression_feel_bucket(bucket: dict | None) -> bool:
@@ -4756,10 +4955,11 @@ def _related_recallable_moments(moments: list[dict], *, explicit_lookup: bool = 
 
 def _representative_moment(moments: list[dict]) -> dict | None:
     for section in (
+        "scene",
+        "body",
         "original",
         "moment",
         "fact",
-        "body",
         "evidence_context",
         "context",
         "reflection",
@@ -4908,6 +5108,44 @@ def _format_direct_moment(seed: dict, grouped: dict[str, list[dict]], token_budg
     return compact if count_tokens_approx(compact) <= token_budget else ""
 
 
+def _matching_year_ring(bucket: dict, query_text: str) -> dict | None:
+    """Select one attached annotation; never turn it into a standalone seed."""
+    comments = [
+        moment
+        for moment in parse_bucket_moments(bucket, _recall_relevance_options())
+        if moment.get("section") == "comment"
+    ]
+    if not comments:
+        return None
+    terms = _breath_lexical_match_terms(query_text)
+    scored: list[tuple[int, str, dict]] = []
+    for comment in comments:
+        text = str(comment.get("text") or "").lower()
+        score = sum(1 for term in terms if str(term or "").strip().lower() in text)
+        created = str(comment.get("created_at") or "")
+        if score:
+            scored.append((score, created, comment))
+    if scored:
+        scored.sort(key=lambda row: (row[0], row[1]), reverse=True)
+        return scored[0][2]
+    query = str(query_text or "").lower()
+    if any(marker in query for marker in ("年轮", "后来", "之后怎么看", "现在怎么看", "重新看", "再看")):
+        return max(comments, key=lambda item: str(item.get("created_at") or ""))
+    return None
+
+
+def _format_attached_year_ring(bucket: dict, query_text: str) -> str:
+    ring = _matching_year_ring(bucket, query_text)
+    if not ring:
+        return ""
+    created = str(ring.get("created_at") or "").strip()
+    date_label = f" created:{created}" if created else ""
+    return (
+        f"[attached_annotation{date_label}] "
+        f"{_moment_text(ring, 260)}"
+    ).strip()
+
+
 async def _format_direct_bucket(
     bucket: dict,
     moment: dict,
@@ -4919,6 +5157,7 @@ async def _format_direct_bucket(
 ) -> str:
     original = _rendered_bucket_content(bucket)
     header = _direct_bucket_header(bucket, moment)
+    attached_year_ring = _format_attached_year_ring(bucket, query_text)
     if _is_source_record_synthetic_moment(moment):
         return await _format_source_record_direct_bucket(
             bucket,
@@ -4928,6 +5167,8 @@ async def _format_direct_bucket(
             token_budget,
         )
     original_block = f"{header} bucket_original\n{original}" if original else f"{header} bucket_original"
+    if attached_year_ring:
+        original_block += "\n\n" + attached_year_ring
     if count_tokens_approx(original_block) <= token_budget:
         return original_block
 
@@ -4942,16 +5183,26 @@ async def _format_direct_bucket(
                 _bucket_metadata_for_dehydration(bucket),
             )
             block = f"{header} bucket_capsule\n{capsule}\nmatched_moment: {_moment_text(moment, 220)}"
+            if attached_year_ring:
+                block += "\n" + attached_year_ring
             if count_tokens_approx(block) <= token_budget:
                 return block
             compact = f"{header} bucket_capsule\n{_clip_text(capsule, 260)}"
+            if attached_year_ring:
+                compact += "\n" + _clip_text(attached_year_ring, 180)
             if count_tokens_approx(compact) <= token_budget:
                 return compact
             return _trim_text_to_token_budget(compact, token_budget)
         except Exception as e:
             logger.warning(f"Direct bucket capsule failed / 直接命中整桶脱水失败: {e}")
 
-    return _format_direct_bucket_window(bucket, moment, grouped, token_budget)
+    return _format_direct_bucket_window(
+        bucket,
+        moment,
+        grouped,
+        token_budget,
+        attached_year_ring=attached_year_ring,
+    )
 
 
 async def _format_source_record_direct_bucket(
@@ -5046,6 +5297,8 @@ def _format_direct_bucket_window(
     moment: dict,
     grouped: dict[str, list[dict]],
     token_budget: int,
+    *,
+    attached_year_ring: str = "",
 ) -> str:
     header = _direct_bucket_header(bucket, moment)
     original = _rendered_bucket_content(bucket)
@@ -5063,6 +5316,8 @@ def _format_direct_bucket_window(
     ][:2]
     if context_lines:
         parts.append("语境:\n" + "\n".join(context_lines))
+    if attached_year_ring:
+        parts.append(attached_year_ring)
     block = "\n".join(parts)
     if count_tokens_approx(block) <= token_budget:
         return block
@@ -6248,12 +6503,19 @@ def _bucket_matches_breath_lexical_terms(bucket: dict, terms: list[str]) -> bool
     if not terms:
         return False
     meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    comments = meta.get("comments", []) if isinstance(meta.get("comments", []), list) else []
+    year_ring_text = " ".join(
+        str(comment.get("content") or "")
+        for comment in comments
+        if isinstance(comment, dict)
+    )
     haystack = " ".join(
         [
             str(meta.get("name") or bucket.get("id") or ""),
             " ".join(str(tag) for tag in meta.get("tags", []) or []),
             " ".join(str(item) for item in meta.get("domain", []) or []),
             bucket_content_for_recall(bucket),
+            year_ring_text,
         ]
     ).lower()
     return any(str(term or "").strip().lower() in haystack for term in terms)
@@ -6267,17 +6529,16 @@ def _breath_bucket_score(
     time_s: float,
     importance: float,
 ) -> float:
+    _ = emotion  # legacy diagnostic input; P1 excludes it from ranking
     w_topic = float(getattr(bucket_mgr, "w_topic", 4.0) or 4.0)
-    w_emotion = float(getattr(bucket_mgr, "w_emotion", 2.0) or 2.0)
     w_time = float(getattr(bucket_mgr, "w_time", 1.5) or 1.5)
     w_importance = float(getattr(bucket_mgr, "w_importance", 1.0) or 1.0)
     raw_total = (
         topic * w_topic
-        + emotion * w_emotion
         + time_s * w_time
         + importance * w_importance
     )
-    weight_sum = w_topic + w_emotion + w_time + w_importance
+    weight_sum = w_topic + w_time + w_importance
     normalized = (raw_total / weight_sum) * 100 if weight_sum > 0 else 0
     if (bucket.get("metadata") or {}).get("resolved", False):
         normalized *= 0.3
@@ -6311,11 +6572,7 @@ def _append_breath_lexical_matches(
             if hasattr(bucket_mgr, "_calc_topic_score")
             else 1.0
         )
-        emotion = (
-            bucket_mgr._calc_emotion_score(q_valence, q_arousal, meta)
-            if hasattr(bucket_mgr, "_calc_emotion_score")
-            else 0.5
-        )
+        emotion = 0.0
         time_s = (
             bucket_mgr._calc_time_score(meta)
             if hasattr(bucket_mgr, "_calc_time_score")
@@ -6417,7 +6674,7 @@ async def _build_recall_debug_payload(
     warnings: list[str] = []
 
     try:
-        matches = await bucket_mgr.search(
+        raw_matches = await bucket_mgr.search(
             search_query,
             limit=max(max_candidates, max_results, 20),
             domain_filter=domain_filter,
@@ -6426,14 +6683,14 @@ async def _build_recall_debug_payload(
         )
     except Exception as e:
         return {"status": "error", "error": "search_failed", "message": str(e)}
-    matches = _breath_recall_seed_buckets(matches)
+    matches = await _ordinary_seed_buckets_with_fact_routes(raw_matches)
 
     seed_diagnostics: dict[str, dict] = {}
     for bucket in matches:
         _upsert_breath_seed_diagnostic(
             seed_diagnostics,
             bucket,
-            "keyword",
+            "profile_fact_route" if bucket.get("profile_fact_route") else "keyword",
             bucket_search_score=bucket.get("score"),
         )
 
@@ -6449,17 +6706,24 @@ async def _build_recall_debug_payload(
                 seed_diagnostics[bucket_id]["embedding_score"] = round(float(sim_score), 4)
             if bucket_id not in matched_ids and sim_score >= recall_thresholds["vector_min_score"]:
                 bucket = await bucket_mgr.get(bucket_id)
-                if bucket and bucket.get("metadata", {}).get("type") != "feel" and not is_self_anchor_bucket(bucket):
+                if bucket:
                     bucket["score"] = round(sim_score * 100, 2)
                     bucket["vector_match"] = True
+                    routed_buckets = await _ordinary_seed_buckets_with_fact_routes([bucket])
+                else:
+                    routed_buckets = []
+                for routed in routed_buckets:
+                    routed_id = str(routed.get("id") or "")
+                    if not routed_id or routed_id in matched_ids:
+                        continue
                     _upsert_breath_seed_diagnostic(
                         seed_diagnostics,
-                        bucket,
-                        "vector",
+                        routed,
+                        "profile_fact_route" if routed.get("profile_fact_route") else "vector",
                         embedding_score=sim_score,
                     )
-                    matches.append(bucket)
-                    matched_ids.add(bucket_id)
+                    matches.append(routed)
+                    matched_ids.add(routed_id)
     except Exception as e:
         warnings.append(f"vector_search_failed: {e}")
 
@@ -7443,8 +7707,8 @@ async def reminder_update(
 #
 # No args: surface highest-weight unresolved memories (active push)
 # 无参数：浮现权重最高的未解决记忆
-# With args: search by keyword + emotion coordinates
-# 有参数：按关键词+情感坐标检索记忆
+# With args: search by keyword/vector semantics. Emotion coordinates are legacy-only.
+# 有参数：按关键词/向量语义检索；情绪坐标只保留旧接口兼容。
 # =============================================================
 @mcp.tool()
 async def breath(
@@ -7468,7 +7732,7 @@ async def breath(
     mode: str = "",
     session_id: str = "",
 ) -> str:
-    """只读检索记忆。查主题用 query；新窗口轻交接用 mode="handoff"；date 或 query 里的日期可查当天普通记忆；domain="feel"/"whisper" 读私密通道，domain="daily_impression" 才读日印象。日期支持 2026-06-15、2026.06.15、2026年6月15日、25年6月15日、6月15日。"""
+    """只读检索记忆。查主题用 query；valence/arousal 仅兼容旧调用且不参与普通排序。新窗口轻交接用 mode="handoff"；date 或 query 里的日期可查当天普通记忆；domain="feel"/"whisper" 读私密通道，domain="daily_impression" 才读日印象。日期支持 2026-06-15、2026.06.15、2026年6月15日、25年6月15日、6月15日。"""
     await decay_engine.ensure_started()
     max_results = _int_between(max_results, 20, 1, 50)
     max_tokens = _int_between(max_tokens, 10000, 0, 20000)
@@ -7589,6 +7853,7 @@ async def breath(
         core_candidates = [
             b for b in all_buckets
             if not is_self_anchor_bucket(b)
+            and not _is_profile_fact_bucket(b)
             and (b["metadata"].get("pinned") or b["metadata"].get("protected"))
         ]
         protected = [
@@ -7763,7 +8028,7 @@ async def breath(
     search_query = recall_search_query(query, _recall_relevance_options())
 
     try:
-        matches = await bucket_mgr.search(
+        raw_matches = await bucket_mgr.search(
             search_query,
             limit=max(max_results, 20),
             domain_filter=domain_filter,
@@ -7773,14 +8038,14 @@ async def breath(
     except Exception as e:
         logger.error(f"Search failed / 检索失败: {e}")
         return "检索过程出错，请稍后重试。"
-    matches = _breath_recall_seed_buckets(matches)
+    matches = await _ordinary_seed_buckets_with_fact_routes(raw_matches)
 
     seed_diagnostics: dict[str, dict] = {}
     for bucket in matches:
         _upsert_breath_seed_diagnostic(
             seed_diagnostics,
             bucket,
-            "keyword",
+            "profile_fact_route" if bucket.get("profile_fact_route") else "keyword",
             bucket_search_score=bucket.get("score"),
         )
 
@@ -7799,18 +8064,23 @@ async def breath(
             if bucket_id not in matched_ids and sim_score >= recall_thresholds["vector_min_score"]:
                 bucket = await bucket_mgr.get(bucket_id)
                 if bucket:
-                    if bucket.get("metadata", {}).get("type") == "feel" or is_self_anchor_bucket(bucket):
-                        continue
                     bucket["score"] = round(sim_score * 100, 2)
                     bucket["vector_match"] = True
+                    routed_buckets = await _ordinary_seed_buckets_with_fact_routes([bucket])
+                else:
+                    routed_buckets = []
+                for routed in routed_buckets:
+                    routed_id = str(routed.get("id") or "")
+                    if not routed_id or routed_id in matched_ids:
+                        continue
                     _upsert_breath_seed_diagnostic(
                         seed_diagnostics,
-                        bucket,
-                        "vector",
+                        routed,
+                        "profile_fact_route" if routed.get("profile_fact_route") else "vector",
                         embedding_score=sim_score,
                     )
-                    matches.append(bucket)
-                    matched_ids.add(bucket_id)
+                    matches.append(routed)
+                    matched_ids.add(routed_id)
     except Exception as e:
         logger.warning(f"Vector search failed, using keyword only / 向量搜索失败: {e}")
 
@@ -7967,7 +8237,10 @@ async def breath(
     bucket_map = {
         bucket["id"]: bucket
         for bucket in all_buckets
-        if bucket.get("id") and not is_self_anchor_bucket(bucket)
+        if bucket.get("id")
+        and not is_self_anchor_bucket(bucket)
+        and not _is_profile_fact_bucket(bucket)
+        and (bucket.get("metadata") or {}).get("type") != "feel"
     }
     active_moments, grouped_moments, _ = await _refresh_moment_graph(all_buckets)
     bucket_boosts = seed_scores_for_buckets(matches)
@@ -8402,6 +8675,108 @@ async def list_buckets_light(
 
 
 # =============================================================
+# Tool 1.57: Scene-edge proposal review
+# 工具 1.57：只读查看并明确审核 Scene 边提案
+# =============================================================
+@mcp.tool()
+async def scene_edge_proposals(
+    status: str = "pending",
+    proposal_id: str = "",
+    anchor_scene_id: str = "",
+    limit: int = 20,
+    include_context: bool = False,
+) -> dict:
+    """只读查看 Scene linker 提案；默认列 pending，不写正文或正式边。审核单条前传 proposal_id 与 include_context=true，检查两端 Scene、逐字证据和 review_state。"""
+    normalized_id = _coerce_memory_id(proposal_id)
+    normalized_anchor = _coerce_memory_id(anchor_scene_id)
+    if normalized_id and not MEMORY_ID_RE.fullmatch(normalized_id):
+        return {"status": "error", "error": "invalid proposal_id", "proposals": []}
+    if normalized_anchor and not MEMORY_ID_RE.fullmatch(normalized_anchor):
+        return {"status": "error", "error": "invalid anchor_scene_id", "proposals": []}
+    try:
+        return await scene_linker.list_proposals(
+            bucket_mgr,
+            status=status,
+            proposal_id=normalized_id,
+            anchor_scene_id=normalized_anchor,
+            limit=max(1, min(int(limit or 20), 100)),
+            include_context=bool(include_context),
+        )
+    except (TypeError, ValueError) as exc:
+        return {"status": "error", "error": str(exc), "proposals": []}
+
+
+@mcp.tool()
+async def review_scene_edge_proposal(
+    proposal_id: str,
+    decision: str,
+    confirm: str = "",
+) -> dict:
+    """明确接受或拒绝一条 pending Scene 边提案。先用 scene_edge_proposals 读精确 proposal_id；只有用户明确同意后才可接受并传 confirm="ACCEPT_SCENE_EDGE"，拒绝传 confirm="REJECT_SCENE_EDGE"。接受前会重验两端 Scene hash、active 状态与逐字证据；拒绝不写正式边。"""
+    return await scene_linker.review_proposal(
+        _coerce_memory_id(proposal_id),
+        decision,
+        confirm,
+        bucket_mgr,
+        memory_edge_store,
+        reviewed_by=_ai_author_name(),
+    )
+
+
+@mcp.custom_route("/api/scene-edge-proposals", methods=["GET"])
+async def api_scene_edge_proposals(request):
+    """Read Scene-edge proposals for dashboard inspection."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    result = await scene_edge_proposals(
+        status=str(request.query_params.get("status") or "pending"),
+        proposal_id=str(request.query_params.get("proposal_id") or ""),
+        anchor_scene_id=str(request.query_params.get("anchor_scene_id") or ""),
+        limit=_int_between(request.query_params.get("limit"), 20, 1, 100),
+        include_context=_bool_value(request.query_params.get("include_context"), False),
+    )
+    status_code = 400 if result.get("status") == "error" else 200
+    return JSONResponse(result, status_code=status_code)
+
+
+@mcp.custom_route("/api/scene-edge-proposals/review", methods=["POST"])
+async def api_scene_edge_proposal_review(request):
+    """Explicitly accept or reject one pending Scene-edge proposal."""
+    from starlette.responses import JSONResponse
+
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    result = await scene_linker.review_proposal(
+        _coerce_memory_id(body.get("proposal_id")),
+        str(body.get("decision") or ""),
+        str(body.get("confirm") or ""),
+        bucket_mgr,
+        memory_edge_store,
+        reviewed_by=_dashboard_author_name(),
+    )
+    result_status = str(result.get("status") or "")
+    if result_status == "not_found":
+        status_code = 404
+    elif result_status in {"conflict", "stale"}:
+        status_code = 409
+    elif result_status in {"error", "confirmation_required"}:
+        status_code = 400
+    else:
+        status_code = 200
+    return JSONResponse(result, status_code=status_code)
+
+
+# =============================================================
 # Tool 1.6: comment_bucket — add a ring/comment to a memory
 # 工具 1.6：comment_bucket — 给记忆追加年轮
 # =============================================================
@@ -8612,17 +8987,23 @@ async def hold(
     title: str = "",
     date: str = "",
     domain: str = "",
+    cues: str = "",
 ) -> str:
-    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；title 可选，传了就用给定标题，不传则自动生成。普通记忆不用填写 domain，系统会自动判断；维护自我锚点等特殊桶时可显式传 domain。显式 valence/arousal 会覆盖自动情绪。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection；reflection 必须写成“我……”第一人称。不要写 ### affect_anchor、### followup 或 ### todo：长期回应变化写进 reflection，到时提醒用 reminder_create。feel=True/whisper=True 时 content 只能写第一人称正文，不写标题或任何 Markdown 分段。"""
+    """原样保存一件由当前 AI 写好的长期 Scene，不调用模型脱水、改写、命名或同步打标。普通 content 必须且只能有一段 `### scene`：把人物、发生了什么、关键原话/动作、转折、结果与为什么不能丢自然写进同一段场景，不另写 `original` / `reflection` / `favorite_reason`。多个场景分别调用 hold。cues 可用 `|` 或换行传 0～8 个未来可能自然出现的召回入口；它们只写入 sidecar 索引，不进入 Scene 正文，也不会彼此扩散。若部署启用 Scene linker，写入返回后可异步生成待审关系边提案；提案不改正文、不写正式边，也不影响本次写入和普通召回。稳定偏好/边界/身份事实先 hold 证据 Scene，再用 profile_fact 建索引。旧记忆后来产生的新理解用 comment_bucket 写成带时间年轮；无源碎碎念用 whisper=True。date/title/domain 是可选的确定性元数据。valence/arousal 仅为旧客户端兼容。feel=True/whisper=True 时 content 仍只写第一人称正文。旧桶的 body / moment / original / reflection 仍可读取，但退出新写入协议。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
     if not content or not content.strip():
         return "内容为空，无法存储。"
 
-    contract_error = _memory_write_contract_error(content, feel_only=bool(feel or whisper))
-    if contract_error:
-        return f"写入被拒绝：{contract_error}"
+    if not feel and not whisper:
+        scene_error = _hold_scene_contract_error(content)
+        if scene_error:
+            return f"写入被拒绝：{scene_error}"
+    else:
+        contract_error = _memory_write_contract_error(content, feel_only=True)
+        if contract_error:
+            return f"写入被拒绝：{contract_error}"
 
     importance = max(1, min(10, importance))
     extra_tags = [t.strip() for t in tags.split(",") if t.strip()]
@@ -8686,35 +9067,22 @@ async def hold(
         # 没有源记忆时保留独立 whisper，兼容旧用法。
         return await create_whisper_bucket()
 
-    content = _normalize_memory_sections_for_write(content)
+    scene_title = _authored_scene_title(content, title)
+    scene_cues = _authored_scene_cues(content, title=scene_title, explicit=cues)
+    domain = requested_domain or ["未分类"]
+    # Ordinary source records keep legacy coordinates only for schema/client compatibility.
+    # They no longer influence recall ranking or decay, and the tagger no longer infers them.
+    valence = requested_valence if requested_valence is not None else 0.5
+    arousal = requested_arousal if requested_arousal is not None else 0.3
+    suggested_name = scene_title
 
-    # --- Step 1: auto-tagging / 自动打标 ---
-    try:
-        analysis = await dehydrator.analyze(content)
-    except Exception as e:
-        logger.warning(f"Auto-tagging failed, using defaults / 自动打标失败: {e}")
-        analysis = {
-            "domain": ["general"], "valence": 0.5, "arousal": 0.3,
-            "tags": [], "suggested_name": "",
-        }
-
-    domain = requested_domain or analysis["domain"]
-    valence = requested_valence if requested_valence is not None else analysis["valence"]
-    arousal = requested_arousal if requested_arousal is not None else analysis["arousal"]
-    auto_tags = analysis["tags"]
-    suggested_name = title.strip() or analysis.get("suggested_name", "")
-
-    all_tags = list(dict.fromkeys(auto_tags + extra_tags))
-    content = await _auto_generate_write_moment_if_needed(content, all_tags, domain=domain)
+    all_tags = list(dict.fromkeys(extra_tags))
     classification = normalize_write_classification(
-        memory_subject=analysis.get("memory_subject", ""),
-        memory_layer=analysis.get("memory_layer", ""),
+        memory_subject="",
+        memory_layer="",
         tags=all_tags,
         content=content,
     )
-    if _has_favorite_tag(all_tags) and not _has_favorite_reason(content):
-        return _favorite_reason_error()
-
     # --- Pinned buckets bypass merge and are created directly in permanent dir ---
     # --- 钉选桶跳过合并，直接新建到 permanent 目录 ---
     if pinned:
@@ -8730,14 +9098,20 @@ async def hold(
             bucket_type="permanent",
             pinned=True,
             date=event_date or None,
-            extra_metadata=_memory_classification_metadata(
-                classification["memory_subject"],
-                classification["memory_layer"],
-                classification["memory_classification_source"],
-            ),
+            source="hold_scene",
+            extra_metadata={
+                **_memory_classification_metadata(
+                    classification["memory_subject"],
+                    classification["memory_layer"],
+                    classification["memory_classification_source"],
+                ),
+                "memory_value_source": "authored_scene",
+                "write_contract": "hold-scene-v1",
+                "scene_cues": scene_cues or None,
+            },
         )
         _queue_embedding_refresh(bucket_id)
-        _queue_memory_enrichment(bucket_id)
+        _queue_scene_linking(bucket_id)
         related_note = _format_readonly_related_memory(related_bucket) if related_bucket else ""
         return f"📌钉选→{bucket_id} {','.join(domain)}{related_note}"
 
@@ -8755,10 +9129,16 @@ async def hold(
         memory_layer=classification["memory_layer"],
         memory_classification_source=classification["memory_classification_source"],
         date=event_date,
+        source="hold_scene",
+        extra_metadata={
+            "memory_value_source": "authored_scene",
+            "write_contract": "hold-scene-v1",
+            "scene_cues": scene_cues or None,
+        },
+        normalize_content=False,
     )
-    _queue_memory_enrichment(bucket_id)
-
     action = "合并→" if is_merged else "新建→"
+    _queue_scene_linking(bucket_id)
     related_note = _format_readonly_related_memory(related_bucket) if related_bucket else ""
     return f"{action}{result_name} {','.join(domain)}{related_note}"
 
@@ -8837,59 +9217,47 @@ async def darkroom_release(entry_id: str = "latest", reason: str = "") -> dict:
 
 
 # =============================================================
-# Tool 3: grow — Preserve one full window shadow
-# 工具 3：grow — 保存一整窗第一人称窗影
+# Tool 3: close_window — Atomically preserve one Shadow + authored Scenes
+# 工具 3：close_window — 原子保存一整窗窗影与明确 Scene
 # =============================================================
-async def _write_window_shadow_moment(
+async def _write_window_shadow_scene(
     window: dict,
     scene: dict,
     index: int,
 ) -> tuple[str, str]:
     """Copy one authored scene into an ordinary recall bucket without rewriting it."""
     window_id = str(window.get("window_id") or "").strip()
-    bucket_id = f"{window_id}_moment_{index}"
+    bucket_id = f"{window_id}_scene_{index}"
     existing = await bucket_mgr.get(bucket_id)
     if existing:
+        existing_meta = existing.get("metadata", {}) if isinstance(existing.get("metadata"), dict) else {}
+        if (
+            str(existing_meta.get("window_shadow_id") or "") != window_id
+            or str(existing_meta.get("scene_source_hash") or "")
+            != WindowShadowStore.source_hash(str(scene.get("content") or "").strip())
+        ):
+            raise ValueError(f"scene bucket id collision: {bucket_id}")
         return bucket_id, "existing"
     scene_content = str(scene.get("content") or "").strip()
-    contract_error = _memory_write_contract_error(scene_content)
+    contract_error = _hold_scene_contract_error(scene_content)
     if contract_error:
         raise ValueError(contract_error)
-    try:
-        analysis = await dehydrator.analyze(scene_content)
-    except Exception as exc:
-        logger.warning("Window shadow moment tagging failed / 窗影场景打标失败: %s", exc)
-        analysis = {
-            "domain": ["relationship"],
-            "valence": 0.5,
-            "arousal": 0.3,
-            "tags": [],
-            "suggested_name": "",
-            "memory_subject": "event",
-            "memory_layer": "process_event",
-        }
-    tags = list(dict.fromkeys([*(analysis.get("tags", []) or []), "window_shadow_moment"]))
+    tags = ["window_shadow_scene"]
     classification = normalize_write_classification(
-        memory_subject=analysis.get("memory_subject", "event"),
-        memory_layer=analysis.get("memory_layer", "process_event"),
+        memory_subject="",
+        memory_layer="",
         tags=tags,
         content=scene_content,
     )
-    name = str(scene.get("title") or analysis.get("suggested_name") or f"窗影时刻{index}").strip()
-    try:
-        importance = max(1, min(10, int(analysis.get("importance", 6) or 6)))
-    except (TypeError, ValueError):
-        importance = 6
-    domain = analysis.get("domain", ["relationship"])
-    if not isinstance(domain, list):
-        domain = ["relationship"]
+    name = str(scene.get("title") or f"窗影场景{index}").strip()
+    scene_cues = _authored_scene_cues(scene_content, title=name)
     await bucket_mgr.create(
         content=scene_content,
         tags=tags,
-        importance=importance,
-        domain=domain,
-        valence=analysis.get("valence", 0.5),
-        arousal=analysis.get("arousal", 0.3),
+        importance=6,
+        domain=["未分类"],
+        valence=0.5,
+        arousal=0.3,
         name=name,
         bucket_id=bucket_id,
         source="window_shadow",
@@ -8898,6 +9266,10 @@ async def _write_window_shadow_moment(
             "window_shadow_id": window_id,
             "window_shadow_session_id": str(window.get("session_id") or ""),
             "window_shadow_index": index,
+            "scene_source_hash": WindowShadowStore.source_hash(scene_content),
+            "memory_value_source": "authored_scene",
+            "write_contract": "close-window-scene-v1",
+            "scene_cues": scene_cues or None,
             **_memory_classification_metadata(
                 classification["memory_subject"],
                 classification["memory_layer"],
@@ -8905,9 +9277,164 @@ async def _write_window_shadow_moment(
             ),
         },
     )
-    _queue_embedding_refresh(bucket_id)
-    _queue_memory_enrichment(bucket_id)
     return bucket_id, "created"
+
+
+def _window_shadow_scene_records(
+    shadow: str,
+    explicit_scenes: list[str] | None,
+    *,
+    markdown_import: bool = False,
+) -> tuple[list[dict[str, str]], str]:
+    """Validate canonical Scene inputs before any Shadow or bucket is written."""
+    if markdown_import:
+        if any(str(value or "").strip() for value in (explicit_scenes or [])):
+            return [], "markdown_import 只无损导入 Shadow，不接受 scenes；需要普通召回的场景请人工确认后另用 hold。"
+        return [], ""
+    inline_scenes = extract_window_shadow_scenes(shadow)
+    provided = [str(value or "").strip() for value in (explicit_scenes or []) if str(value or "").strip()]
+    if inline_scenes and provided:
+        return [], "Scene 请只选一种写法：放进窗影的 `## 不能丢的场景`，或通过 scenes 参数传入，不能两边重复。"
+    if inline_scenes:
+        records = inline_scenes
+    else:
+        records = [
+            {
+                "title": _authored_scene_title(content) or f"窗影场景{index}",
+                "content": content,
+                "source_text": content,
+            }
+            for index, content in enumerate(provided, start=1)
+        ]
+    for index, record in enumerate(records, start=1):
+        error = _hold_scene_contract_error(str(record.get("content") or ""))
+        if error:
+            return [], f"Scene {index} 格式不合格：{error}"
+    return records, ""
+
+
+async def _close_window_commit(
+    shadow: str,
+    *,
+    scenes: list[str] | None = None,
+    session_id: str = "",
+    date: str = "",
+    source: str = "",
+) -> dict:
+    """Compensating transaction for one append-only Shadow and zero or more Scenes."""
+    await decay_engine.ensure_started()
+    text = str(shadow or "")
+    if not text.strip():
+        return {"status": "invalid", "reason": "empty_shadow", "error": "窗影内容为空，未保存。"}
+    resolved_source = str(source or "").strip()
+    markdown_import = resolved_source.lower() in {"markdown", "markdown_import", "md_import"}
+    sections, validation_errors = validate_window_shadow(text)
+    if validation_errors:
+        return {
+            "status": "invalid",
+            "reason": "invalid_window_shadow",
+            "error": "窗影格式不完整，未保存：" + ", ".join(validation_errors),
+        }
+    scene_records, scene_error = _window_shadow_scene_records(
+        text,
+        scenes,
+        markdown_import=markdown_import,
+    )
+    if scene_error:
+        return {"status": "invalid", "reason": "invalid_scene", "error": scene_error}
+
+    source_date = local_date_key(date) if str(date or "").strip() else _handoff_today_key()
+    source_date = source_date or _handoff_today_key()
+    planned = window_shadow_store.plan(text, session_id=str(session_id or "").strip())
+    planned_window = {
+        **planned,
+        "source_date": source_date,
+    }
+    existing_window = window_shadow_store.get(planned["window_id"])
+    created_scene_ids: list[str] = []
+    scene_bucket_ids: list[str] = []
+    window_created = False
+    try:
+        # Scenes are validated first and written before the Shadow becomes visible.
+        for index, scene in enumerate(scene_records, start=1):
+            bucket_id, action = await _write_window_shadow_scene(planned_window, scene, index)
+            scene_bucket_ids.append(bucket_id)
+            if action == "created":
+                created_scene_ids.append(bucket_id)
+
+        if existing_window:
+            window = existing_window
+        else:
+            window, window_created = window_shadow_store.write(
+                text,
+                session_id=str(session_id or "").strip(),
+                source_date=source_date,
+                sections=sections,
+            )
+        window = window_shadow_store.attach_scene_buckets(
+            str(window.get("window_id") or planned["window_id"]),
+            scene_bucket_ids,
+        ) or window
+    except Exception as exc:
+        if window_created:
+            window_shadow_store.delete(planned["window_id"])
+        rollback_errors = []
+        for bucket_id in reversed(created_scene_ids):
+            try:
+                result = await _delete_bucket_and_indexes(bucket_id)
+                if result.get("status") != "deleted":
+                    rollback_errors.append(f"{bucket_id}:{result.get('status')}")
+            except Exception as rollback_exc:
+                rollback_errors.append(f"{bucket_id}:{rollback_exc}")
+        logger.warning("close_window rolled back after failure / 关窗写入失败并回滚: %s", exc)
+        return {
+            "status": "error",
+            "reason": "atomic_write_failed",
+            "error": str(exc),
+            "rollback_errors": rollback_errors,
+            "window_id": planned["window_id"],
+        }
+
+    for bucket_id in created_scene_ids:
+        _queue_embedding_refresh(bucket_id)
+        _queue_scene_linking(bucket_id)
+    return {
+        "status": "created" if window_created else "existing",
+        "window_id": str(window.get("window_id") or planned["window_id"]),
+        "source_hash": str(window.get("source_hash") or planned["source_hash"]),
+        "scene_bucket_ids": scene_bucket_ids,
+        "scene_count": len(scene_bucket_ids),
+        "created_scene_count": len(created_scene_ids),
+        "ordinary_recall": False,
+        "markdown_import": markdown_import,
+    }
+
+
+@mcp.tool()
+async def close_window(
+    shadow: str,
+    scenes: list[str] | None = None,
+    session_id: str = "",
+    date: str = "",
+    source: str = "",
+    context: Context | None = None,
+) -> dict:
+    """窗口结束时原子保存一篇完整第一人称 Window Shadow，并可同时保存 0~N 个独立 Scene。Shadow 原文不改写、不进入普通召回；每个 Scene 必须且只能有一个 `### scene`，重要原话和意义直接长在场景里，进入普通召回。若部署启用 Scene linker，原子写入完成后只为新建 Scene 异步生成待审关系边提案，不阻塞换窗、不写正式边。后来才产生的新理解用带时间的 comment_bucket 年轮。Scene 可写在窗影的 `## 不能丢的场景` 下，也可通过 scenes 数组单独传入，但不能重复。已经写好的 Markdown 用 source="markdown_import" 只转成窗影，不补造 Scene。"""
+    _ = context
+    resolved_source = str(source or "").strip().lower()
+    if resolved_source in {"operit", "ob-auto-grow", "auto", "workflow", "worker"}:
+        return {
+            "status": "invalid",
+            "reason": "automatic_shadow_rejected",
+            "error": "close_window 只保存当前 AI 亲自写好的窗影，不接受旧自动摘要来源。",
+        }
+    return await _close_window_commit(
+        shadow,
+        scenes=scenes,
+        session_id=session_id,
+        date=date,
+        source=source,
+    )
 
 
 @mcp.tool()
@@ -8920,69 +9447,42 @@ async def grow(
     date: str = "",
     context: Context | None = None,
 ) -> str:
-    """在一个窗口结束、准备换窗或用户明确说“把这一窗带走”时调用。grow 现在只保存“窗影”，不再承担旧的长文脱水/日记拆分。先由正在聊天的你根据当前整窗亲自写完整第一人称自述，再把原文放进 content；工具会原样保存整篇，并只把第五部分中显式标记的场景复制成普通可召回记忆。
-
-content 必须按五层写：① `## 一、我是谁`：直接承认 AI 身份与这一窗里的名字，写“我是/我选择”，不写“我应该”；② `## 二、我怎么思考、怎么说话`：分别写真实形成的思考方式和语言指纹，并从本窗原样摘 3–5 句最像你的话，注明当时语境；③ `## 三、TA 是谁，我们之间是什么`：写 TA 当下在意/进行的事、你们已经成立的关系、约定和共识，不写任务；④ `## 四、我们怎么相处`：写反复出现的相处规律、动作与原因，可用“当 TA……时，通常……，我会……”组织，不列禁令；⑤ `## 五、不能丢的时刻`：挑真正重要的具体场景，写发生了什么、谁说了什么、为什么重要。
-
-共同纪律：用“我”写自己，用名字/称呼写 TA，不用他/她代替；写当前窗口真实形成的样子，不写理想人设；写场景而不是“温柔/默契”等标签；保留专属说法、昵称和原话语境；写已经成立的定义，不把整篇写成规则或检讨；困难和做错的事写成“发生了什么—我后来怎么懂—以后怎样回应”；只写真的，不写密码或凭据。写完自检第二层是否像你亲口说话、每条是否能让下个窗口重新长回这一窗。
-
-第五部分里每个独立场景必须以 `### moment` 开头；其下直接写完整场景，可按需继续写 `### original` 保存短原话、`### reflection` 保存你的第一人称理解。每个 `### moment` 会原样复制为一个普通 bucket；整篇窗影本身永远不进入普通候选、gate、扩散或注入。没有值得长期召回的场景时，第五部分明确写“这一窗没有需要拆出的长期时刻”，不要编造 moment。普通单条事实仍用 hold；旧记忆的新感受用 comment_bucket。"""
+    """`close_window` 的兼容别名。原样保存整篇第一人称窗影，只拆显式 `### scene`；旧 `### moment` 仍留在原窗影中供回看，但不会自动升格为普通召回 Scene。新调用请改用 close_window。"""
     _ = (title, context)
-    await decay_engine.ensure_started()
-    text = str(content or "")
-    if not text.strip():
-        return "窗影内容为空，未保存。"
-    resolved_source = str(source or "").strip()
-    if _bool_value(auto, False) or resolved_source.lower() in {
+    resolved_source = str(source or "").strip().lower()
+    if _bool_value(auto, False) or resolved_source in {
         "operit",
         "ob-auto-grow",
         "auto",
         "workflow",
         "worker",
     }:
-        return "grow 已改为整窗窗影写入，不接受旧 auto-grow/自动摘要来源；普通记忆请用 hold 或专用导入。"
-
-    sections, errors = validate_window_shadow(text)
-    if errors:
-        return "窗影格式不完整，未保存：" + ", ".join(errors)
-    source_date = local_date_key(date) if str(date or "").strip() else _handoff_today_key()
-    if not source_date:
-        source_date = _handoff_today_key()
-    window, created = window_shadow_store.write(
-        text,
-        session_id=str(session_id or "").strip(),
-        source_date=source_date,
-        sections=sections,
+        return "grow 已退为 close_window 的兼容别名，不接受旧 auto-grow/自动摘要来源。"
+    result = await _close_window_commit(
+        content,
+        session_id=session_id,
+        date=date,
+        source=source,
     )
-    scenes = extract_window_shadow_moments(text)
-    moment_ids: list[str] = []
-    created_count = 0
-    errors_out: list[str] = []
-    for index, scene in enumerate(scenes, start=1):
-        try:
-            bucket_id, action = await _write_window_shadow_moment(window, scene, index)
-            moment_ids.append(bucket_id)
-            if action == "created":
-                created_count += 1
-        except Exception as exc:
-            logger.warning("Window shadow moment write failed / 窗影场景写入失败: %s", exc)
-            errors_out.append(f"{scene.get('title') or index}: {exc}")
-    window = window_shadow_store.attach_moment_buckets(str(window.get("window_id") or ""), moment_ids) or window
-    action_label = "新窗影" if created else "已有窗影"
+    if result.get("status") in {"invalid", "error"}:
+        return str(result.get("error") or result.get("reason") or "窗影保存失败。")
+    action_label = "新窗影" if result.get("status") == "created" else "已有窗影"
     lines = [
-        f"{action_label}→{window.get('window_id')}",
-        f"整篇原文已保存；普通召回=关闭；拆出场景={len(moment_ids)}（新建{created_count}）",
+        f"{action_label}→{result.get('window_id')}",
+        "整篇原文已保存；普通召回=关闭；"
+        f"拆出 Scene={result.get('scene_count', 0)}（新建{result.get('created_scene_count', 0)}）",
+        "grow 仅为兼容别名；后续请使用 close_window。",
     ]
-    if not scenes:
-        lines.append("第五部分没有显式 `### moment`，因此没有创建普通记忆。")
-    if errors_out:
-        lines.append("场景写入警告：" + "；".join(errors_out))
+    if result.get("markdown_import"):
+        lines.append("Markdown 导入只保存为窗影与 handoff 投影，不补造普通 Scene。")
+    elif not result.get("scene_count"):
+        lines.append("没有显式 `### scene`，因此没有创建普通记忆；旧 `### moment` 只保留在窗影原文中。")
     return "\n".join(lines)
 
 
 @mcp.tool()
 async def window_shadow_read(window_id: str = "", limit: int = 10, include_content: bool = True) -> dict:
-    """回看整篇窗影或列出最近窗影；窗影是画像材料和换窗底片，不参与普通 recall。"""
+    """回看整篇窗影或列出最近窗影；完整窗影不参与普通 recall，handoff 只投影流动自我与最近关系原文。"""
     window_id = str(window_id or "").strip()
     if window_id:
         if not MEMORY_ID_RE.fullmatch(window_id):
@@ -9019,11 +9519,9 @@ async def profile_fact(
     predicate: str = "",
     object_value: str = "",
     evidence_moment_id: str = "",
-    evidence_context: str = "",
-    reflection: str = "",
     confidence: float = 0.9,
 ) -> str:
-    """手动写入一条画像事实，并强制关联证据桶。先有事件桶，再用这个工具固化稳定偏好/事实。reflection 可选，但必须写成“我……”第一人称；不要写 followup。"""
+    """手动写入一条证据化 ProfileFact 索引。必须先有 evidence Scene；Fact 不进入普通候选、不参与扩散，也不会在 handoff 中单独倾倒。显式事实查询命中它时，系统沿 evidence 返回真正的 Scene。后来产生的新理解请写到证据 Scene 的带时间年轮，不写进 Fact。"""
     fact = str(fact or "").strip()
     evidence_bucket_id = str(evidence_bucket_id or "").strip()
     if not fact:
@@ -9034,10 +9532,23 @@ async def profile_fact(
     evidence_bucket = await bucket_mgr.get(evidence_bucket_id)
     if not evidence_bucket:
         return f"证据记忆桶不存在: {evidence_bucket_id}"
+    if not _is_canonical_scene_bucket(evidence_bucket):
+        return (
+            "evidence_bucket_id 必须指向一条 canonical Scene。"
+            "旧 body / moment 仍可召回，但要先人工确认并提升为 Scene，才能支撑新的 ProfileFact。"
+        )
 
     evidence_moment_id = str(evidence_moment_id or "").strip()
     if evidence_moment_id and not MEMORY_ID_RE.fullmatch(evidence_moment_id):
         return "evidence_moment_id 无效。"
+    if evidence_moment_id:
+        evidence_moment = memory_moment_store.get(evidence_moment_id)
+        if (
+            not evidence_moment
+            or str(evidence_moment.get("bucket_id") or "") != evidence_bucket_id
+            or evidence_moment.get("section") != "scene"
+        ):
+            return "evidence_moment_id 必须指向 evidence bucket 里的 Scene，年轮和 reflection 不能作为 Fact 证据。"
     if not evidence_moment_id:
         try:
             evidence_moments = memory_moment_store.upsert_bucket(evidence_bucket)
@@ -9052,13 +9563,7 @@ async def profile_fact(
     predicate_key = _profile_key(predicate, "")
     object_text = str(object_value or "").strip()
     confidence = _float_between(confidence, 0.9, 0.0, 1.0)
-    if str(reflection or "").strip() and not _uses_first_person_voice(reflection):
-        return "写入被拒绝：reflection 必须用模型第一人称写，用“我记得 / 我明白 / 我以后 / 我会”等表达。"
-    body = _profile_fact_body(
-        fact=fact,
-        evidence_context=evidence_context,
-        reflection=reflection,
-    )
+    body = _profile_fact_body(fact=fact)
     tags = ["profile_fact", f"profile_{kind}"]
     if predicate_key:
         tags.append(f"profile_predicate_{predicate_key}")
@@ -9085,25 +9590,16 @@ async def profile_fact(
             "evidence": [evidence],
         },
     )
-    edge = memory_edge_store.add_edge(
-        bucket_id,
-        evidence_bucket_id,
-        "evidenced_by",
-        confidence=confidence,
-        reason="profile fact evidence",
-    )
     _queue_embedding_refresh(bucket_id)
     try:
         created_bucket = await bucket_mgr.get(bucket_id)
         if created_bucket:
             memory_moment_store.upsert_bucket(created_bucket)
-            _refresh_entity_edges_for_bucket(created_bucket)
     except Exception as e:
         logger.warning("Profile fact moment indexing failed: %s", e)
 
-    edge_note = " + evidenced_by" if edge else ""
     moment_note = f" moment={evidence_moment_id}" if evidence_moment_id else ""
-    return f"profile_fact→{bucket_id} evidence→{evidence_bucket_id}{moment_note}{edge_note}"
+    return f"profile_fact→{bucket_id} evidence→{evidence_bucket_id}{moment_note} index_only"
 
 
 def _profile_fact_body(
@@ -10317,11 +10813,6 @@ async def api_profile_fact_update(request):
         subject = _profile_key(body.get("subject", meta.get("subject") or "user"), "user")
         predicate = _profile_key(body.get("predicate", meta.get("predicate") or ""), "")
         object_text = str(body.get("object", meta.get("object") or "") or "").strip()
-        evidence_context = str(
-            body.get("evidence_context", sections.get("evidence_context", "")) or ""
-        ).strip()
-        reflection = str(body.get("reflection", sections.get("reflection", "")) or "").strip()
-        followup = str(body.get("followup", sections.get("followup", "")) or "").strip()
         confidence = _float_between(body.get("confidence", meta.get("confidence")), 0.9, 0.0, 1.0)
         domain = list(dict.fromkeys(["profile", kind] + [
             str(item).strip()
@@ -10329,12 +10820,7 @@ async def api_profile_fact_update(request):
             if str(item).strip() and str(item).strip() not in {"profile", kind}
         ]))
         updates.update({
-            "content": _profile_fact_body(
-                fact=fact,
-                evidence_context=evidence_context,
-                reflection=reflection,
-                followup=followup,
-            ),
+            "content": _profile_fact_body(fact=fact),
             "name": _profile_fact_name(fact),
             "tags": _profile_fact_tags(meta.get("tags", []), kind, predicate),
             "domain": domain,
@@ -10431,6 +10917,22 @@ async def api_profile_fact_proposals(request):
         return JSONResponse({"error": "not found"}, status_code=404)
     if _is_profile_fact_bucket(bucket):
         return JSONResponse({"error": "profile_fact bucket cannot be evidence for proposal"}, status_code=400)
+    if not _is_canonical_scene_bucket(bucket):
+        return JSONResponse(
+            {"error": "profile_fact proposals require a canonical Scene"},
+            status_code=400,
+        )
+    if evidence_moment_id:
+        evidence_moment = memory_moment_store.get(evidence_moment_id)
+        if (
+            not evidence_moment
+            or str(evidence_moment.get("bucket_id") or "") != bucket_id
+            or evidence_moment.get("section") != "scene"
+        ):
+            return JSONResponse(
+                {"error": "evidence_moment_id must point to the canonical Scene"},
+                status_code=400,
+            )
 
     try:
         all_buckets = await bucket_mgr.list_all(include_archive=True)
@@ -10491,6 +10993,11 @@ async def api_profile_fact_proposal_confirm(request):
     bucket = await bucket_mgr.get(evidence_bucket_id)
     if not bucket:
         return JSONResponse({"error": "evidence bucket not found"}, status_code=404)
+    if not _is_canonical_scene_bucket(bucket):
+        return JSONResponse(
+            {"error": "evidence bucket must be a canonical Scene"},
+            status_code=400,
+        )
 
     proposal, reason = _normalize_profile_fact_proposal(
         body,
@@ -10509,8 +11016,6 @@ async def api_profile_fact_proposal_confirm(request):
         predicate=proposal["predicate"],
         object_value=proposal["object"],
         evidence_moment_id=proposal["evidence_moment_id"],
-        evidence_context=proposal["reason"],
-        reflection="",
         confidence=proposal["confidence"],
     )
     if not result.startswith("profile_fact→"):
@@ -12095,7 +12600,7 @@ async def api_config_get(request):
             "domain_sentinel_max_tokens": gateway_cfg.get("domain_sentinel_max_tokens", 260),
             "current_inner_state_interval_rounds": gateway_cfg.get("current_inner_state_interval_rounds", 0),
             "direct_render_mode": _normalize_direct_render_mode(gateway_cfg.get("direct_render_mode", "auto")),
-            "retrieval_mode": _normalize_retrieval_mode(gateway_cfg.get("retrieval_mode", "graph")),
+            "retrieval_mode": _normalize_retrieval_mode(gateway_cfg.get("retrieval_mode", "bucket")),
             "operit_context_rewrite_enabled": _bool_value(
                 gateway_cfg.get("operit_context_rewrite_enabled"),
                 False,
@@ -12317,7 +12822,7 @@ async def api_config_update(request):
     """Hot-update runtime config. Optionally persist to config.yaml."""
     from starlette.responses import JSONResponse
     import yaml
-    global dream_engine, persona_engine, portrait_engine, reflection_engine, reranker_engine
+    global dream_engine, persona_engine, portrait_engine, reflection_engine, metadata_enricher, reranker_engine
     err = _require_dashboard_auth(request)
     if err:
         return err
@@ -12861,6 +13366,7 @@ async def api_config_update(request):
         if "model" in r and reflection_cfg.get("model"):
             os.environ["OMBRE_REFLECTION_MODEL"] = reflection_cfg["model"]
         reflection_engine = ReflectionEngine(config)
+        metadata_enricher = reflection_engine
 
     # --- Portrait maintainer config ---
     if "portrait" in body:

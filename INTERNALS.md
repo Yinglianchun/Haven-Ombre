@@ -1,7 +1,7 @@
 # Ombre Brain — 内部开发文档 / INTERNALS
 
 > 本文档面向开发者和维护者。记录功能总览、环境变量、模块依赖、硬编码值和核心设计决策。
-> 最后更新：2026-04-19
+> 最后更新：2026-07-18（P1 场景真源与情绪权重退役）
 
 ---
 
@@ -16,9 +16,9 @@
 - 钉选桶（pinned）：importance 锁 10，永不衰减/合并，始终浮现为「核心准则」
 
 **每条记忆追踪的元数据**
-- `id`（12位短UUID）、`name`（可读名≤80字）、`tags`（10~15个关键词）
+- `id`（12位短UUID）、`name`（可读名≤80字）、`tags`（3~6个原文精确词）
 - `domain`（1~2个主题域，从 8 大类 30+ 细分域选）
-- `valence`（事件效价 0~1）、`arousal`（唤醒度 0~1）、`model_valence`（模型独立感受）
+- `valence` / `arousal` / `model_valence`：旧数据和私密 feel 的兼容字段；不参与普通召回排序或衰减
 - `importance`（1~10）、`activation_count`（被想起次数）
 - `resolved`（已解决/沉底）、`digested`（已消化/写过 feel）、`pinned`（钉选）
 - `created`、`last_active` 时间戳
@@ -29,43 +29,43 @@
 3. **Feel 独立检索**（`breath(domain="feel")`）：按创建时间倒序返回所有 feel
 4. **随机浮现**：搜索结果 <3 条时 40% 概率漂浮 1~3 条低权重旧桶（模拟人类随机联想）
 
-**四维搜索评分**（归一化到 0~100）
+**三维搜索评分**（归一化到 0~100）
 - topic_relevance（权重 4.0）：name×3 + domain×2.5 + tags×2 + body
-- emotion_resonance（权重 2.0）：Russell 环形模型欧氏距离
-- time_proximity（权重 2.5）：`e^(-0.1×days)`
+- time_proximity（权重 1.5）：`e^(-0.1×days)`
 - importance（权重 1.0）：importance/10
 - resolved 桶全局降权 ×0.3
 
 **记忆随时间变化**
 - **衰减引擎**：改进版艾宾浩斯遗忘曲线
-  - 公式：`Score = Importance × activation_count^0.3 × e^(-λ×days) × combined_weight`
-  - 短期（≤3天）：时间权重 70% + 情感权重 30%
-  - 长期（>3天）：情感权重 70% + 时间权重 30%
+  - 公式：`Score = Importance × activation_count^0.3 × e^(-λ×days) × freshness`
   - 新鲜度加成：`1.0 + e^(-t/36h)`，刚存入 ×2.0，~36h 半衰，72h 后 ≈×1.0
-  - 高唤醒度(arousal>0.7)且未解决 → ×1.5 紧迫度加成
+  - valence/arousal 不改变保留时长或紧迫度
   - resolved → ×0.05 沉底；resolved+digested → ×0.02 加速淡化
 - **自动归档**：score 低于阈值(0.3) → 移入 archive
 - **自动结案**：importance≤4 且 >30天 → 自动 resolved
 - **永不衰减**：permanent / pinned / protected / feel
 
 **记忆间交互**
-- **智能合并**：新记忆与相似桶（score>75）自动 LLM 合并，valence/arousal 取均值，tags/domain 并集
+- **只读重复提示**：普通 hold 会提示相关旧桶，但总是新建场景，不自动 LLM 合并或覆盖真源
 - **时间涟漪**：touch 一个桶时，±48h 内创建的桶 activation_count +0.3（上限 5 桶/次）
 - **向量相似网络**：embedding 余弦相似度 >0.5 建边
 - **Feel 结晶化**：≥3 条相似 feel（相似度>0.7）→ 提示升级为钉选准则
 
-**情感记忆重构**
-- 搜索时若指定 valence，展示层对匹配桶 valence 微调 ±0.1，模拟「当前心情影响回忆色彩」
+**情绪边界**
+- 情绪是对场景的后见理解，不是事实真源；reflection/comment/feel 不能成为普通直接召回 seed
+- valence/arousal 参数仍可被旧客户端传递和读取，但不影响普通召回排名或衰减
 
 **模型感受/反思系统**
 - **Feel 写入**（`hold(feel=True)`）：存模型第一人称感受，标记源记忆为 digested
 - **Dream 做梦**（`dream()`）：返回最近 10 条 + 自省引导 + 连接提示 + 结晶化提示
 - **对话启动流程**：breath() → dream() → breath(domain="feel") → 开始对话
 
-**自动化处理**
-- 存入时 LLM 自动分析 domain/valence/arousal/tags/name
-- 大段日记 LLM 拆分为 2~6 条独立记忆
-- 浮现时自动脱水压缩（LLM 压缩保语义，API 不可用降级到本地关键词提取）
+**新 Scene 写入**
+- `hold` / `close_window` 的同步写入不调用 LLM：原文先落盘，标题、显式 tags 与 scene_cues 作为 sidecar 元数据
+- 自动 enrich 只写 `metadata_proposals.sqlite` 待审 sidecar，不自动修改 tags / importance / confidence / embedding / edges
+- 可选 Scene linker 在写入返回后异步运行，按顺序故障转移多个独立模型；两端逐字证据校验通过的结果先只写 `scene_edge_proposals.sqlite`。只读审核工具不改图；只有带精确确认词的单条接受操作在重验 Scene hash、active 状态与证据后才写 `memory_edges.jsonl`
+- 脱水、日记拆分和旧自动摘记只保留给专项导入/旧兼容路径
+- 普通召回默认直接检索 Scene；graph 模式只作为显式兼容/实验开关
 - Wikilink `[[]]` 由 LLM 在内容中标记
 
 ---
@@ -77,8 +77,9 @@
 | 工具 | 关键参数 | 功能 |
 |---|---|---|
 | `breath` | query, max_tokens, domain, valence, arousal, max_results | 检索/浮现记忆 |
-| `hold` | content, tags, importance, pinned, feel, whisper, source_bucket, valence, arousal | 存储记忆；新无源碎碎念用 `whisper=True` |
-| `grow` | content | 日记拆分归档 |
+| `hold` | content, cues, tags, importance, pinned, feel, whisper, source_bucket, valence, arousal | 原样保存唯一一段 `### scene`；旧 section 仅兼容读取 |
+| `close_window` | shadow, scenes, session_id, date, source | 原子保存整窗第一人称窗影与 0～N 个 Scene |
+| `grow` | content | `close_window` 兼容别名；不提升旧 `### moment` |
 | `comment_bucket` | bucket_id, content, kind, valence, arousal | 给源 bucket 追加年轮 |
 | `trace` | bucket_id, name, domain, valence, arousal, importance, tags, resolved, pinned, anchor, digested, content, delete | 修改元数据/内容/删除 |
 | `pulse` | include_archive | 系统状态 |
@@ -90,18 +91,19 @@
 
 **`breath`** — 两种模式：
 - **浮现模式**（无 query）：无参调用，按衰减引擎活跃度排序返回 top 记忆，permanent/pinned 始终浮现
-- **检索模式**（有 query）：关键词 + 向量双通道搜索，四维评分（topic×4 + emotion×2 + time×2.5 + importance×1），阈值过滤
+- **检索模式**（有 query）：关键词 + 向量双通道搜索，三维评分（topic×4 + time×2.5 + importance×1），阈值过滤
 - **Feel 检索**（`domain="feel"`）：特殊通道，按创建时间倒序返回所有 feel 类型桶，不走评分逻辑
-- 若指定 valence，对匹配桶的 valence 微调 ±0.1（情感记忆重构）
+- valence/arousal 参数仅兼容读取，不参与普通排序
 
 **`hold`** — 主要模式：
-- **普通模式**（`feel=False`，默认）：自动 LLM 分析 domain/valence/arousal/tags/name → 向量相似度查重 → 相似度>0.85 则合并到已有桶 → 否则新建 dynamic 桶 → 生成 embedding
+- **普通模式**（`feel=False`，默认）：当前 AI 先写一件完整 `### scene`，原话与意义都写在同一段，可带 sidecar `cues` → 工具只校验、原样新建并生成 embedding；不调用模型、不自动合并
 - **Whisper 模式**（`whisper=True`）：无源碎碎念/悄悄话，独立保存为 `type=feel + whisper`，可用 `breath(domain="whisper")` 读取。
 - **旧兼容 Feel 路径**（`feel=True`）：不建议新调用。带 `source_bucket` 时转为年轮 comment；不带源桶时转为 whisper。
 
 **`comment_bucket`** — 年轮：
 - 给已有 bucket 追加 `metadata.comments[]`，MCP 作者固定取 `identity.ai_name`
 - 追加后 touch 源 bucket、刷新源 bucket embedding，不新建独立 feel 桶
+- 年轮可以按文本把查询路由到父 Scene；只随父 Scene 附一条，不作为独立候选、扩散节点或 Fact 证据
 
 **`dream`** — 做梦/自省触发器：
 - 返回最近 10 条 dynamic 桶摘要 + 自省引导词
@@ -116,7 +118,7 @@
 
 **Memory Edge** — 显式关系边：
 - 文件：`state/memory_edges.jsonl`
-- 写入普通记忆后异步补 0~3 条关系边
+- 自动模型只提出 0~3 条关系边建议并写入 metadata proposal；只有显式维护/审核动作才落真实边
 - Gateway 召回记忆后，会沿一跳强关系边补一条相关记忆
 
 **`trace`** — 记忆编辑：
@@ -125,8 +127,11 @@
 - `content="..."`：替换正文内容并重新生成 embedding
 - `delete=True`：删除桶文件
 
-**`grow`** — 日记拆分：
-- 大段日记文本 → LLM 拆为 2~6 条独立记忆 → 每条走 hold 普通模式流程
+**`close_window`** — Window Shadow：
+- 整篇第一人称窗影原样写入独立 SQLite，不进普通候选池
+- 可选“不能丢的场景”或 `scenes[]` 中的 `### scene` 原样写成普通 Scene；不调用 LLM
+- 写前完整校验，任一 Scene 失败就补偿删除本次新建 Scene 与 Shadow；成功后才排 embedding
+- `grow` 仅为旧客户端兼容别名，不把旧 `### moment` 提升成 Scene
 
 **`pulse`** — 系统状态：
 - 返回各类型桶数量、衰减引擎状态、未解决/钉选/feel 统计
@@ -155,11 +160,11 @@
 
 **Dashboard（7 个 Tab）**
 1. 记忆桶列表：6 种过滤器 + 主题域过滤 + 搜索 + 详情面板
-2. Breath 模拟：输入参数 → 可视化五步流程 → 四维条形图
+2. Breath 模拟：输入参数 → 可视化五步流程 → 三维评分；旧 emotion 栏仅显示兼容诊断且权重为 0
 3. 日印象：月历 + 单卡片详情，按日期显示完整 daily relationship weather；手动编辑仍走 bucket 详情面板
 4. Persona：查看 Persona State sessions / events / 当前状态
 5. 记忆网络：Canvas 力导向图（节点=桶，边=相似度）
-6. 配置：热更新脱水、embedding、Gateway 记忆浮现、图扩散、反思、梦境和合并参数
+6. 配置：热更新记忆分析、embedding、Gateway 记忆浮现、图扩散、反思、梦境和旧兼容参数
 7. 导入：历史对话拖拽上传 → 分块处理进度条 → 词频规律分析 → 导入结果审阅
 
 **部署选项**
@@ -173,9 +178,9 @@
 **迁移/批处理工具**：`migrate_to_domains.py`、`reclassify_domains.py`、`reclassify_api.py`、`backfill_embeddings.py`、`write_memory.py`、`check_buckets.py`、`import_memory.py`（历史对话导入引擎）
 
 **降级策略**
-- 脱水 API 不可用 → 本地关键词提取 + 句子评分
+- 记忆分析 API 不可用 → 本地精确打标；专项压缩路径降级到关键词提取 + 句子评分
 - 向量搜索不可用 → 纯 fuzzy match
-- 逐条错误隔离（grow 中单条失败不影响其他）
+- `close_window` 使用整组失败边界；不允许只留下半篇 Shadow 或部分 Scene
 
 **安全**：路径遍历防护（`safe_path()`）、API Key 脱敏、API Key 不持久化到 yaml、输入范围钳制
 
@@ -207,7 +212,7 @@
            ┌───────────────┼───────────────┬────────────────┐
            ▼               ▼               ▼                ▼
    bucket_manager.py  dehydrator.py  decay_engine.py  embedding_engine.py
-   记忆桶 CRUD+搜索   脱水压缩+打标   遗忘曲线+归档   向量化+语义检索
+   记忆桶 CRUD+搜索   元数据分析/旧压缩  遗忘曲线+归档   向量化+语义检索
            │               │                                │
            └───────┬───────┘                                │
                    ▼                                        ▼
@@ -220,7 +225,7 @@
 | `server.py` | MCP 服务器主入口，注册工具 + Dashboard API + 钩子端点 | `bucket_manager`, `dehydrator`, `decay_engine`, `embedding_engine`, `utils` | `test_tools.py` |
 | `bucket_manager.py` | 记忆桶 CRUD、多维索引搜索、wikilink 注入、激活更新 | `utils` | `server.py`, `check_buckets.py`, `backfill_embeddings.py` |
 | `decay_engine.py` | 衰减引擎：遗忘曲线计算、自动归档、自动结案 | 无（接收 `bucket_mgr` 实例） | `server.py` |
-| `dehydrator.py` | 数据脱水压缩 + 合并 + 自动打标（LLM API + 本地降级） | `utils` | `server.py` |
+| `dehydrator.py` | 普通 hold 的元数据分析，以及专项导入/旧路径的压缩与合并兼容（LLM API + 本地降级） | `utils` | `server.py` |
 | `embedding_engine.py` | 向量化引擎：Gemini embedding API + SQLite + 余弦搜索 | `utils` | `server.py`, `backfill_embeddings.py` |
 | `utils.py` | 配置加载、日志、路径安全、ID 生成、token 估算 | 无 | 所有模块 |
 | `write_memory.py` | 手动写入记忆 CLI（绕过 MCP） | 无（独立脚本） | 无 |
@@ -301,11 +306,9 @@
 | `2.0` | `server.py` breath search | 随机池：score < 2.0 的低权重桶 |
 | `1~3` | `server.py` breath search | 随机浮现数量 |
 
-### 3.7 情感/重构
+### 3.7 旧情绪参数兼容
 
-| 值 | 位置 | 用途 |
-|---|---|---|
-| `0.2` | `server.py` breath search | 情绪重构偏移系数 `(q_valence - 0.5) × 0.2`（最大 ±0.1） |
+`valence` / `arousal` 仍可读取和传递；普通召回与衰减中的有效权重均为 `0`，不再做展示层偏移。
 
 ### 3.8 其他
 
@@ -328,23 +331,23 @@
 | `log_level` | `"INFO"` | 日志级别 |
 | `buckets_dir` | `"./buckets"` | 记忆桶目录 |
 | `merge_threshold` | `90` | 合并相似度阈值 (0-100) |
-| `dehydration.model` | `"deepseek-chat"` | 脱水用 LLM 模型 |
+| `dehydration.model` | `"deepseek-chat"` | 记忆元数据分析及旧兼容压缩所用 LLM |
 | `dehydration.base_url` | `"https://api.deepseek.com/v1"` | API 地址 |
 | `dehydration.api_key` | `""` | API 密钥 |
-| `dehydration.max_tokens` | `1024` | 脱水返回 token 上限 |
-| `dehydration.temperature` | `0.1` | 脱水温度 |
+| `dehydration.max_tokens` | `1024` | 分析/旧兼容压缩返回 token 上限 |
+| `dehydration.temperature` | `0.1` | 分析模型温度 |
 | `embedding.enabled` | `true` | 启用向量检索 |
 | `embedding.model` | `"gemini-embedding-001"` | Embedding 模型 |
 | `decay.lambda` | `0.05` | 衰减速率 λ |
 | `decay.threshold` | `0.3` | 归档分数阈值 |
 | `decay.check_interval_hours` | `24` | 衰减扫描间隔（小时） |
-| `decay.emotion_weights.base` | `1.0` | 情感权重基值 |
-| `decay.emotion_weights.arousal_boost` | `0.8` | 唤醒度加成系数 |
+| `decay.emotion_weights.base` | `1.0` | 旧配置兼容，占位但不参与衰减 |
+| `decay.emotion_weights.arousal_boost` | `0.0` | 旧配置兼容，唤醒度不改变保留时长 |
 | `matching.fuzzy_threshold` | `50` | 模糊匹配下限 |
 | `matching.max_results` | `5` | 匹配返回上限 |
 | `scoring_weights.topic_relevance` | `4.0` | 主题评分权重 |
-| `scoring_weights.emotion_resonance` | `2.0` | 情感评分权重 |
-| `scoring_weights.time_proximity` | `2.5` | 时间评分权重 |
+| `scoring_weights.emotion_resonance` | `0.0` | 旧配置兼容，不参与普通召回排序 |
+| `scoring_weights.time_proximity` | `1.5` | 时间评分权重 |
 | `scoring_weights.importance` | `1.0` | 重要性评分权重 |
 | `scoring_weights.content_weight` | `3.0` | 正文评分权重 |
 | `wikilink.enabled` | `true` | 启用 wikilink 注入 |
@@ -391,16 +394,14 @@
 - 双通道互补，关键词保精确性，向量补语义召回
 - 向量不可用时自动降级到纯关键词模式
 
-### 5.4 为什么有 dehydration（脱水）这一层？
+### 5.4 为什么还保留 `dehydrator.py`？
 
-**决策**：存入前先用 LLM 压缩内容（保留信息密度，去除冗余表达），API 不可用时降级到本地关键词提取。
+**决策**：普通 `hold` 与 `close_window` 完全退出 Dehydrator/二级标签模型写入链路。`dehydrate()` / `analyze()` / `merge()` 只保留给专项导入和旧兼容路径；已写好的 Scene 正文永不交给它改写。后台 enrich 只能生成待审 sidecar proposal，不能自动改变正文或召回权重。
 
 **理由**：
-- MCP 上下文有 token 限制，原始对话冗长，需要压缩
-- LLM 压缩能保留语义和情感色彩，纯截断会丢信息
-- 降级到本地确保离线可用——关键词提取 + 句子排序 + 截断
-
-**放弃方案**：只做截断。信息损失太大。
+- 场景正文是事实真源，必须由当前窗口亲自写并原样保存
+- 元数据分析仍能降低检索和管理成本，但结果必须先停在待审 proposal，不能替代或暗改场景本身
+- 历史导入可能需要受控压缩，因此不在 P1 直接删除底层兼容能力
 
 ### 5.5 为什么 feel 和普通记忆分开？
 
@@ -423,14 +424,11 @@
 
 **放弃方案**：直接删除。不可逆，且与人类记忆模型不符。
 
-### 5.7 为什么用分段式短期/长期权重？
+### 5.7 为什么衰减不再读取情绪坐标？
 
-**决策**：≤3 天时间权重占 70%，>3 天情感权重占 70%。
+**决策**：保留 importance、activation、时间和 resolved/digested 生命周期；valence/arousal 不再改变保留时长或紧迫度。
 
-**理由**：
-- 刚发生的事主要靠"新鲜"驱动浮现（今天的事 > 昨天的事）
-- 时间久了，决定记忆存活的是情感强度（强烈的记忆更难忘）
-- 这比单一衰减曲线更符合人类记忆的双重存储理论
+**理由**：情绪是对场景的后见理解，不是事件本体。让一次模型打出的坐标长期控制记忆生死，会把不稳定推断固化成系统真相。
 
 ### 5.8 为什么 dream 设计成对话开头自动执行？
 
@@ -453,14 +451,11 @@
 
 **放弃方案**：分段线性（原实现）。跳变点不自然，参数多且不直观。
 
-### 5.10 情感记忆重构（±0.1 偏移）的设计动机
+### 5.10 为什么退役情感记忆重构？
 
-**决策**：搜索时如果指定了 `valence`，会微调结果桶的 valence 展示值 `(q_valence - 0.5) × 0.2`。
+**决策**：旧 `valence` / `arousal` 字段与接口参数继续兼容，但普通检索不按坐标重排，也不再修改展示值。
 
-**理由**：
-- 模拟认知心理学中的"心境一致性效应"——当前心情会影响对过去的回忆
-- 偏移量很小（最大 ±0.1），不会扭曲事实，只是微妙的"色彩"调整
-- 原始 valence 不被修改，只影响展示层
+**理由**：同一场景可以在不同时间被重新理解；召回应先找对可追溯的场景，再由当前上下文理解它，而不是让旧坐标预先决定答案。
 
 ---
 

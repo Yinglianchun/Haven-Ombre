@@ -62,6 +62,7 @@ from query_understanding import (
 )
 from memory_layers import (
     CONTEXT_ONLY_SECTIONS,
+    LAYER_PROFILE_INDEX,
     LAYER_SOURCE_RECORD,
     bucket_layer_debug,
     bucket_runtime_gate_debug,
@@ -196,10 +197,11 @@ GENERIC_KEYWORD_MATCH_TERMS = WORD_MAP_CATEGORY_SEED_TERMS | frozenset(
     }
 )
 DYNAMIC_ANCHOR_CATEGORY_OVERVIEW_MARKERS = (
-    "什么",
     "哪些",
     "哪几个",
     "哪几种",
+    "有什么",
+    "都是什么",
     "都有",
     "列举",
     "列一下",
@@ -597,7 +599,7 @@ class GatewayService:
             self.gateway_cfg.get("direct_render_mode", "auto")
         )
         self.retrieval_mode = self._normalize_retrieval_mode(
-            self.gateway_cfg.get("retrieval_mode", "graph")
+            self.gateway_cfg.get("retrieval_mode", "bucket")
         )
         self.relationship_weather_budget = int(self.gateway_cfg.get("relationship_weather_budget", 220))
         self.relationship_weather_include_weekly = bool(
@@ -2889,6 +2891,7 @@ class GatewayService:
                             if isinstance(bucket.get("_recall_signal"), dict)
                             else {}
                         )
+                        context_moments = self._context_moments_for_bucket(bucket)
                         bucket_moments = self._direct_moments_for_bucket(bucket, current_user_query)
                         moment = self._representative_moment(bucket_moments)
                         if not moment:
@@ -2900,7 +2903,9 @@ class GatewayService:
                         if not moment:
                             continue
                         moment = self._moment_with_bucket_recall_signal(moment, signal)
-                        grouped_moments[bucket_id] = bucket_moments
+                        # Keep context-only comments available for YearRing attachment;
+                        # only the representative seed is constrained to direct moments.
+                        grouped_moments[bucket_id] = context_moments
                         recalled_moments.append(moment)
                     moment_candidates = list(recalled_moments)
                     suppressed_moments = []
@@ -8837,10 +8842,11 @@ class GatewayService:
 
     def _representative_moment(self, moments: list[dict]) -> dict | None:
         for section in (
+            "scene",
+            "body",
             "original",
             "moment",
             "fact",
-            "body",
             "evidence_context",
             "context",
             "reflection",
@@ -8867,13 +8873,18 @@ class GatewayService:
         )
 
     def _direct_moments_for_bucket(self, bucket: dict, query: str = "") -> list[dict]:
+        explicit_lookup = self._query_explicitly_requests_caution_memory(query)
+        return [
+            moment for moment in self._context_moments_for_bucket(bucket)
+            if can_moment_be_direct_seed(moment, explicit_lookup=explicit_lookup)
+        ]
+
+    def _context_moments_for_bucket(self, bucket: dict) -> list[dict]:
         if self._is_self_anchor_recall_excluded_bucket(bucket):
             return []
-        explicit_lookup = self._query_explicitly_requests_caution_memory(query)
         return [
             moment for moment in parse_bucket_moments(bucket, self.relevance_options)
             if can_moment_be_recall_context(moment)
-            and can_moment_be_direct_seed(moment, explicit_lookup=explicit_lookup)
         ]
 
     def _is_source_record_bucket(self, bucket: dict | None) -> bool:
@@ -9924,6 +9935,26 @@ class GatewayService:
                     candidates.append(moment)
         self._add_timing_ms(timing_debug, "moment.search_moments", stage_started_at)
         stage_started_at = time.perf_counter()
+        # A Fact match routes to its evidence Scene even when the query words
+        # occur only in the Fact index and not verbatim in the Scene body.
+        seen_candidate_ids = {str(moment.get("moment_id") or "") for moment in candidates}
+        for bucket in selected_buckets:
+            if not bucket.get("_profile_fact_route"):
+                continue
+            direct = self._direct_representative_moment(
+                grouped_moments.get(str(bucket.get("id") or ""), [])
+            )
+            if not direct:
+                parsed = self._direct_moments_for_bucket(bucket, query)
+                direct = self._representative_moment(parsed)
+            moment_id = str((direct or {}).get("moment_id") or "")
+            if direct and (not moment_id or moment_id not in seen_candidate_ids):
+                item = dict(direct)
+                item["score"] = max(self._safe_float(item.get("score"), 0.0), 1.0)
+                item["profile_fact_route"] = dict(bucket.get("_profile_fact_route") or {})
+                candidates.append(item)
+                if moment_id:
+                    seen_candidate_ids.add(moment_id)
         explicit_lookup = self._query_explicitly_requests_caution_memory(query)
         candidates = [
             moment for moment in candidates
@@ -10827,7 +10858,7 @@ class GatewayService:
         grouped_moments: dict[str, list[dict]],
         *,
         max_chars: int = 100,
-        limit: int = 2,
+        limit: int = 1,
     ) -> str:
         year_rings = self._attached_year_ring_moments(
             query_text,
@@ -10846,7 +10877,9 @@ class GatewayService:
     def _format_attached_year_ring_line(self, moment: dict, *, max_chars: int) -> str:
         moment_id = str(moment.get("moment_id") or "")
         id_part = f" [moment_id:{moment_id}]" if moment_id else ""
-        return f"[year_ring]{id_part} {self._moment_text(moment, max_chars)}"
+        created = str(moment.get("created_at") or "").strip()
+        created_part = f" [created:{created}]" if created else ""
+        return f"[year_ring]{id_part}{created_part} {self._moment_text(moment, max_chars)}"
 
     def _attached_year_ring_moments(
         self,
@@ -10854,7 +10887,7 @@ class GatewayService:
         seed: dict,
         grouped_moments: dict[str, list[dict]],
         *,
-        limit: int = 2,
+        limit: int = 1,
     ) -> list[dict]:
         if limit <= 0 or not isinstance(seed, dict):
             return []
@@ -10894,7 +10927,13 @@ class GatewayService:
                 score -= 0.25
             if score > 0:
                 scored.append((score, ordinal, year_ring))
-            elif not query_terms and kind != "feel":
+            elif kind != "feel" and (
+                not query_terms
+                or any(
+                    marker in str(query_text or "").lower()
+                    for marker in ("年轮", "后来", "之后怎么看", "现在怎么看", "重新看", "再看")
+                )
+            ):
                 fallback.append((0.0, ordinal, year_ring))
 
         selected = scored if scored else fallback
@@ -10934,8 +10973,8 @@ class GatewayService:
 
     @staticmethod
     def _normalize_retrieval_mode(value: object) -> str:
-        mode = str(value or "graph").strip().lower()
-        return mode if mode in {"graph", "bucket"} else "graph"
+        mode = str(value or "bucket").strip().lower()
+        return mode if mode in {"graph", "bucket"} else "bucket"
 
     @staticmethod
     def _normalize_recall_fusion_mode(value: object) -> str:
@@ -13655,9 +13694,20 @@ class GatewayService:
         diffused_rows: list[dict[str, Any]],
         *,
         context_mode: str = "",
+        all_buckets: list[dict] | None = None,
     ) -> dict[str, Any]:
+        if self.retrieval_mode == "bucket":
+            return self._scene_diffusion_shadow_debug(
+                query,
+                recalled_moments,
+                all_buckets or [],
+                context_mode=context_mode,
+            )
+
         payload = {
             "enabled": True,
+            "mode": "legacy_graph",
+            "affects_recall": True,
             "status": "pending",
             "reason": "",
             "seed_bucket_ids": [],
@@ -13666,9 +13716,6 @@ class GatewayService:
             "paths": [],
             "injected_path_count": 0,
         }
-        if self.retrieval_mode != "graph":
-            payload.update(enabled=False, status="skipped", reason="retrieval_mode_bucket")
-            return payload
         if self.related_memory_budget <= 0:
             payload.update(enabled=False, status="disabled", reason="related_memory_budget_zero")
             return payload
@@ -13768,6 +13815,154 @@ class GatewayService:
             payload.update(status="no_path", reason="edge_did_not_produce_diffusion_path")
         else:
             payload.update(status="no_edge", reason="no_active_edge_for_seed")
+        return payload
+
+    def _scene_diffusion_shadow_debug(
+        self,
+        query: str,
+        recalled_moments: list[dict],
+        all_buckets: list[dict],
+        *,
+        context_mode: str = "",
+    ) -> dict[str, Any]:
+        """Trace Scene-only multi-hop association without changing recall or injection."""
+        payload: dict[str, Any] = {
+            "enabled": True,
+            "mode": "scene_shadow",
+            "affects_recall": False,
+            "status": "pending",
+            "reason": "",
+            "seed_bucket_ids": [],
+            "excluded_seed_bucket_ids": [],
+            "scene_node_count": 0,
+            "eligible_edge_count": 0,
+            "excluded_edges": {
+                "low_confidence": 0,
+                "non_scene_endpoint": 0,
+                "legacy_emotional_edge": 0,
+            },
+            "paths": [],
+            "injected_path_count": 0,
+        }
+        if not self.diffusion_options.enabled or self.diffusion_options.top_k <= 0:
+            payload.update(enabled=False, status="disabled", reason="diffusion_disabled")
+            return payload
+
+        scene_map = {
+            str(bucket.get("id") or ""): bucket
+            for bucket in all_buckets or []
+            if str(bucket.get("id") or "")
+            and self._is_canonical_scene_bucket(bucket)
+            and can_bucket_be_related_target(bucket, explicit_lookup=False)
+        }
+        payload["scene_node_count"] = len(scene_map)
+
+        query_plan = self._recall_query_plan(query, context_mode=context_mode)
+        reliable_seeds = [
+            moment
+            for moment in recalled_moments or []
+            if isinstance(moment, dict)
+            and not self._is_source_record_capsule_only_moment(moment)
+            and not moment.get("semantic_rescue_no_diffusion")
+        ]
+        if self._diffusion_requires_reliable_direct_seed(query_plan):
+            reliable_seeds = [
+                moment
+                for moment in reliable_seeds
+                if self._moment_has_reliable_diffusion_seed_signal(query, moment)
+            ]
+
+        seed_scores: dict[str, float] = {}
+        excluded_seed_ids: list[str] = []
+        for moment in reliable_seeds:
+            bucket_id = str(moment.get("bucket_id") or "")
+            if not bucket_id:
+                continue
+            if bucket_id not in scene_map:
+                excluded_seed_ids.append(bucket_id)
+                continue
+            score = max(
+                self._safe_float(moment.get("score"), 0.0),
+                self._safe_float(moment.get("semantic_score"), 0.0),
+                self._safe_float(moment.get("keyword_score"), 0.0),
+                0.35,
+            )
+            seed_scores[bucket_id] = max(seed_scores.get(bucket_id, 0.0), score)
+
+        payload["seed_bucket_ids"] = list(seed_scores)
+        payload["excluded_seed_bucket_ids"] = list(dict.fromkeys(excluded_seed_ids))
+        if not seed_scores:
+            payload.update(status="no_seed", reason="no_reliable_canonical_scene_seed")
+            return payload
+
+        eligible_edges: list[dict[str, Any]] = []
+        for edge in self.memory_edge_store.list_edges():
+            confidence = self._safe_float(edge.get("confidence"), 0.0)
+            if confidence < self.edge_min_confidence:
+                payload["excluded_edges"]["low_confidence"] += 1
+                continue
+            relation_type = str(edge.get("relation_type") or "relates_to")
+            if relation_type == "emotional_echo":
+                payload["excluded_edges"]["legacy_emotional_edge"] += 1
+                continue
+            source_id = str(edge.get("source") or "")
+            target_id = str(edge.get("target") or "")
+            if source_id not in scene_map or target_id not in scene_map:
+                payload["excluded_edges"]["non_scene_endpoint"] += 1
+                continue
+            eligible_edges.append(edge)
+
+        payload["eligible_edge_count"] = len(eligible_edges)
+        if not eligible_edges:
+            payload.update(status="no_edge", reason="no_scene_only_edge")
+            return payload
+
+        shadow_options = replace(
+            self.diffusion_options,
+            chain_walk_enabled=True,
+        )
+        hits = diffuse_memory(
+            seed_scores,
+            eligible_edges,
+            scene_map,
+            options=shadow_options,
+            exclude_ids=set(seed_scores),
+            # A direct Scene already grounded this association. Do not use the
+            # current affect/facet state to reorder the rest of the graph.
+            query_text="",
+        )
+        paths: list[dict[str, Any]] = []
+        for hit in hits:
+            target = scene_map.get(hit.bucket_id) or {}
+            target_meta = target.get("metadata", {}) if isinstance(target.get("metadata"), dict) else {}
+            path = hit.best_path
+            steps = [
+                {
+                    "source_bucket_id": step.source,
+                    "target_bucket_id": step.target,
+                    "relation_type": step.relation_type,
+                    "confidence": round(float(step.confidence), 4),
+                    "direction": step.direction,
+                    "reason": step.reason,
+                }
+                for step in path.steps
+            ]
+            paths.append(
+                {
+                    "target_bucket_id": hit.bucket_id,
+                    "target_name": str(target_meta.get("name") or hit.bucket_id),
+                    "activation": round(float(hit.activation), 4),
+                    "hop_count": len(path.steps),
+                    "node_ids": list(path.nodes),
+                    "steps": steps,
+                    "would_inject": False,
+                }
+            )
+        payload["paths"] = paths
+        if paths:
+            payload.update(status="expanded", reason="scene_multihop_shadow_only")
+        else:
+            payload.update(status="no_path", reason="scene_edges_below_activation")
         return payload
 
     def _moment_chunk_shadow_debug(
@@ -15908,25 +16103,140 @@ class GatewayService:
         elif self.query_planner_enabled:
             planner_debug["skip_reason"] = "direct_recall_ok_or_query_short"
 
-        planner_debug["final_bucket_ids"] = [
-            str((item.get("bucket") or {}).get("id") or "")
+        selected_buckets = [
+            self._bucket_with_recall_signal(item)
             for item in selected_items
-            if (item.get("bucket") or {}).get("id")
+            if isinstance(item.get("bucket"), dict)
+        ]
+        selected_buckets, fact_routes = self._route_profile_fact_buckets(
+            query,
+            selected_buckets,
+            all_buckets,
+        )
+        planner_debug["profile_fact_routes"] = fact_routes
+        selected_buckets, year_ring_routes = self._route_year_ring_parent_buckets(
+            query,
+            selected_buckets,
+            all_buckets,
+        )
+        planner_debug["year_ring_routes"] = year_ring_routes
+        planner_debug["final_bucket_ids"] = [
+            str(bucket.get("id") or "")
+            for bucket in selected_buckets
+            if bucket.get("id")
         ]
         planner_debug["structural_activation_debug"] = self._structural_activation_shadow_debug(
             query,
             structural_activation_items,
             planner_debug["final_bucket_ids"],
         )
-        selected_buckets = [
-            self._bucket_with_recall_signal(item)
-            for item in selected_items
-            if isinstance(item.get("bucket"), dict)
-        ]
         result = (selected_buckets, suppressed_candidates)
         if include_query_planner_debug:
             return (*result, planner_debug)
         return result
+
+    def _route_year_ring_parent_buckets(
+        self,
+        query: str,
+        selected_buckets: list[dict],
+        all_buckets: list[dict],
+    ) -> tuple[list[dict], list[dict]]:
+        """Route a concrete annotation-text hit back to its parent bucket.
+
+        A vague "后来呢" is intentionally insufficient. This path needs a
+        specific term overlap or a substantial literal excerpt from a comment.
+        """
+        text = str(query or "").strip()
+        if not text or self.inject_max_cards <= 0:
+            return list(selected_buckets or []), []
+        generic_keys = {
+            "后来",
+            "后来呢",
+            "现在",
+            "再看",
+            "现在再看",
+            "这件事",
+            "怎么看",
+            "还记得",
+            "记得",
+            "什么",
+            "关于",
+            "时候",
+            "thing",
+            "later",
+            "remember",
+        }
+        specific_terms = []
+        for term in self._year_ring_match_terms(text):
+            cleaned = " ".join(str(term or "").split()).strip()
+            compact = re.sub(r"\s+", "", cleaned.lower())
+            if len(compact) < 2 or compact in generic_keys:
+                continue
+            specific_terms.append(cleaned)
+        query_compact = re.sub(r"\s+", "", text.lower())
+        candidates: list[tuple[float, dict, dict]] = []
+        for bucket in all_buckets or []:
+            if not isinstance(bucket, dict) or self._is_profile_fact_bucket(bucket):
+                continue
+            if self._is_self_anchor_recall_excluded_bucket(bucket):
+                continue
+            meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+            tags = {str(tag).strip().lower() for tag in meta.get("tags", []) or [] if str(tag).strip()}
+            if (
+                meta.get("type") == "feel"
+                or infer_bucket_layer(bucket) in {"archive", LAYER_SOURCE_RECORD}
+                or {"daily_impression", "weekly_impression", "relationship_weather"} & tags
+            ):
+                continue
+            comments = meta.get("comments") if isinstance(meta.get("comments"), list) else []
+            for comment in comments:
+                if not isinstance(comment, dict):
+                    continue
+                comment_text = " ".join(str(comment.get("content") or "").split()).strip()
+                if not comment_text:
+                    continue
+                comment_lower = comment_text.lower()
+                comment_compact = re.sub(r"\s+", "", comment_lower)
+                matched = [term for term in specific_terms if term.lower() in comment_lower]
+                literal_chars = min(32, len(comment_compact))
+                literal_hit = literal_chars >= 8 and comment_compact[:literal_chars] in query_compact
+                strong_terms = [term for term in matched if len(re.sub(r"\s+", "", term)) >= 4]
+                if not literal_hit and not strong_terms and len(matched) < 2:
+                    continue
+                score = (100.0 if literal_hit else 0.0) + sum(
+                    min(24, len(re.sub(r"\s+", "", term)))
+                    for term in matched
+                )
+                candidates.append(
+                    (
+                        score,
+                        bucket,
+                        {
+                            "bucket_id": str(bucket.get("id") or ""),
+                            "comment_id": str(comment.get("id") or ""),
+                            "comment_kind": str(comment.get("kind") or "comment"),
+                            "matched_terms": matched[:6],
+                        },
+                    )
+                )
+        if not candidates:
+            return list(selected_buckets or []), []
+        candidates.sort(key=lambda row: (-row[0], str(row[1].get("id") or "")))
+        _score, parent, route = candidates[0]
+        parent_id = str(parent.get("id") or "")
+        routed_parent = dict(parent)
+        routed_parent["_year_ring_route"] = dict(route)
+        output = [routed_parent]
+        seen = {parent_id}
+        for bucket in selected_buckets or []:
+            current_id = str(bucket.get("id") or "")
+            if not current_id or current_id in seen:
+                continue
+            output.append(bucket)
+            seen.add(current_id)
+            if len(output) >= self.inject_max_cards:
+                break
+        return output[: self.inject_max_cards], [route]
 
     def _bucket_with_recall_signal(self, item: dict) -> dict:
         bucket = dict(item.get("bucket") or {})
@@ -16127,6 +16437,41 @@ class GatewayService:
                 output.append(cleaned)
         return output
 
+    def _definition_query_literal_terms(self, query: str, bucket: dict) -> list[str]:
+        """Return a concrete target named before a definition-style question.
+
+        ``X 是什么 Y`` asks for one named thing; it is not a request to list
+        every Y.  A sufficiently long literal X in the bucket is direct lexical
+        evidence even when X lives in the body rather than the title.
+        """
+        if not query or not isinstance(bucket, dict) or self._query_is_category_overview(query):
+            return []
+        text = " ".join(str(query or "").split()).strip()
+        match = re.search(
+            r"^(?P<target>.+?)(?:(?:到底)?(?:是|叫)|指的(?:是)?)(?:什么|啥)",
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return []
+        target = str(match.group("target") or "").strip(" 	，。！？、,.!?:：;；~～")
+        prefixes = ("请问", "我想问", "想问", "你还记得", "还记得", "关于")
+        changed = True
+        while changed:
+            changed = False
+            for prefix in prefixes:
+                if target.startswith(prefix):
+                    target = target[len(prefix):].strip()
+                    changed = True
+        target_key = self._compact_lookup_key(target)
+        if not target_key or target_key in {"这件事", "那件事", "这个", "那个", "它"}:
+            return []
+        cjk_len = len(re.findall(r"[\u4e00-\u9fff]", target_key))
+        if cjk_len < 4 and len(target_key) < 6:
+            return []
+        bucket_key = self._compact_lookup_key(self._date_recall_bucket_text(bucket))
+        return [target] if target_key in bucket_key else []
+
     @staticmethod
     def _dedupe_evidence_labels(labels: list[str]) -> list[str]:
         output: list[str] = []
@@ -16148,6 +16493,10 @@ class GatewayService:
         if title_anchor_terms:
             item["title_anchor_terms"] = title_anchor_terms
             labels.append("title_anchor")
+        definition_literal_terms = self._definition_query_literal_terms(query, bucket)
+        if definition_literal_terms:
+            item["definition_literal_terms"] = definition_literal_terms
+            labels.append("definition_literal_span")
         if item.get("exact_anchor_match") or self._safe_float(item.get("exact_anchor_score"), 0.0) > 0:
             labels.append("exact_anchor")
         protected_phrases = extract_protected_phrases(query)
@@ -16219,6 +16568,7 @@ class GatewayService:
             "source_record_exact",
             "taste_evidence",
             "title_anchor",
+            "definition_literal_span",
             "semantic_rescue_direct_span",
             "strong_semantic",
             "strong_rerank",
@@ -18930,6 +19280,7 @@ class GatewayService:
                 recalled_moments,
                 diffused_debug_rows,
                 context_mode=context_mode,
+                all_buckets=all_buckets,
             )
         return {
             "model": model,
@@ -20579,6 +20930,222 @@ class GatewayService:
         if meta.get("pinned") or meta.get("protected"):
             return False
         return True
+
+    @staticmethod
+    def _is_profile_fact_bucket(bucket: dict | None) -> bool:
+        if not isinstance(bucket, dict):
+            return False
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        tags = {str(tag).strip() for tag in meta.get("tags", []) or [] if str(tag).strip()}
+        return (
+            infer_bucket_layer(bucket) == LAYER_PROFILE_INDEX
+            or "profile_fact" in tags
+            or bool(meta.get("profile_kind"))
+        )
+
+    def _is_canonical_scene_bucket(self, bucket: dict | None) -> bool:
+        if not isinstance(bucket, dict) or self._is_profile_fact_bucket(bucket):
+            return False
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        if meta.get("type") == "feel" or infer_bucket_layer(bucket) == LAYER_SOURCE_RECORD:
+            return False
+        if str(meta.get("memory_value_source") or "") == "authored_scene":
+            return True
+        return any(
+            moment.get("section") == "scene"
+            for moment in parse_bucket_moments(bucket, self.relevance_options)
+        )
+
+    def _is_fact_evidence_recall_bucket(
+        self,
+        bucket: dict | None,
+        *,
+        evidence_moment_id: str = "",
+    ) -> bool:
+        """Read canonical Scenes and explicitly referenced legacy evidence."""
+        if (
+            not isinstance(bucket, dict)
+            or self._is_profile_fact_bucket(bucket)
+            or is_self_anchor_bucket(bucket)
+        ):
+            return False
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        tags = {str(tag).strip().lower() for tag in meta.get("tags", []) or [] if str(tag).strip()}
+        if (
+            meta.get("type") == "feel"
+            or infer_bucket_layer(bucket) == LAYER_SOURCE_RECORD
+            or {"daily_impression", "weekly_impression", "relationship_weather"} & tags
+        ):
+            return False
+        allowed_sections = {"scene", "body", "original", "moment"}
+        moments = [
+            moment
+            for moment in parse_bucket_moments(bucket, self.relevance_options)
+            if moment.get("source") == "content" and moment.get("section") in allowed_sections
+        ]
+        requested_moment = str(evidence_moment_id or "").strip()
+        if requested_moment:
+            return any(str(moment.get("moment_id") or "") == requested_moment for moment in moments)
+        return bool(moments)
+
+    def _profile_fact_evidence_refs(self, bucket: dict) -> list[dict[str, str]]:
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        rows: list[dict[str, str]] = []
+        raw = meta.get("evidence")
+        if isinstance(raw, dict):
+            raw = [raw]
+        for item in raw or []:
+            if not isinstance(item, dict):
+                continue
+            bucket_id = str(item.get("bucket_id") or item.get("id") or "").strip()
+            if bucket_id:
+                rows.append(
+                    {
+                        "bucket_id": bucket_id,
+                        "moment_id": str(item.get("moment_id") or "").strip(),
+                    }
+                )
+        for bucket_key, moment_key in (
+            ("evidence_bucket_id", "evidence_moment_id"),
+            ("source_bucket_id", "source_moment_id"),
+        ):
+            bucket_id = str(meta.get(bucket_key) or "").strip()
+            if bucket_id:
+                rows.append(
+                    {
+                        "bucket_id": bucket_id,
+                        "moment_id": str(meta.get(moment_key) or "").strip(),
+                    }
+                )
+        # Read old evidenced_by edges, but new ProfileFacts store evidence in metadata only.
+        try:
+            for edge in self.memory_edge_store.list_edges():
+                if (
+                    str(edge.get("source") or "") == str(bucket.get("id") or "")
+                    and str(edge.get("relation_type") or "") == "evidenced_by"
+                ):
+                    rows.append(
+                        {
+                            "bucket_id": str(edge.get("target") or "").strip(),
+                            "moment_id": "",
+                        }
+                    )
+        except Exception:
+            pass
+        output: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for row in rows:
+            key = (row["bucket_id"], row["moment_id"])
+            if not row["bucket_id"] or key in seen:
+                continue
+            seen.add(key)
+            output.append(row)
+        return output
+
+    def _route_profile_fact_buckets(
+        self,
+        query: str,
+        selected_buckets: list[dict],
+        all_buckets: list[dict],
+    ) -> tuple[list[dict], list[dict]]:
+        """Replace selected Fact indexes with their canonical evidence Scenes."""
+        explicit_fact_lookup = self._query_requests_profile_fact_lookup(query)
+        by_id = {
+            str(bucket.get("id") or ""): bucket
+            for bucket in all_buckets
+            if isinstance(bucket, dict) and str(bucket.get("id") or "")
+        }
+        output: list[dict] = []
+        routes: list[dict] = []
+        seen: set[str] = set()
+        for bucket in selected_buckets or []:
+            bucket_id = str(bucket.get("id") or "")
+            if not self._is_profile_fact_bucket(bucket):
+                if bucket_id and bucket_id not in seen:
+                    output.append(bucket)
+                    seen.add(bucket_id)
+                continue
+            if not explicit_fact_lookup:
+                continue
+            meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+            if meta.get("resolved") or meta.get("digested") or meta.get("deprecated") or meta.get("active") is False:
+                continue
+            for evidence in self._profile_fact_evidence_refs(bucket):
+                evidence_id = evidence["bucket_id"]
+                evidence_bucket = by_id.get(evidence_id)
+                evidence_moment_id = str(evidence.get("moment_id") or "")
+                if not self._is_fact_evidence_recall_bucket(
+                    evidence_bucket,
+                    evidence_moment_id=evidence_moment_id,
+                ):
+                    continue
+                routed = dict(evidence_bucket)
+                routed["_recall_signal"] = dict(bucket.get("_recall_signal") or {})
+                routed["_profile_fact_route"] = {
+                    "fact_id": bucket_id,
+                    "evidence_moment_id": evidence_moment_id,
+                    "legacy_evidence": not self._is_canonical_scene_bucket(evidence_bucket),
+                }
+                if evidence_id not in seen:
+                    output.append(routed)
+                    seen.add(evidence_id)
+                routes.append(
+                    {
+                        "fact_id": bucket_id,
+                        "evidence_bucket_id": evidence_id,
+                        "evidence_moment_id": evidence_moment_id,
+                        "legacy_evidence": not self._is_canonical_scene_bucket(evidence_bucket),
+                    }
+                )
+        return output, routes
+
+    @staticmethod
+    def _query_requests_profile_fact_lookup(query: str) -> bool:
+        text = str(query or "").strip().lower()
+        if not text:
+            return False
+        predicate_markers = (
+            "喜欢",
+            "不喜欢",
+            "偏好",
+            "习惯",
+            "讨厌",
+            "边界",
+            "生日",
+            "名字",
+            "叫什么",
+            "是谁",
+            "想要",
+            "不能",
+            "过敏",
+            "favorite",
+            "prefer",
+            "boundary",
+            "birthday",
+        )
+        question_markers = (
+            "?",
+            "？",
+            "什么",
+            "哪个",
+            "哪种",
+            "哪天",
+            "几号",
+            "吗",
+            "是不是",
+            "还记得",
+            "记不记得",
+            "你知道",
+            "告诉我",
+            "what",
+            "which",
+            "when",
+            "do i",
+            "am i",
+        )
+        return any(marker in text for marker in predicate_markers) and any(
+            marker in text for marker in question_markers
+        )
 
     def _is_identity_name_candidate_bucket(self, query: str, bucket: dict) -> bool:
         terms = self._identity_name_search_terms(query)

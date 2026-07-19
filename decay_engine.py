@@ -5,15 +5,11 @@
 # Simulates human forgetting curve; auto-decays inactive memories and archives them.
 # 模拟人类遗忘曲线，自动衰减不活跃记忆并归档。
 #
-# Core formula (improved Ebbinghaus + emotion coordinates):
-# 核心公式（改进版艾宾浩斯遗忘曲线 + 情感坐标）：
-#   Score = Importance × (activation_count^0.3) × e^(-λ×days) × emotion_weight
-#
-# Emotion weight (continuous coordinate, not discrete labels):
-# 情感权重（基于连续坐标而非离散列举）：
-#   emotion_weight = base + (arousal × arousal_boost)
-#   Higher arousal → higher emotion weight → slower decay
-#   唤醒度越高 → 情感权重越大 → 记忆衰减越慢
+# Core formula (P1 source-record lifecycle):
+# 核心公式（P1 事实真源生命周期）：
+#   Score = Importance × (activation_count^0.3) × e^(-λ×days) × freshness
+# Legacy valence/arousal fields never affect retention or urgency.
+# 旧 valence/arousal 字段不再影响保留时长或紧迫度。
 #
 # Depended on by: server.py
 # 被谁依赖：server.py
@@ -43,11 +39,10 @@ class DecayEngine:
         self.threshold = decay_cfg.get("threshold", 0.3)
         self.check_interval = decay_cfg.get("check_interval_hours", 24)
 
-        # --- Emotion weight params (continuous arousal coordinate) ---
-        # --- 情感权重参数（基于连续 arousal 坐标）---
+        # Legacy config is retained for compatible config loading only.
         emotion_cfg = decay_cfg.get("emotion_weights", {})
         self.emotion_base = emotion_cfg.get("base", 1.0)
-        self.arousal_boost = emotion_cfg.get("arousal_boost", 0.8)
+        self.arousal_boost = 0.0
 
         self.bucket_mgr = bucket_mgr
 
@@ -100,12 +95,8 @@ class DecayEngine:
         Calculate current activity score for a memory bucket.
         计算一个记忆桶的当前活跃度得分。
 
-        New model: short-term vs long-term weight separation.
-        新模型：短期/长期权重分离。
-        - Short-term (≤3 days): time_weight dominates, emotion amplifies
-        - Long-term (>3 days): emotion_weight dominates, time decays to floor
-        短期（≤3天）：时间权重主导，情感放大
-        长期（>3天）：情感权重主导，时间衰减到底线
+        P1 model: retention depends on explicit importance, use and time only.
+        P1：保留分数只取决于显式重要度、使用次数和时间。
         """
         if not isinstance(metadata, dict):
             return 0.0
@@ -133,32 +124,15 @@ class DecayEngine:
         except (ValueError, TypeError):
             days_since = 30
 
-        # --- Emotion weight ---
-        try:
-            arousal = max(0.0, min(1.0, float(metadata.get("arousal", 0.3))))
-        except (ValueError, TypeError):
-            arousal = 0.3
-        emotion_weight = self.emotion_base + arousal * self.arousal_boost
-
         # --- Time weight ---
         time_weight = self._calc_time_weight(days_since)
-
-        # --- Short-term vs Long-term weight separation ---
-        # 短期（≤3天）：time_weight 占 70%，emotion 占 30%
-        # 长期（>3天）：emotion 占 70%，time_weight 占 30%
-        if days_since <= 3.0:
-            # Short-term: time dominates, emotion amplifies
-            combined_weight = time_weight * 0.7 + emotion_weight * 0.3
-        else:
-            # Long-term: emotion dominates, time provides baseline
-            combined_weight = emotion_weight * 0.7 + time_weight * 0.3
 
         # --- Base score ---
         base_score = (
             importance
             * (activation_count ** 0.3)
             * math.exp(-self.decay_lambda * days_since)
-            * combined_weight
+            * time_weight
         )
 
         # --- Weight pool modifiers ---
@@ -174,9 +148,7 @@ class DecayEngine:
             resolved_factor = 0.05
         else:
             resolved_factor = 1.0
-        urgency_boost = 1.5 if (arousal > 0.7 and not resolved) else 1.0
-
-        return round(base_score * resolved_factor * urgency_boost, 4)
+        return round(base_score * resolved_factor, 4)
 
     # ---------------------------------------------------------
     # Execute one decay cycle

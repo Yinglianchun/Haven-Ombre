@@ -12,10 +12,11 @@ from openai import AsyncOpenAI
 
 from identity import generic_identity_names, identity_names, render_identity_template
 from memory_edges import RELATION_TYPES, MemoryEdgeStore
+from metadata_proposals import MetadataProposalStore
 from memory_metadata import domain_prompt_options_text, normalize_domain_key
 from persona_event_selection import select_persona_events
 from self_anchor import is_self_anchor_bucket
-from utils import bucket_text_for_embedding, strip_wikilinks
+from utils import bucket_text_for_embedding, normalize_scene_cues, strip_wikilinks
 
 logger = logging.getLogger("ombre_brain.reflection")
 
@@ -73,11 +74,12 @@ DAILY_CHAT_MEMORY_WORD_MAP_BLOCK_TERMS = {
 
 
 CLASSIFY_PROMPT = """你是 Ombre-Brain 的记忆关系整理器。
-输入是一条新记忆和若干旧记忆候选。请只根据文本中能看见的内容，给新记忆补轻量分类和关系边。
+输入是一条新记忆和若干旧记忆候选。请只根据文本中能看见的内容，给新记忆补轻量检索标签。禁止改写、摘要或补写记忆正文。
 
 输出纯 JSON：
 {
   "tags": ["commitment", "todo", "wish", "relationship_event", "project_event", "emotional_echo"],
+  "scene_cues": ["未来可能用来想起这个场景的短语", "另一种自然说法"],
   "importance": 6,
   "confidence": 0.72,
   "edges": [
@@ -92,6 +94,7 @@ CLASSIFY_PROMPT = """你是 Ombre-Brain 的记忆关系整理器。
 
 规则：
 - tags 最多 5 个，只用确实匹配的标签。
+- scene_cues 写 3～6 个自然、具体、可从原文得到证据的召回入口；可以换一种说法，但不能添加原文没有的人物、事实、原因或结论。不要只写“以前、开心、难过、关系、对话”这类泛词。
 - relation_type 只能用 triggers / causes / precedes / context_of / same_event / updates / next_context / previous_context / reflects_on / evidenced_by / contradicts / supports / promises / blocks / belongs_to / emotional_echo / relates_to。
 - same_event 用于同一事件、同一场景或同一句暗号的两条记忆；context_of 用于候选旧记忆给新记忆提供前情；precedes 用于候选旧记忆在时间上早于新记忆；reflects_on 用于事后反思；evidenced_by 用于证据来源。
 - edges 最多 3 条，target_memory_id 必须来自候选旧记忆。
@@ -522,6 +525,7 @@ class ReflectionEngine:
             cfg.get("daily_chat_memory_pending_path")
             or os.path.join(state_dir, "daily_chat_memory_candidates.json")
         )
+        self.metadata_proposals = MetadataProposalStore(config)
 
         self.client = None
         if self.enabled and self.api_key and self.base_url:
@@ -650,14 +654,26 @@ class ReflectionEngine:
         meta = bucket.get("metadata", {})
         if meta.get("type") == "feel":
             return {"status": "skipped_feel", "id": bucket_id}
+        authored_scene = meta.get("memory_value_source") == "authored_scene"
 
-        candidates = await self._candidate_buckets(bucket, bucket_mgr, embedding_engine)
+        candidates = [] if authored_scene else await self._candidate_buckets(bucket, bucket_mgr, embedding_engine)
         if self.client:
             result = await self._api_classify(bucket, candidates)
         else:
             result = self._heuristic_classify(bucket)
 
         tags = self._string_list(result.get("tags"), limit=8)
+        if authored_scene:
+            tags = [
+                tag
+                for tag in tags
+                if str(tag).strip().lower()
+                not in {"emotional_echo", "affect_anchor", "emotion", "mood"}
+            ]
+        existing_scene_cues = normalize_scene_cues(meta.get("scene_cues"))
+        scene_cues = normalize_scene_cues(
+            [*existing_scene_cues, *normalize_scene_cues(result.get("scene_cues"))]
+        )
         confidence = self._clamp(result.get("confidence", 0.55))
         importance = self._int_between(result.get("importance"), meta.get("importance", 5))
         if self._has_favorite_tag(tags) and not self._has_favorite_reason(bucket.get("content", "")):
@@ -666,38 +682,29 @@ class ReflectionEngine:
                 "Rejected favorite tags without reason during enrich / enrich 拒绝缺少喜欢原因的 favorite 标签: %s",
                 bucket_id,
             )
-        merged_tags = list(dict.fromkeys(list(meta.get("tags", [])) + tags))
-        updates: dict[str, Any] = {}
-        if tags:
-            if merged_tags != meta.get("tags", []):
-                updates["tags"] = merged_tags[:24]
-        if importance > int(meta.get("importance", 5)):
-            updates["importance"] = importance
-        if confidence > float(meta.get("confidence", 0.0) or 0.0):
-            updates["confidence"] = confidence
-
-        if updates:
-            updates["last_active"] = meta.get("last_active") or meta.get("created")
-            await bucket_mgr.update(bucket_id, **updates)
-            if "content" in updates and embedding_engine and getattr(embedding_engine, "enabled", False):
-                try:
-                    updated_bucket = await bucket_mgr.get(bucket_id)
-                    if updated_bucket:
-                        await embedding_engine.generate_and_store(
-                            bucket_id,
-                            bucket_text_for_embedding(updated_bucket),
-                        )
-                except Exception as exc:
-                    logger.warning("Memory affect anchor embedding refresh failed for %s: %s", bucket_id, exc)
-
-        edges = self._edges_from_classification(bucket, candidates, result, confidence)
-        saved_edges = edge_store.add_edges(edges[:3])
-        return {
-            "status": "ok",
-            "id": bucket_id,
+        edges = [] if authored_scene else self._edges_from_classification(bucket, candidates, result, confidence)
+        payload = {
             "tags": tags,
+            "scene_cues": scene_cues if authored_scene else [],
+            "importance": importance,
             "confidence": confidence,
-            "edges": len(saved_edges),
+            "edges": edges[:3],
+            "authored_scene": authored_scene,
+        }
+        proposal = self.metadata_proposals.put(
+            bucket,
+            payload,
+            model=self.model if self.client else "heuristic",
+        )
+        return {
+            "status": "proposed",
+            "id": bucket_id,
+            "proposal_id": proposal.get("proposal_id"),
+            "tags": tags,
+            "scene_cues": scene_cues if authored_scene else [],
+            "confidence": confidence,
+            "edges": len(edges[:3]),
+            "canonical_memory_changed": False,
         }
 
     async def backfill_edges_for_bucket(
