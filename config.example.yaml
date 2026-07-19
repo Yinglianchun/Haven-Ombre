@@ -402,7 +402,7 @@ gateway:
   favorite_memory_max_cards: 1
   related_memory_budget: 220
   core_memory_interval_rounds: 0
-  current_inner_state_interval_rounds: 0
+  current_inner_state_interval_rounds: 6 # at most once per 6 rounds; empty when no clear recent change
   relationship_weather_interval_rounds: 0
   favorite_memory_interval_rounds: 0
   word_map_hint_enabled: false       # true lets derived Word Map add weak recall candidates; still gated by RecallPolicy
@@ -567,8 +567,8 @@ memory_relevance:
   section_hints: {}
 
 # --- Persona State Engine / 人格状态引擎 ---
-# Tracks slow personality drift, relationship state, and per-session affect.
-# 追踪缓慢人格变化、关系状态，以及按会话保存的短期情绪。
+# Tracks relationship state and per-session affect. Personality drift is retired.
+# 追踪关系状态，以及按会话保存的短期情绪；不再数值化人格变化。
 persona:
   enabled: true
   profile_id: "main_profile"
@@ -583,26 +583,30 @@ persona:
   max_tokens: 500
   global_decay_hours: 168
   session_mood_half_life_minutes: 90
-  max_personality_delta: 0.01
   max_relationship_delta: 0.03
   max_affect_delta: 0.18
   # Recent Persona Events is a sparse log, not a per-message transcript.
-  # Strong relationship/personality/affect signals write immediately; ordinary turns batch.
+  # Evaluate numeric state once per N successful Gateway rounds.
+  evaluation_interval_rounds: 3
+  state_change_window_rounds: 15
+  state_change_min_abs: 0.08       # inject only the single strongest meaningful change
+  # Strong relationship/affect signals write immediately; ordinary evaluated turns batch.
   # Turn this off to keep evaluating numeric state without writing persona_events.
   event_recording_enabled: true
-  event_batch_size: 2
+  event_batch_size: 1             # one event opportunity per 3-round evaluation
   event_affect_total_threshold: 0.45
   event_affect_single_threshold: 0.14
   event_similarity_threshold: 0.82
   event_force_after_minutes: 30
   event_excerpt_chars: 220          # short evidence snippets for future date traces, not full transcripts
   evaluation_context_turns: 3       # previous same-session turns sent to the post-reply Persona evaluator
-  initial_personality:
-    openness: 0.56
-    conscientiousness: 0.50
-    extraversion: 0.44
-    agreeableness: 0.66
-    neuroticism: 0.36
+  # Optional pre-reply conflict scout. It is read-only and fail-soft: on a
+  # confident conflict/withdrawal signal it injects one private anti-retreat
+  # reminder, never a reply script or an action decision.
+  conflict_nudge_enabled: false
+  conflict_nudge_context_turns: 3
+  conflict_nudge_min_confidence: 0.55
+  conflict_nudge_timeout_seconds: 4
   initial_relationship:
     affinity: 0.86
     dominance: 0.38
@@ -616,6 +620,7 @@ persona:
     longing: 0.34
     security: 0.68
     protective_drive: 0.52
+    libido: 0.18                 # tone temperature only; never action or consent inference
     mood_label: "warm_neutral"
     session_defensiveness: 0.12
     residue: ""

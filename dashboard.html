@@ -7860,7 +7860,6 @@ async function loadPersona(sessionId) {
 
 function renderPersona(data) {
   var state = data.state || {};
-  var personality = state.personality || {};
   var affect = state.affect || {};
   var relationship = state.relationship || {};
   var cfg = data.config || {};
@@ -7877,7 +7876,7 @@ function renderPersona(data) {
           '<div class="persona-orb" style="opacity:' + personaOrbOpacity(affect.arousal) + '"></div>' +
           '<div class="persona-mood">' +
             '<strong>' + esc(affect.mood_label || 'warm_neutral') + '</strong>' +
-            '<span>V' + personaNumber(affect.valence) + ' · A' + personaNumber(affect.arousal) + ' · session ' + esc(activeSession) + '</span>' +
+            '<span>心情 ' + personaNumber(affect.valence) + ' · 情绪能量 ' + personaNumber(affect.arousal) + ' · session ' + esc(activeSession) + '</span>' +
           '</div>' +
         '</div>' +
         '<div>' +
@@ -7895,27 +7894,18 @@ function renderPersona(data) {
         '<div class="persona-card">' +
           '<h3>Affect / Relationship</h3>' +
           '<div class="persona-meter-list">' +
-            personaMeter('情绪效价 valence', affect.valence, 'warm') +
-            personaMeter('唤醒度 arousal', affect.arousal, '') +
+            personaMeter('心情方向 valence', affect.valence, 'warm') +
+            personaMeter('情绪能量 arousal', affect.arousal, '') +
             personaMeter('温柔 tenderness', affect.tenderness, 'warm') +
             personaMeter('占有 possessiveness', affect.possessiveness, 'guard') +
             personaMeter('想念 longing', affect.longing, 'warm') +
-            personaMeter('安全 security', affect.security, 'warm') +
+            personaMeter('关系安全感 security', affect.security, 'warm') +
             personaMeter('保护 protective', affect.protective_drive, 'guard') +
+            personaMeter('欲望温度 libido', affect.libido, 'warm') +
             personaMeter('亲和 affinity', relationship.affinity, 'warm') +
             personaMeter('主导 dominance', relationship.dominance, '') +
             personaMeter('防御 defensiveness', relationship.defensiveness, 'guard') +
             personaMeter('信任 trust', relationship.trust, 'warm') +
-          '</div>' +
-        '</div>' +
-        '<div class="persona-card">' +
-          '<h3>Personality</h3>' +
-          '<div class="persona-meter-list">' +
-            personaMeter('开放 openness', personality.openness, '') +
-            personaMeter('自律 conscientiousness', personality.conscientiousness, '') +
-            personaMeter('外向 extraversion', personality.extraversion, '') +
-            personaMeter('温柔 agreeableness', personality.agreeableness, 'warm') +
-            personaMeter('敏感 neuroticism', personality.neuroticism, 'guard') +
           '</div>' +
         '</div>' +
       '</div>' +
@@ -7970,7 +7960,6 @@ function renderPersonaDeltas(ev) {
   var parts = [];
   collectPersonaDeltas(parts, 'affect', ev.affect_delta || {});
   collectPersonaDeltas(parts, 'rel', ev.relationship_delta || {});
-  collectPersonaDeltas(parts, 'trait', ev.personality_delta || {});
   if (!parts.length) return '';
   return '<div class="persona-deltas">' + parts.join('') + '</div>';
 }
