@@ -12,7 +12,10 @@ import argparse
 import asyncio
 import hashlib
 import json
+import re
 import sys
+from datetime import date as date_type
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +27,7 @@ if str(ROOT) not in sys.path:
 
 from bucket_manager import BucketManager
 from embedding_engine import EmbeddingEngine
-from utils import bucket_text_for_embedding, load_config
+from utils import bucket_text_for_embedding, load_config, now_iso
 
 
 CONFIRMATION = "APPLY_VERIFIED_SCENES"
@@ -37,6 +40,26 @@ def sha256_bytes(value: bytes) -> str:
 
 def sha256_text(value: str) -> str:
     return sha256_bytes(str(value).encode("utf-8"))
+
+
+def metadata_text(value: object) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date_type):
+        return value.isoformat()
+    return str(value or "").strip()
+
+
+def migration_event_date(metadata: dict) -> tuple[str, str]:
+    explicit = metadata_text(metadata.get("date"))
+    if explicit:
+        match = re.match(r"^\d{4}-\d{2}-\d{2}", explicit)
+        return (match.group(0) if match else explicit), "source_date"
+    created = metadata_text(metadata.get("created"))
+    match = re.match(r"^\d{4}-\d{2}-\d{2}", created)
+    if match:
+        return match.group(0), "source_created"
+    return "", ""
 
 
 def load_preview(path: Path) -> dict:
@@ -103,6 +126,9 @@ def validate_source_file(target_root: Path, result: dict) -> tuple[Path, dict]:
 
 def migration_action(target_root: Path, result: dict) -> dict:
     _, metadata = validate_source_file(target_root, result)
+    source_created = metadata_text(metadata.get("created"))
+    source_last_active = metadata_text(metadata.get("last_active")) or source_created
+    event_date, event_date_source = migration_event_date(metadata)
     raw_domain = metadata.get("domain")
     if isinstance(raw_domain, str):
         domain = [part.strip() for part in raw_domain.replace("|", ",").split(",") if part.strip()]
@@ -117,7 +143,10 @@ def migration_action(target_root: Path, result: dict) -> dict:
         "title": str(result.get("title") or metadata.get("name") or "").strip(),
         "scene_cues": [str(cue).strip() for cue in result.get("scene_cues", []) if str(cue).strip()][:4],
         "domain": domain or ["未分类"],
-        "date": str(metadata.get("date") or "").strip(),
+        "date": event_date,
+        "event_date_source": event_date_source,
+        "source_created": source_created,
+        "source_last_active": source_last_active,
         "importance": max(1, min(10, int(metadata.get("importance") or 5))),
         "source_bucket_id": str(result.get("source_bucket_id") or ""),
         "source_rel_path": str(result.get("source_rel_path") or ""),
@@ -128,6 +157,39 @@ def migration_action(target_root: Path, result: dict) -> dict:
         "content_sha256": str(result.get("content_sha256") or ""),
         "selector_model": str(result.get("model") or ""),
     }
+
+
+def sync_existing_scene_timestamps(existing: dict, action: dict) -> list[str]:
+    """Reconcile migration timestamps without changing Scene content or identity."""
+    path = Path(str(existing.get("path") or ""))
+    if not path.is_file():
+        raise FileNotFoundError(f"existing Scene file missing: {action['scene_id']}")
+    post = frontmatter.load(path)
+    existing_meta = dict(post.metadata)
+    imported_at = metadata_text(existing_meta.get("migration_imported_at"))
+    if not imported_at:
+        imported_at = metadata_text(existing_meta.get("created")) or now_iso()
+    desired = {
+        "created": action.get("source_created") or None,
+        "last_active": action.get("source_last_active") or action.get("source_created") or None,
+        "date": action.get("date") or None,
+        "migration_source_created": action.get("source_created") or None,
+        "migration_source_last_active": action.get("source_last_active") or None,
+        "migration_event_date_source": action.get("event_date_source") or None,
+        "migration_imported_at": imported_at,
+    }
+    changed: list[str] = []
+    for key, value in desired.items():
+        if value is None or metadata_text(post.get(key)) == metadata_text(value):
+            continue
+        post[key] = value
+        changed.append(key)
+    if not changed:
+        return []
+    post["updated_at"] = now_iso()
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write(frontmatter.dumps(post))
+    return changed
 
 
 async def apply_actions(
@@ -151,15 +213,18 @@ async def apply_actions(
             )
             if not same:
                 raise RuntimeError(f"existing Scene conflicts with import: {action['scene_id']}")
+            changed_fields = sync_existing_scene_timestamps(existing, action)
             results.append(
                 {
                     "candidate_id": action["candidate_id"],
                     "scene_id": action["scene_id"],
-                    "status": "already_present",
+                    "status": "metadata_synced" if changed_fields else "already_present",
+                    "metadata_changed": changed_fields,
                     "embedding_refreshed": False,
                 }
             )
             continue
+        imported_at = now_iso()
         await bucket_mgr.create(
             content=action["content"],
             tags=[],
@@ -169,6 +234,9 @@ async def apply_actions(
             bucket_id=action["scene_id"],
             source="scene_migration",
             date=action["date"] or None,
+            created=action["source_created"] or None,
+            last_active=action["source_last_active"] or action["source_created"] or None,
+            updated_at=imported_at,
             extra_metadata={
                 "memory_value_source": "authored_scene",
                 "write_contract": "scene-migration-v1",
@@ -183,6 +251,10 @@ async def apply_actions(
                 "migration_source_text_sha256": action["source_text_sha256"],
                 "migration_content_sha256": action["content_sha256"],
                 "migration_selector_model": action["selector_model"],
+                "migration_source_created": action["source_created"] or None,
+                "migration_source_last_active": action["source_last_active"] or None,
+                "migration_event_date_source": action["event_date_source"] or None,
+                "migration_imported_at": imported_at,
             },
         )
         embedding_refreshed = False
