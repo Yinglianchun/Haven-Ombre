@@ -275,6 +275,13 @@ def _bucket_type(metadata: dict) -> str:
     return "permanent" if str(metadata.get("type") or "").strip().lower() == "permanent" else "dynamic"
 
 
+def _activation_count(metadata: dict) -> float:
+    try:
+        return max(0.0, float(metadata.get("activation_count") or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def scene_id_for(source_bucket_id: str, content_sha256: str) -> str:
     identity = f"{source_bucket_id}|{RULE_VERSION}|{content_sha256}"
     return "scene_mig2_" + sha256_text(identity)[:20]
@@ -355,6 +362,7 @@ def build_plan(root: Path) -> dict[str, Any]:
                     "event_date_source": event_date_source,
                     "source_created": source_created,
                     "source_last_active": source_last_active,
+                    "source_activation_count": _activation_count(metadata),
                     "provenance": provenance,
                 }
             )
@@ -376,6 +384,7 @@ def build_plan(root: Path) -> dict[str, Any]:
             "content_sha256": item["content_sha256"],
             "selection_rule": item["selection_rule"],
             "source_spans": item["source_spans"],
+            "source_activation_count": item["source_activation_count"],
         }
         for item in actions
     ]
@@ -441,6 +450,7 @@ def _scene_extra_metadata(action: dict[str, Any], imported_at: str, reviewed_by:
         "migration_source_tags": action["source_tags"] or None,
         "migration_source_created": action["source_created"] or None,
         "migration_source_last_active": action["source_last_active"] or None,
+        "migration_source_activation_count": action["source_activation_count"],
         "migration_event_date_source": action["event_date_source"] or None,
         "migration_imported_at": imported_at,
     }
@@ -507,6 +517,25 @@ async def apply_plan(
                     or str(existing_meta.get("migration_source_bucket_id") or "") != action["source_bucket_id"]
                 ):
                     raise RuntimeError(f"existing Scene conflicts with import: {action['scene_id']}")
+                auto_decay_repair = bool(
+                    str(existing_meta.get("type") or "") == "archived"
+                    and str(existing_meta.get("migration_import_version") or "") == IMPORT_VERSION
+                    and _activation_count(existing_meta) == 0.0
+                    and float(action["source_activation_count"]) > 0.0
+                    and not existing_meta.get("resolved")
+                    and not existing_meta.get("digested")
+                    and not existing_meta.get("deprecated")
+                )
+                if auto_decay_repair:
+                    if not await bucket_mgr.activate(action["scene_id"]):
+                        raise RuntimeError(f"failed to restore prematurely decayed Scene: {action['scene_id']}")
+                    existing = await bucket_mgr.get(action["scene_id"])
+                    if not existing:
+                        raise RuntimeError(f"restored Scene is not readable: {action['scene_id']}")
+                    existing_meta = (
+                        existing.get("metadata", {}) if isinstance(existing.get("metadata"), dict) else {}
+                    )
+                    existing_by_id[action["scene_id"]] = existing
                 intentionally_retired = bool(
                     str(existing_meta.get("type") or "") == "archived"
                     or existing_meta.get("resolved")
@@ -525,7 +554,7 @@ async def apply_plan(
                         }
                     )
                     continue
-                status = "already_present"
+                status = "auto_decay_repaired" if auto_decay_repair else "already_present"
             else:
                 imported_at = now_iso()
                 await bucket_mgr.create(
@@ -588,6 +617,7 @@ async def apply_plan(
                         "active": True,
                         "deprecated": False,
                         "resolved": False,
+                        "activation_count": action["source_activation_count"],
                         "migration_embedding_failed": None,
                     },
                 )
