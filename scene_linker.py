@@ -56,6 +56,25 @@ def _scene_edge_id(source_scene_id: str, target_scene_id: str, relation_type: st
     return "scene_rel_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
 
 
+def _scene_edge_snapshot_hashes(
+    source_scene_id: str,
+    target_scene_id: str,
+    relation_type: str,
+    anchor_scene_id: str,
+    anchor_hash: str,
+    candidate_hash: str,
+) -> tuple[str, str]:
+    source = str(source_scene_id or "").strip()
+    target = str(target_scene_id or "").strip()
+    relation = str(relation_type or "").strip()
+    anchor = str(anchor_scene_id or "").strip()
+    source_hash = str(anchor_hash if source == anchor else candidate_hash)
+    target_hash = str(anchor_hash if target == anchor else candidate_hash)
+    if relation in SYMMETRIC_SCENE_RELATIONS and target < source:
+        source_hash, target_hash = target_hash, source_hash
+    return source_hash, target_hash
+
+
 def _ensure_scene_edge_schema(conn: sqlite3.Connection) -> None:
     """Keep reviewed Scene relations separate from the legacy JSONL graph."""
     conn.execute(
@@ -421,6 +440,7 @@ class SceneEdgeProposalStore:
                 candidate_hash TEXT NOT NULL,
                 model TEXT NOT NULL,
                 linker_version TEXT NOT NULL,
+                canonical_edge_id TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -437,6 +457,11 @@ class SceneEdgeProposalStore:
             conn.execute("ALTER TABLE scene_edge_proposals ADD COLUMN reviewed_at TEXT")
         if "reviewed_by" not in columns:
             conn.execute("ALTER TABLE scene_edge_proposals ADD COLUMN reviewed_by TEXT")
+        if "canonical_edge_id" not in columns:
+            conn.execute(
+                "ALTER TABLE scene_edge_proposals "
+                "ADD COLUMN canonical_edge_id TEXT NOT NULL DEFAULT ''"
+            )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_scene_edge_proposals_pending "
             "ON scene_edge_proposals(status, updated_at DESC)"
@@ -446,8 +471,118 @@ class SceneEdgeProposalStore:
             "ON scene_edge_proposals(anchor_scene_id, updated_at DESC)"
         )
         _ensure_scene_edge_schema(conn)
+        self._backfill_canonical_edge_ids(conn)
+        self._consolidate_pending_edges(conn)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_scene_edge_proposals_one_pending_per_edge "
+            "ON scene_edge_proposals(canonical_edge_id) "
+            "WHERE status = 'pending' AND canonical_edge_id <> ''"
+        )
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def _backfill_canonical_edge_ids(conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            """
+            SELECT proposal_id, source_scene_id, target_scene_id,
+                   relation_type, canonical_edge_id
+              FROM scene_edge_proposals
+            """
+        ).fetchall()
+        updates = []
+        for row in rows:
+            canonical_edge_id = _scene_edge_id(
+                str(row["source_scene_id"] or ""),
+                str(row["target_scene_id"] or ""),
+                str(row["relation_type"] or ""),
+            )
+            if str(row["canonical_edge_id"] or "") != canonical_edge_id:
+                updates.append((canonical_edge_id, str(row["proposal_id"])))
+        if updates:
+            conn.executemany(
+                "UPDATE scene_edge_proposals SET canonical_edge_id = ? WHERE proposal_id = ?",
+                updates,
+            )
+
+    @staticmethod
+    def _consolidate_pending_edges(conn: sqlite3.Connection) -> None:
+        """Keep one review card per formal Scene edge without rewriting decisions."""
+        now = _now_utc()
+        active_edges = {
+            str(row["edge_id"]): (
+                str(row["source_hash"] or ""),
+                str(row["target_hash"] or ""),
+            )
+            for row in conn.execute(
+                "SELECT edge_id, source_hash, target_hash FROM scene_edges WHERE active = 1"
+            ).fetchall()
+        }
+        rows = conn.execute(
+            """
+            SELECT proposal_id, canonical_edge_id,
+                   anchor_scene_id, source_scene_id, target_scene_id, relation_type,
+                   anchor_hash, candidate_hash,
+                   confidence, updated_at, created_at
+              FROM scene_edge_proposals
+             WHERE status = 'pending' AND canonical_edge_id <> ''
+            """
+        ).fetchall()
+        grouped: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["canonical_edge_id"]), []).append(row)
+
+        superseded_ids: list[str] = []
+        for canonical_edge_id, proposals in grouped.items():
+            formal_hashes = active_edges.get(canonical_edge_id)
+            if formal_hashes is not None:
+                matching_formal = [
+                    row
+                    for row in proposals
+                    if _scene_edge_snapshot_hashes(
+                        str(row["source_scene_id"] or ""),
+                        str(row["target_scene_id"] or ""),
+                        str(row["relation_type"] or ""),
+                        str(row["anchor_scene_id"] or ""),
+                        str(row["anchor_hash"] or ""),
+                        str(row["candidate_hash"] or ""),
+                    )
+                    == formal_hashes
+                ]
+                matching_ids = {
+                    str(row["proposal_id"]) for row in matching_formal
+                }
+                superseded_ids.extend(matching_ids)
+                proposals = [
+                    row
+                    for row in proposals
+                    if str(row["proposal_id"]) not in matching_ids
+                ]
+            if len(proposals) <= 1:
+                continue
+            keep = max(
+                proposals,
+                key=lambda row: (
+                    float(row["confidence"] or 0.0),
+                    str(row["updated_at"] or ""),
+                    str(row["created_at"] or ""),
+                    str(row["proposal_id"] or ""),
+                ),
+            )
+            superseded_ids.extend(
+                str(row["proposal_id"])
+                for row in proposals
+                if str(row["proposal_id"]) != str(keep["proposal_id"])
+            )
+        if superseded_ids:
+            conn.executemany(
+                """
+                UPDATE scene_edge_proposals
+                   SET status = 'superseded', updated_at = ?
+                 WHERE proposal_id = ? AND status = 'pending'
+                """,
+                [(now, proposal_id) for proposal_id in superseded_ids],
+            )
 
     @staticmethod
     def _row(row: sqlite3.Row | None) -> dict | None:
@@ -486,13 +621,101 @@ class SceneEdgeProposalStore:
             if not candidate:
                 continue
             candidate_hash = _scene_hash(candidate)
+            source_scene_id = str(edge.get("source_scene_id") or "").strip()
+            target_scene_id = str(edge.get("target_scene_id") or "").strip()
+            relation_type = str(edge.get("relation_type") or "").strip()
+            canonical_edge_id = _scene_edge_id(
+                source_scene_id,
+                target_scene_id,
+                relation_type,
+            )
+            source_hash, target_hash = _scene_edge_snapshot_hashes(
+                source_scene_id,
+                target_scene_id,
+                relation_type,
+                anchor_id,
+                anchor_hash,
+                candidate_hash,
+            )
+            formal_edge = conn.execute(
+                """
+                SELECT source_hash, target_hash
+                  FROM scene_edges
+                 WHERE edge_id = ? AND active = 1
+                """,
+                (canonical_edge_id,),
+            ).fetchone()
+            if formal_edge is not None and (
+                str(formal_edge["source_hash"] or ""),
+                str(formal_edge["target_hash"] or ""),
+            ) == (source_hash, target_hash):
+                conn.execute(
+                    """
+                    UPDATE scene_edge_proposals
+                       SET status = 'superseded', updated_at = ?
+                     WHERE canonical_edge_id = ? AND status = 'pending'
+                    """,
+                    (now, canonical_edge_id),
+                )
+                continue
+
+            confidence = float(edge["confidence"])
+            existing = conn.execute(
+                """
+                SELECT * FROM scene_edge_proposals
+                 WHERE canonical_edge_id = ? AND status = 'pending'
+                 ORDER BY confidence DESC, updated_at DESC
+                 LIMIT 1
+                """,
+                (canonical_edge_id,),
+            ).fetchone()
+            if existing is not None:
+                proposal_id = str(existing["proposal_id"])
+                if confidence > float(existing["confidence"] or 0.0):
+                    conn.execute(
+                        """
+                        UPDATE scene_edge_proposals
+                           SET anchor_scene_id = ?, candidate_scene_id = ?,
+                               source_scene_id = ?, target_scene_id = ?,
+                               relation_type = ?, directionality = ?,
+                               confidence = ?, reason = ?,
+                               source_evidence = ?, target_evidence = ?,
+                               anchor_hash = ?, candidate_hash = ?,
+                               model = ?, linker_version = ?,
+                               canonical_edge_id = ?, updated_at = ?
+                         WHERE proposal_id = ? AND status = 'pending'
+                        """,
+                        (
+                            anchor_id,
+                            candidate_id,
+                            source_scene_id,
+                            target_scene_id,
+                            relation_type,
+                            str(edge["directionality"]),
+                            confidence,
+                            str(edge["reason"]),
+                            str(edge["source_evidence"]),
+                            str(edge["target_evidence"]),
+                            anchor_hash,
+                            candidate_hash,
+                            model_name,
+                            version,
+                            canonical_edge_id,
+                            now,
+                            proposal_id,
+                        ),
+                    )
+                if proposal_id not in proposal_ids:
+                    proposal_ids.append(proposal_id)
+                continue
+
             identity = json.dumps(
                 {
                     "anchor": anchor_id,
                     "candidate": candidate_id,
-                    "source": edge.get("source_scene_id"),
-                    "target": edge.get("target_scene_id"),
-                    "relation": edge.get("relation_type"),
+                    "source": source_scene_id,
+                    "target": target_scene_id,
+                    "relation": relation_type,
                     "directionality": edge.get("directionality"),
                     "anchor_hash": anchor_hash,
                     "candidate_hash": candidate_hash,
@@ -504,7 +727,8 @@ class SceneEdgeProposalStore:
                 separators=(",", ":"),
             )
             proposal_id = "scene_edge_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
-            proposal_ids.append(proposal_id)
+            if proposal_id not in proposal_ids:
+                proposal_ids.append(proposal_id)
             conn.execute(
                 """
                 INSERT INTO scene_edge_proposals (
@@ -512,13 +736,24 @@ class SceneEdgeProposalStore:
                     source_scene_id, target_scene_id, relation_type, directionality,
                     confidence, reason, source_evidence, target_evidence,
                     anchor_hash, candidate_hash, model, linker_version,
-                    status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                    canonical_edge_id, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
                 ON CONFLICT(proposal_id) DO UPDATE SET
+                    anchor_scene_id = excluded.anchor_scene_id,
+                    candidate_scene_id = excluded.candidate_scene_id,
+                    source_scene_id = excluded.source_scene_id,
+                    target_scene_id = excluded.target_scene_id,
+                    relation_type = excluded.relation_type,
+                    directionality = excluded.directionality,
                     confidence = excluded.confidence,
                     reason = excluded.reason,
                     source_evidence = excluded.source_evidence,
                     target_evidence = excluded.target_evidence,
+                    anchor_hash = excluded.anchor_hash,
+                    candidate_hash = excluded.candidate_hash,
+                    model = excluded.model,
+                    linker_version = excluded.linker_version,
+                    canonical_edge_id = excluded.canonical_edge_id,
                     status = CASE
                         WHEN scene_edge_proposals.status IN ('accepted', 'rejected')
                         THEN scene_edge_proposals.status
@@ -530,11 +765,11 @@ class SceneEdgeProposalStore:
                     proposal_id,
                     anchor_id,
                     candidate_id,
-                    edge["source_scene_id"],
-                    edge["target_scene_id"],
-                    edge["relation_type"],
+                    source_scene_id,
+                    target_scene_id,
+                    relation_type,
                     edge["directionality"],
-                    float(edge["confidence"]),
+                    confidence,
                     str(edge["reason"]),
                     str(edge["source_evidence"]),
                     str(edge["target_evidence"]),
@@ -542,6 +777,7 @@ class SceneEdgeProposalStore:
                     candidate_hash,
                     model_name,
                     version,
+                    canonical_edge_id,
                     now,
                     now,
                 ),
@@ -744,6 +980,16 @@ class SceneEdgeProposalStore:
             if int(updated.rowcount or 0) != 1:
                 conn.rollback()
                 return None
+            conn.execute(
+                """
+                UPDATE scene_edge_proposals
+                   SET status = 'superseded', updated_at = ?
+                 WHERE canonical_edge_id = ?
+                   AND proposal_id <> ?
+                   AND status = 'pending'
+                """,
+                (now, edge_id, normalized),
+            )
             conn.commit()
             edge_row = conn.execute(
                 "SELECT * FROM scene_edges WHERE edge_id = ?",
