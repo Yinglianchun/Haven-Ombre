@@ -2861,7 +2861,9 @@ class GatewayService:
                     "format_recent_change_block",
                     None,
                 )
-                if callable(recent_change_formatter):
+                if conflict_nudge:
+                    conflict_nudge_debug["persona_change_suppressed"] = True
+                elif callable(recent_change_formatter):
                     persona_block = recent_change_formatter(session_id)
                 else:
                     persona_block = self.persona_engine.format_state_block(persona_state)
