@@ -1490,6 +1490,97 @@
     line-height: 1.6;
     text-align: center;
   }
+  .proposal-review-shell {
+    width: min(100%, 1040px);
+    margin: 0 auto;
+    display: grid;
+    gap: 18px;
+  }
+  .proposal-review-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 24px;
+  }
+  .proposal-review-header h2 {
+    color: var(--accent);
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 28px;
+    font-weight: 600;
+    line-height: 1.2;
+  }
+  .proposal-review-header p {
+    max-width: 62ch;
+    margin-top: 5px;
+    color: var(--text-dim);
+    font-size: 13px;
+  }
+  .proposal-review-status,
+  .proposal-review-queue {
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: var(--surface);
+    box-shadow: 4px 5px 14px rgba(105, 88, 63, 0.07);
+  }
+  .proposal-review-status.scene-linker-status {
+    padding: 16px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .proposal-review-queue {
+    overflow: hidden;
+  }
+  .proposal-review-queue-head {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 16px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .proposal-review-queue-head h3 {
+    color: var(--text);
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .proposal-review-queue-head p {
+    margin-top: 3px;
+    color: var(--text-light);
+    font-size: 11px;
+  }
+  .proposal-review-queue-head .scene-proposal-toolbar {
+    flex: 0 0 auto;
+    padding: 0;
+    border-bottom: 0;
+  }
+  .proposal-review-page .scene-proposal-list {
+    max-height: none;
+    overflow: visible;
+    padding: 14px 16px 18px;
+  }
+  .proposal-review-page .scene-proposal-card {
+    padding: 16px 17px;
+    background: rgba(255, 255, 255, 0.3);
+  }
+  .scene-proposal-meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    margin-top: 4px;
+    color: var(--text-light);
+    font-size: 10px;
+    line-height: 1.45;
+  }
+  .scene-model-details {
+    color: var(--text-light);
+    font-size: 11px;
+  }
+  .scene-model-details summary {
+    cursor: pointer;
+    color: var(--text-dim);
+  }
+  .scene-model-details .scene-model-pool {
+    margin-top: 8px;
+  }
 
   .persona-shell {
     max-width: 1120px;
@@ -3085,13 +3176,16 @@
     .word-map-toolbar { align-items: flex-start; flex-direction: column; }
     .word-map-actions { justify-content: flex-start; }
     .word-map-grid { grid-template-columns: 1fr; }
-    .network-workspace { grid-template-columns: 1fr; }
-    .scene-linker-panel {
-      position: static;
-      max-height: none;
+    .proposal-review-header,
+    .proposal-review-queue-head {
+      align-items: flex-start;
+      flex-direction: column;
     }
-    .scene-proposal-list { max-height: 520px; }
-    #network-canvas { height: min(62vh, 620px); }
+    .proposal-review-queue-head .scene-proposal-toolbar {
+      width: 100%;
+    }
+    .scene-linker-state-line { align-items: flex-start; flex-direction: column; }
+    .scene-linker-stats { grid-template-columns: repeat(3, minmax(74px, 1fr)); }
     .reflection-toolbar { align-items: flex-start; flex-direction: column; }
     .reflection-board { grid-template-columns: 1fr; }
     .reflection-day-panel { height: auto; max-height: none; }
@@ -3127,7 +3221,7 @@
   <div class="tab" data-tab="persona">Persona</div>
   <div class="tab" data-tab="profile">画像</div>
   <div class="tab" data-tab="word-map">词图</div>
-  <div class="tab" data-tab="network">记忆网络</div>
+  <div class="tab" data-tab="proposals">关系提案</div>
   <div class="tab" data-tab="config">配置</div>
   <div class="tab" data-tab="upstream-config">上游模型</div>
   <div class="tab" data-tab="model-config">模型配置</div>
@@ -3681,44 +3775,38 @@
   </div>
 </div>
 
-<div class="content" id="network-view" style="display:none">
-  <div class="network-workspace">
-    <aside class="scene-linker-panel" aria-label="Scene linker 提案审核">
-      <div class="scene-linker-head">
+<div class="content proposal-review-page" id="proposal-view" style="display:none">
+  <div class="proposal-review-shell">
+    <header class="proposal-review-header">
+      <div>
+        <h2>关系提案</h2>
+        <p>这里只放模型找到的关系候选。接受后才会进入正式关系，拒绝不会修改记忆正文。</p>
+      </div>
+      <button type="button" class="scene-linker-refresh" onclick="loadSceneLinkerPanel()">刷新</button>
+    </header>
+    <section class="scene-linker-status proposal-review-status" id="scene-linker-status" aria-label="关系提案状态">
+      <div class="loading">读取提案状态…</div>
+    </section>
+    <section class="proposal-review-queue" aria-label="关系提案列表">
+      <div class="proposal-review-queue-head">
         <div>
-          <div class="scene-linker-kicker">Scene linker</div>
-          <h2>边提案审核</h2>
+          <h3>待我判断</h3>
+          <p>每次只处理一条，已经做出的选择不会被后台重写。</p>
         </div>
-        <button type="button" class="scene-linker-refresh" onclick="loadSceneLinkerPanel()">刷新</button>
-      </div>
-      <div class="scene-linker-status" id="scene-linker-status">
-        <div class="loading">读取 linker 状态…</div>
-      </div>
-      <div class="scene-proposal-toolbar">
-        <select id="scene-proposal-status" aria-label="提案状态" onchange="loadSceneLinkerPanel()">
-          <option value="pending">待审核</option>
-          <option value="accepted">已接受</option>
-          <option value="rejected">已拒绝</option>
-          <option value="superseded">已失效</option>
-          <option value="all">全部</option>
-        </select>
-        <span class="scene-proposal-count" id="scene-proposal-count">—</span>
+        <div class="scene-proposal-toolbar">
+          <select id="scene-proposal-status" aria-label="提案状态" onchange="loadSceneLinkerPanel()">
+            <option value="pending">待审核</option>
+            <option value="accepted">已接受</option>
+            <option value="rejected">已拒绝</option>
+            <option value="superseded">已失效</option>
+            <option value="all">全部</option>
+          </select>
+          <span class="scene-proposal-count" id="scene-proposal-count">读取中</span>
+        </div>
       </div>
       <div class="scene-proposal-message" id="scene-proposal-message"></div>
       <div class="scene-proposal-list" id="scene-proposal-list">
         <div class="loading">读取提案…</div>
-      </div>
-    </aside>
-    <section class="network-main" aria-label="记忆网络图">
-      <div class="network-legend">
-        <div class="legend-item"><span class="legend-dot" style="background:#2F4F4F"></span> dynamic</div>
-        <div class="legend-item"><span class="legend-dot" style="background:#9A7B4F"></span> permanent</div>
-        <div class="legend-item"><span class="legend-dot" style="background:#8B6A6A"></span> feel</div>
-        <div class="legend-item"><span class="legend-dot" style="background:#B0A590"></span> archived</div>
-      </div>
-      <div class="network-stage">
-        <canvas id="network-canvas"></canvas>
-        <div id="network-popover" class="network-popover" hidden></div>
       </div>
     </section>
   </div>
@@ -4291,7 +4379,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.getElementById('persona-view').style.display = target === 'persona' ? '' : 'none';
     document.getElementById('profile-view').style.display = target === 'profile' ? '' : 'none';
     document.getElementById('word-map-view').style.display = target === 'word-map' ? '' : 'none';
-    document.getElementById('network-view').style.display = target === 'network' ? '' : 'none';
+    document.getElementById('proposal-view').style.display = target === 'proposals' ? '' : 'none';
     document.getElementById('config-view').style.display = target === 'config' ? '' : 'none';
     document.getElementById('upstream-config-view').style.display = target === 'upstream-config' ? '' : 'none';
     document.getElementById('model-config-view').style.display = target === 'model-config' ? '' : 'none';
@@ -4308,7 +4396,7 @@ document.querySelectorAll('.tab').forEach(tab => {
       loadProfileFacts();
     }
     if (target === 'word-map') loadWordMap();
-    if (target === 'network') loadNetwork();
+    if (target === 'proposals') loadSceneLinkerPanel();
     if (target === 'config') loadConfig();
     if (target === 'upstream-config') loadConfig();
     if (target === 'model-config') loadConfig();
@@ -7160,8 +7248,8 @@ function sceneLinkerState(status) {
   var readyCount = Array.isArray(status.ready_models) ? status.ready_models.length : 0;
   if (!status.enabled) return { label: '已关闭', className: 'offline' };
   if (!readyCount) return { label: '没有可用模型', className: 'offline' };
-  if (!status.auto_enabled) return { label: '已就绪 · 自动运行关闭', className: 'idle' };
-  return { label: '运行中 · proposal only', className: '' };
+  if (!status.auto_enabled) return { label: '可以使用，自动生成已关闭', className: 'idle' };
+  return { label: '可以生成新提案', className: '' };
 }
 
 function renderSceneLinkerStatus(status) {
@@ -7193,14 +7281,14 @@ function renderSceneLinkerStatus(status) {
   container.innerHTML =
     '<div class="scene-linker-state-line">' +
       '<span class="scene-linker-state ' + state.className + '">' + esc(state.label) + '</span>' +
-      '<span class="scene-linker-boundary">不改正文 · 审核后写独立 Scene 图 · ' + Number(sceneEdgeStats.active || 0) + ' 条正式边</span>' +
+      '<span class="scene-linker-boundary">只提议，不改正文。当前有 ' + Number(sceneEdgeStats.active || 0) + ' 条正式关系</span>' +
     '</div>' +
     '<div class="scene-linker-stats">' +
       '<div class="scene-linker-stat"><b>' + Number(stats.pending || 0) + '</b><span>待审核</span></div>' +
       '<div class="scene-linker-stat"><b>' + Number(stats.accepted || 0) + '</b><span>已接受</span></div>' +
       '<div class="scene-linker-stat"><b>' + Number(stats.rejected || 0) + '</b><span>已拒绝</span></div>' +
     '</div>' +
-    '<div class="scene-model-pool">' + modelHtml + '</div>';
+    '<details class="scene-model-details"><summary>查看候补模型</summary><div class="scene-model-pool">' + modelHtml + '</div></details>';
 }
 
 function sceneRelationLabel(value) {
@@ -7237,7 +7325,7 @@ function renderSceneEdgeProposals(proposals, selectedStatus) {
   sceneEdgeProposals = Array.isArray(proposals) ? proposals : [];
   count.textContent = sceneEdgeProposals.length + ' 条';
   if (!sceneEdgeProposals.length) {
-    var emptyLabel = selectedStatus === 'pending' ? '没有待审核提案。Linker 可以继续在后台找关系。' : '这个状态下没有提案。';
+    var emptyLabel = selectedStatus === 'pending' ? '现在没有需要你判断的关系。' : '这个状态下没有提案。';
     list.innerHTML = '<div class="scene-proposal-empty">' + esc(emptyLabel) + '</div>';
     return;
   }
@@ -7248,18 +7336,18 @@ function renderSceneEdgeProposals(proposals, selectedStatus) {
     var ready = String(proposal.review_state || '') === 'ready';
     var isPending = String(proposal.status || '') === 'pending';
     var stateClass = ready ? '' : ' stale';
-    var stateText = ready ? '快照可审核' : '不可接受：' + String(proposal.review_state || '快照已变化');
+    var stateText = ready ? '原文未变，可以审核' : '不可接受：' + String(proposal.review_state || '原文已经变化');
     var anchorScene = proposal.anchor_scene || {};
     var candidateScene = proposal.candidate_scene || {};
     var contextHtml = (anchorScene.content || candidateScene.content) ?
-      '<details class="scene-context"><summary>查看 Scene 上下文</summary>' +
+      '<details class="scene-context"><summary>展开两段完整上下文</summary>' +
         '<div class="scene-context-body"><b>' + esc(anchorScene.name || 'anchor') + '</b>\n' + esc(clipUiText(anchorScene.content, 520)) + '</div>' +
         '<div class="scene-context-body"><b>' + esc(candidateScene.name || 'candidate') + '</b>\n' + esc(clipUiText(candidateScene.content, 520)) + '</div>' +
       '</details>' : '';
     var actionHtml = isPending ?
       '<div class="scene-proposal-actions">' +
         '<button type="button" class="reject" onclick="reviewSceneEdgeProposal(\'' + escAttr(proposal.proposal_id) + '\', \'reject\')">拒绝</button>' +
-        '<button type="button" onclick="reviewSceneEdgeProposal(\'' + escAttr(proposal.proposal_id) + '\', \'accept\')"' + (ready ? '' : ' disabled') + '>接受为正式边</button>' +
+        '<button type="button" onclick="reviewSceneEdgeProposal(\'' + escAttr(proposal.proposal_id) + '\', \'accept\')"' + (ready ? '' : ' disabled') + '>接受关系</button>' +
       '</div>' : '';
     return '<article class="scene-proposal-card">' +
       '<div class="scene-proposal-head">' +
@@ -7267,11 +7355,11 @@ function renderSceneEdgeProposals(proposals, selectedStatus) {
         '<span class="scene-proposal-confidence">' + confidence + '%</span>' +
       '</div>' +
       '<div class="scene-proposal-route">' + esc(sourceName) + ' <span aria-hidden="true">→</span> ' + esc(targetName) + '</div>' +
-      '<div class="scene-proposal-meta">' + esc(proposal.model || 'unknown model') + ' · ' + esc(formatTimeAgo(proposal.updated_at || proposal.created_at)) + ' · ' + esc(sceneProposalStatusLabel(proposal.status)) + '</div>' +
+      '<div class="scene-proposal-meta-row"><span>' + esc(proposal.model || 'unknown model') + '</span><span>' + esc(formatTimeAgo(proposal.updated_at || proposal.created_at)) + '</span><span>' + esc(sceneProposalStatusLabel(proposal.status)) + '</span></div>' +
       '<div class="scene-proposal-reason">' + esc(proposal.reason || '没有附加理由。') + '</div>' +
       '<div class="scene-evidence">' +
-        '<div><b>source</b> “' + esc(clipUiText(proposal.source_evidence, 180)) + '”</div>' +
-        '<div><b>target</b> “' + esc(clipUiText(proposal.target_evidence, 180)) + '”</div>' +
+        '<div><b>起点原句</b> “' + esc(clipUiText(proposal.source_evidence, 180)) + '”</div>' +
+        '<div><b>终点原句</b> “' + esc(clipUiText(proposal.target_evidence, 180)) + '”</div>' +
       '</div>' +
       contextHtml +
       '<div class="scene-review-state' + stateClass + '">' + esc(stateText) + '</div>' +
@@ -7333,11 +7421,7 @@ async function reviewSceneEdgeProposal(proposalId, decision) {
       throw new Error(data.error || data.status || '审核失败');
     }
     setSceneProposalMessage(accepting ? '已写入正式 Scene 边。' : '提案已拒绝。', 'ok');
-    if (accepting) {
-      await loadNetwork();
-    } else {
-      await loadSceneLinkerPanel();
-    }
+    await loadSceneLinkerPanel();
   } catch (error) {
     setSceneProposalMessage(error.message, 'error');
   }
