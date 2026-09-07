@@ -36,7 +36,7 @@ function relationDirection(edge, endpoint) {
 }
 
 function mergeLiveMemoryProjection(snapshotScenes, liveProjection, { includeSnapshotOnly = true } = {}) {
-  if (!Array.isArray(liveProjection?.scenes) || !liveProjection.scenes.length) {
+  if (!Array.isArray(liveProjection?.scenes)) {
     return snapshotScenes;
   }
 
@@ -70,7 +70,7 @@ function mergeLiveMemoryProjection(snapshotScenes, liveProjection, { includeSnap
       author: String(liveScene.author || fallback?.author || "legacy_unknown"),
       annotations: [],
       sources,
-      sourceCount: sources.length,
+      sourceCount: Number.isInteger(liveScene.evidence_count) ? liveScene.evidence_count : sources.length,
       relatedScenes: fallback?.relatedScenes || [],
       relatedSceneIds: fallback?.relatedSceneIds || [],
       relationCount: fallback?.relationCount || 0,
@@ -231,7 +231,7 @@ async function loadMemorySnapshotOnce() {
     });
     if (liveResponse.ok) {
       const payload = await liveResponse.json();
-      if (payload?.status === "ok" && Array.isArray(payload.scenes) && payload.scenes.length) {
+      if (payload?.status === "ok" && Array.isArray(payload.scenes)) {
         liveProjection = payload;
       }
     }
@@ -286,7 +286,7 @@ async function loadMemorySnapshotOnce() {
         };
       })
       .filter((scene) => scene?.id && scene?.title && Array.isArray(scene?.body));
-    if (!scenes.length) return null;
+    if (!scenes.length && liveProjection.scenes.length) return null;
 
     storeMemoryScenes(scenes);
     window.localStorage.setItem(memoryLiveCacheAtStorageKey, String(Date.now()));

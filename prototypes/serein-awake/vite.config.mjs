@@ -142,8 +142,11 @@ function parseMcpEvent(text) {
   return JSON.parse(data);
 }
 
+import { sereinConfigured, callSereinBackend, callSereinTool } from './server/sereinBackend.mjs';
+
 async function callOmbreTool(name, args) {
-  const gatewayToken = String(process.env.OMBRE_GATEWAY_TOKEN || "").trim();
+  if (sereinConfigured()) return callSereinTool(name, args);
+  const gatewayToken = String((process.env.SEREIN_GATEWAY_URL ? process.env.SEREIN_MEMORY_TOKEN : process.env.OMBRE_GATEWAY_TOKEN) || "").trim();
   const ombreBase = String(process.env.OMBRE_MEMORY_URL || "http://8.136.154.242:18001").replace(/\/$/, "");
   if (!gatewayToken) throw new Error("memory_bridge_not_configured");
 
@@ -273,6 +276,7 @@ print(json.dumps({"status": status, "payload": payload}, ensure_ascii=False))
 }
 
 async function callOmbreDashboard(path, { method = "GET", body } = {}) {
+  if (sereinConfigured()) return callSereinBackend(path, { method, body });
   const password = secretValue("OMBRE_DASHBOARD_PASSWORD");
   const ombreBase = String(process.env.OMBRE_MEMORY_URL || "http://8.136.154.242:18001").replace(/\/$/, "");
   if (!password) {
@@ -963,8 +967,8 @@ function sereinGatewayBridge() {
           return;
         }
 
-        const gatewayToken = String(process.env.OMBRE_GATEWAY_TOKEN || "").trim();
-        const gatewayBase = String(process.env.OMBRE_GATEWAY_URL || "http://8.136.154.242:18002").replace(/\/$/, "");
+        const gatewayToken = String((process.env.SEREIN_GATEWAY_URL ? process.env.SEREIN_MEMORY_TOKEN : process.env.OMBRE_GATEWAY_TOKEN) || "").trim();
+        const gatewayBase = String(process.env.SEREIN_GATEWAY_URL || process.env.OMBRE_GATEWAY_URL || "http://8.136.154.242:18002").replace(/\/$/, "");
         if (!gatewayToken) {
           response.statusCode = 503;
           response.end(JSON.stringify({
@@ -1070,8 +1074,8 @@ function sereinGatewayBridge() {
           return;
         }
 
-        const gatewayToken = String(process.env.OMBRE_GATEWAY_TOKEN || "").trim();
-        const gatewayBase = String(process.env.OMBRE_GATEWAY_URL || "http://8.136.154.242:18002").replace(/\/$/, "");
+        const gatewayToken = String((process.env.SEREIN_GATEWAY_URL ? process.env.SEREIN_MEMORY_TOKEN : process.env.OMBRE_GATEWAY_TOKEN) || "").trim();
+        const gatewayBase = String(process.env.SEREIN_GATEWAY_URL || process.env.OMBRE_GATEWAY_URL || "http://8.136.154.242:18002").replace(/\/$/, "");
         if (!gatewayToken) {
           response.statusCode = 503;
           response.end(JSON.stringify({
@@ -1118,8 +1122,8 @@ function sereinGatewayBridge() {
           return;
         }
 
-        const gatewayToken = String(process.env.OMBRE_GATEWAY_TOKEN || "").trim();
-        const gatewayBase = String(process.env.OMBRE_GATEWAY_URL || "http://8.136.154.242:18002").replace(/\/$/, "");
+        const gatewayToken = String((process.env.SEREIN_GATEWAY_URL ? process.env.SEREIN_MEMORY_TOKEN : process.env.OMBRE_GATEWAY_TOKEN) || "").trim();
+        const gatewayBase = String(process.env.SEREIN_GATEWAY_URL || process.env.OMBRE_GATEWAY_URL || "http://8.136.154.242:18002").replace(/\/$/, "");
         if (!gatewayToken) {
           response.statusCode = 503;
           response.end(JSON.stringify({

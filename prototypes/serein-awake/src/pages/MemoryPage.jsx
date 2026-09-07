@@ -336,6 +336,7 @@ function FactEventDetail({ item, onClose, onRevised, onStatusChanged, onDeleted 
             </label>
           ) : <span>不参与普通召回</span>}
           {item.status !== "active" ? <span>{item.status === "archived" ? "已归档" : "旧版本"}</span> : null}
+          {item.surface_state?.reasons?.includes("covered_by_scene") ? <span>原文已被 Scene 完整保存，当前不自动浮现</span> : null}
         </div>
         {message ? <p className={`fact-event-detail__message${state === "error" ? " is-error" : ""}`} role={state === "error" ? "alert" : "status"}>{message}</p> : null}
       </header>
@@ -1233,7 +1234,7 @@ export function MemoryPage() {
                       <span className="scene-entry__meta">
                         <span><LinkSimple size={15} weight="light" aria-hidden="true" />{factEventSourceCount(item)} 条原文</span>
                         <span>{item.item_type === "event"
-                          ? item.recallable === true ? "可自动浮现" : item.recallable === false ? "不自动浮现" : "召回资格未审核"
+                          ? item.surface_state?.reasons?.includes("covered_by_scene") ? "Scene 已覆盖，不自动浮现" : item.recallable === true ? "可自动浮现" : item.recallable === false ? "不自动浮现" : "召回资格未审核"
                           : "不参与普通召回"}</span>
                         {item.injection_count ? <span>已注入 {item.injection_count} 次</span> : null}
                       </span>

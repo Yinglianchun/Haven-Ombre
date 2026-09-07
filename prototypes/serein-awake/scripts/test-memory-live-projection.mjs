@@ -43,6 +43,7 @@ globalThis.fetch = async (url, options = {}) => {
             self_anchor: false,
             updated_at: "2026-08-10T10:00:00Z",
             content_hash: "hash-live-1",
+            evidence_count: 0,
           },
         ],
         edges: [],
@@ -65,11 +66,19 @@ assert.equal(scenes[0].storageStatus, "archived");
 assert.equal(scenes[0].storageActive, true);
 assert.equal(scenes[0].sceneStatus, "");
 assert.equal(scenes[0].statusConsistent, false);
+assert.equal(scenes[0].sourceCount, 0);
 assert.equal(scenes.some((scene) => scene.id === "first-door"), false);
 
 const cachedScenes = await loadMemorySnapshot();
 assert.equal(requests.length, 1);
 assert.equal(cachedScenes.length, 1);
 assert.equal(cachedScenes[0].id, "scene-live-1");
+
+// A successful empty canonical response is different from a network failure.
+// Deleting the final Scene must clear the cache, not revive the saved card.
+storage.set("serein.memory.live-cache-at.v1", "0");
+globalThis.fetch = async () => ({ ok: true, json: async () => ({ status: "ok", scenes: [], edges: [] }) });
+assert.deepEqual(await loadMemorySnapshot(), []);
+assert.deepEqual(JSON.parse(storage.get("serein.memory.scene-records.v1")), []);
 
 console.log("live-only memory projection checks: PASS");
